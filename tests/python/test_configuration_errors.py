@@ -171,6 +171,28 @@ def _infer(entry_point, x=_UNSET, **kwargs):
     )
 
 
+def _primitive(entry_point, x=_UNSET, params=_UNSET, model=None, **kwargs):
+    from qml_native_helpers import X, make_model
+
+    model = model or make_model()
+    kwargs.setdefault("infrastructure", "cunqa")
+    return getattr(polypus.qml, entry_point)(
+        model,
+        X if x is _UNSET else x,
+        [0.1] * model.num_params if params is _UNSET else params,
+        shots=16,
+        nodes=1,
+        cores_per_qpu=1,
+        **kwargs,
+    )
+
+
+def _amplitude_model():
+    from qml_native_helpers import make_model
+
+    return make_model(encoder=polypus.qml.Encoder(1).amplitude_encoder())
+
+
 class TestNativeQmlChecksRaiseIt:
     """The native API's own checks raise `ConfigurationError` too, before any
     backend exists. The builders (`Encoder`, `Ansatz`, `Readout`, `Dataset`,
@@ -239,6 +261,51 @@ class TestNativeQmlChecksRaiseIt:
                 "seed is not supported",
                 id="run-seed-on-qmio",
             ),
+            *[
+                case
+                for entry in ("expval", "jacobian")
+                for case in (
+                    pytest.param(
+                        lambda entry=entry: _primitive(entry, exact=True),
+                        "exact=True",
+                        id=f"{entry}-exact",
+                    ),
+                    pytest.param(
+                        lambda entry=entry: _primitive(entry, x=[[0.1, 0.2]]),
+                        None,
+                        id=f"{entry}-too-many-features",
+                    ),
+                    pytest.param(
+                        lambda entry=entry: _primitive(entry, params=[0.1]),
+                        "params has 1 values",
+                        id=f"{entry}-params-count",
+                    ),
+                    pytest.param(
+                        lambda entry=entry: _primitive(
+                            entry, params=[0.1, float("nan")]
+                        ),
+                        r"params\[1\]",
+                        id=f"{entry}-params-not-finite",
+                    ),
+                    pytest.param(
+                        lambda entry=entry: _primitive(
+                            entry, infrastructure="qmio", seed=1
+                        ),
+                        "seed is not supported",
+                        id=f"{entry}-seed-on-qmio",
+                    ),
+                )
+            ],
+            pytest.param(
+                lambda: _primitive("jacobian", wrt="theta"),
+                "unknown wrt",
+                id="jacobian-wrt",
+            ),
+            pytest.param(
+                lambda: _primitive("jacobian", model=_amplitude_model(), wrt="inputs"),
+                "amplitude encoder",
+                id="jacobian-amplitude-inputs",
+            ),
         ],
     )
     def test_before_any_cunqa_call(self, monkeypatch, call, match):
@@ -255,3 +322,21 @@ class TestNativeQmlChecksRaiseIt:
         fake = FakeCunqa().install(monkeypatch)
         _infer("predict")
         assert fake.names()[0] == "qraise"
+        for entry in ("expval", "jacobian"):
+            fake = FakeCunqa().install(monkeypatch)
+            _primitive(entry)
+            assert fake.names()[0] == "qraise"
+
+    @pytest.mark.parametrize("entry", ["expval", "jacobian"])
+    def test_a_primitive_runs_every_block_on_one_allocation(self, monkeypatch, entry):
+        # Enough rows for several blocks on this host (2 × cores rows each):
+        # still one `qraise`, every circuit on that family, and one `qdrop`.
+        import os
+
+        fake = FakeCunqa().install(monkeypatch)
+        rows = [[0.1 * (i % 30)] for i in range(6 * len(os.sched_getaffinity(0)) + 1)]
+        values = _primitive(entry, x=rows)
+        assert len(values) == len(rows)
+        names = fake.names()
+        assert names.count("qraise") == 1 and names[0] == "qraise", names
+        assert names.count("qdrop") == 1 and names[-1] == "qdrop", names

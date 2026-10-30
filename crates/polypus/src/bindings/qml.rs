@@ -12,22 +12,25 @@
 //! checked when the model meets a dataset.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use numpy::ndarray::{Array2, Array3, ShapeError};
+use numpy::{IntoPyArray, PyArray2};
 use pyo3::exceptions::{
-    PyFileNotFoundError, PyOSError, PyPermissionError, PyTypeError, PyValueError,
+    PyFileNotFoundError, PyOSError, PyPermissionError, PyRuntimeError, PyTypeError, PyValueError,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyModule};
+use pyo3::types::{PyDict, PyList, PyModule, PyTuple};
 
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 use polypus_qml::{
     AngleEncoder, CompiledModel, ConvBlock, ConvLayer, Decision, Entanglement, Entangler,
-    HardwareEfficientAnsatz, IqpEncoder, KeepRule, Layer, Loss, Observable, Pairing, Pauli,
-    PauliString, PoolBlock, PoolLayer, QmlError, QmlProblem, QuantumModel, Readout, RotationAxis,
-    ValidationError,
+    ExpectationJacobian, HardwareEfficientAnsatz, IqpEncoder, JacobianWrt, KeepRule, Layer, Loss,
+    Observable, Pairing, Pauli, PauliString, PoolBlock, PoolLayer, QmlError, QmlProblem,
+    QuantumModel, Readout, RotationAxis, ValidationError,
 };
 
 use super::callback::validate_callback;
@@ -39,12 +42,14 @@ use super::{
     validate_cunqa_allocation, validate_final_shots, validate_id, validate_method,
     validate_shots_and_qpus, OptionsArg, RunResult,
 };
-use crate::evaluation::{Label, MinibatchConfig, OracleErrorSlot, QmlOracleFactory, QmlSource};
+use crate::evaluation::{
+    candidate_window_size, Label, MinibatchConfig, OracleErrorSlot, QmlOracleFactory, QmlSource,
+};
 use crate::exceptions::configuration_error;
 use crate::infrastructure::execution_config::random_seed;
 use crate::infrastructure::{
-    BoundCircuit, Counts, ExecutionConfig, Infrastructure, InfrastructureError,
-    NativeStatevectorBackend, OptLevel,
+    BoundCircuit, CancelToken, Counts, ExecutionConfig, Infrastructure, InfrastructureError,
+    NativeStatevectorBackend, OptLevel, QuantumBackend, RunParams,
 };
 use crate::orchestration::{Resources, RunCircuitFlow, Scheduler, TrainFlow};
 
@@ -1210,6 +1215,23 @@ impl Model {
     }
 }
 
+/// One scheduler over `backend`, with its default planner, for a run that
+/// owns the backend. Should the pairing fail (`Resources::new`), the backend
+/// is closed before the error returns, so no allocation it holds (a CUNQA
+/// `qraise`) outlives the call.
+fn scheduler_over(
+    backend: Arc<dyn QuantumBackend>,
+    params: RunParams,
+) -> Result<Scheduler, InfrastructureError> {
+    match Resources::new(Arc::clone(&backend), None, Arc::new(params)) {
+        Ok(resources) => Ok(Scheduler::ephemeral(resources)),
+        Err(e) => {
+            backend.close();
+            Err(e)
+        }
+    }
+}
+
 /// The native API's backend when none is named (plan F5): the native simulator
 /// on `local`, Aer elsewhere (CUNQA's QPUs run Aer; a registry backend ignores
 /// it).
@@ -1336,7 +1358,8 @@ impl ExactResult {
     }
 }
 
-/// The execution arguments `TrainedModel.predict` and `run` share.
+/// The execution arguments `TrainedModel.predict` and `run`, and `qml.expval`
+/// and `qml.jacobian`, share.
 struct Execution<'a, 'py> {
     shots: u32,
     infrastructure: &'a str,
@@ -1350,6 +1373,69 @@ struct Execution<'a, 'py> {
     backend: Option<&'a str>,
     seed: Option<u64>,
     exact: bool,
+}
+
+impl<'a> Execution<'a, '_> {
+    /// The checks that need no data: `shots` and `n_qpus`, the CUNQA
+    /// allocation, then `exact` against the backend, which it resolves
+    /// (`backend=None` by infrastructure) and returns. Each a
+    /// `polypus.ConfigurationError`.
+    fn check(&self) -> PyResult<&'a str> {
+        validate_shots_and_qpus(self.shots, self.n_qpus)?;
+        validate_cunqa_allocation(
+            self.infrastructure,
+            self.nodes,
+            self.cores_per_qpu,
+            self.walltime.as_deref(),
+        )?;
+        let backend = resolve_backend(self.backend, self.infrastructure);
+        if self.exact && !(self.infrastructure == "local" && is_native_backend(backend)) {
+            return Err(configuration_error(
+                "exact=True needs infrastructure=\"local\" and backend=\"polypus\": only the \
+                 native simulator computes exact probabilities",
+            ));
+        }
+        Ok(backend)
+    }
+
+    /// The run's [`ExecutionConfig`] for `backend` (from [`check`](Self::check)),
+    /// with an `id` of `id_prefix` plus a UUID and the seed: `None` on `qmio`,
+    /// where an explicit one is a `polypus.ConfigurationError`, else the
+    /// explicit one or one drawn from OS entropy (C-7).
+    fn into_config(self, backend: &str, id_prefix: &str) -> PyResult<ExecutionConfig> {
+        // As in `run_quantum_circuit` (C-7): `qmio` is hardware, so a seed there
+        // would be silently ineffective.
+        let seed = if self.infrastructure == "qmio" {
+            if self.seed.is_some() {
+                return Err(configuration_error(
+                    "seed is not supported for the 'qmio' infrastructure (real quantum hardware)",
+                ));
+            }
+            None
+        } else {
+            Some(seed_or_entropy(self.seed, random_seed)?)
+        };
+        let backend_config = build_backend_config(
+            self.infrastructure,
+            backend,
+            self.sim_method,
+            self.noise_model.map(|nm| nm.unbind()),
+            self.nodes,
+            self.cores_per_qpu,
+            self.walltime.as_deref(),
+            None,
+            self.options.map(OptionsArg::into_inner),
+        )?;
+        Ok(ExecutionConfig {
+            id: unique_id(id_prefix)?,
+            shots: self.shots,
+            n_qpus: self.n_qpus,
+            infrastructure: self.infrastructure.to_string(),
+            backend_config,
+            opt_level: OptLevel::default(),
+            seed,
+        })
+    }
 }
 
 /// One run of a [`TrainedModel`] over some rows: one result per row, the
@@ -1403,20 +1489,7 @@ impl TrainedModel {
     fn run_rows(&self, x: &Bound<'_, PyAny>, exec: Execution<'_, '_>) -> PyResult<RowsRun> {
         let py = x.py();
         let start = Instant::now();
-        validate_shots_and_qpus(exec.shots, exec.n_qpus)?;
-        validate_cunqa_allocation(
-            exec.infrastructure,
-            exec.nodes,
-            exec.cores_per_qpu,
-            exec.walltime.as_deref(),
-        )?;
-        let backend = resolve_backend(exec.backend, exec.infrastructure);
-        if exec.exact && !(exec.infrastructure == "local" && is_native_backend(backend)) {
-            return Err(configuration_error(
-                "exact=True needs infrastructure=\"local\" and backend=\"polypus\": only the \
-                 native simulator computes exact probabilities",
-            ));
-        }
+        let backend = exec.check()?;
         // The labels play no part in inference.
         let (rows, _) = native_dataset(x, None)?;
         let compiled = self
@@ -1431,50 +1504,16 @@ impl TrainedModel {
                     .map_err(qml_to_config_err)
             })
             .collect::<PyResult<Vec<_>>>()?;
-        // As in `run_quantum_circuit` (C-7): `qmio` is hardware, so a seed there
-        // would be silently ineffective.
-        let seed = if exec.infrastructure == "qmio" {
-            if exec.seed.is_some() {
-                return Err(configuration_error(
-                    "seed is not supported for the 'qmio' infrastructure (real quantum hardware)",
-                ));
-            }
-            None
-        } else {
-            Some(seed_or_entropy(exec.seed, random_seed)?)
-        };
-        let backend_config = build_backend_config(
-            exec.infrastructure,
-            backend,
-            exec.sim_method,
-            exec.noise_model.map(|nm| nm.unbind()),
-            exec.nodes,
-            exec.cores_per_qpu,
-            exec.walltime.as_deref(),
-            None,
-            exec.options.map(OptionsArg::into_inner),
-        )?;
-        let id = unique_id(&format!("qml_{}_{}", exec.n_qpus, exec.infrastructure))?;
-        let config = ExecutionConfig {
-            id: id.clone(),
-            shots: exec.shots,
-            n_qpus: exec.n_qpus,
-            infrastructure: exec.infrastructure.to_string(),
-            backend_config,
-            opt_level: OptLevel::default(),
-            seed,
-        };
+        let (infrastructure, n_qpus, shots, exact) =
+            (exec.infrastructure, exec.n_qpus, exec.shots, exec.exact);
+        let config = exec.into_config(backend, &format!("qml_{n_qpus}_{infrastructure}"))?;
+        let (id, seed) = (config.id.clone(), config.seed);
         log::info!(
-            "qml inference {id} starting: rows={}, infrastructure={}, backend={backend}, \
-             n_qpus={}, shots={}, exact={}, seed={seed:?}",
+            "qml inference {id} starting: rows={}, infrastructure={infrastructure}, \
+             backend={backend}, n_qpus={n_qpus}, shots={shots}, exact={exact}, seed={seed:?}",
             circuits.len(),
-            exec.infrastructure,
-            exec.n_qpus,
-            exec.shots,
-            exec.exact
         );
-        let shots = exec.shots;
-        let results = if exec.exact {
+        let results = if exact {
             let native = NativeStatevectorBackend::new(seed.unwrap_or_default());
             let params = config.run_params();
             py.detach(|| native.run_circuits_exact(&circuits, &params))
@@ -1506,7 +1545,7 @@ impl TrainedModel {
             id,
             seed,
             backend: backend.to_string(),
-            infrastructure: exec.infrastructure.to_string(),
+            infrastructure: infrastructure.to_string(),
         })
     }
 }
@@ -1798,6 +1837,598 @@ pub fn load(path: PathBuf) -> PyResult<TrainedModel> {
     Ok(TrainedModel { inner })
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// qml.expval and qml.jacobian: the loss-free primitives
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `wrt` of `qml.jacobian`, a closed set (C-11, "Options").
+fn parse_wrt(wrt: &str) -> PyResult<JacobianWrt> {
+    match wrt {
+        "params" => Ok(JacobianWrt::Params),
+        "inputs" => Ok(JacobianWrt::Inputs),
+        "both" => Ok(JacobianWrt::Both),
+        other => Err(configuration_error(format!(
+            "unknown wrt '{other}'; expected \"params\", \"inputs\" or \"both\""
+        ))),
+    }
+}
+
+/// The results of one block, one per circuit, in the block's order.
+enum BlockResults {
+    Counts(Vec<Counts>),
+    Exact(Vec<HashMap<String, f64>>),
+}
+
+/// What runs every block of one primitive call: one backend behind one
+/// scheduler, so one connection (one `qraise` on CUNQA) for the whole call, or,
+/// with `exact=True`, the native simulator's exact path.
+enum BlockRunner {
+    Sampled {
+        scheduler: Scheduler,
+        max_concurrency: usize,
+        shots: u32,
+    },
+    Exact {
+        native: NativeStatevectorBackend,
+        params: RunParams,
+    },
+}
+
+impl BlockRunner {
+    /// One scheduler over `backend` ([`scheduler_over`], which closes the
+    /// backend if it cannot be built).
+    fn sampled(
+        backend: Arc<dyn QuantumBackend>,
+        params: RunParams,
+        shots: u32,
+    ) -> Result<Self, InfrastructureError> {
+        let max_concurrency = backend.capabilities().max_concurrency;
+        Ok(BlockRunner::Sampled {
+            scheduler: scheduler_over(backend, params)?,
+            max_concurrency,
+            shots,
+        })
+    }
+
+    /// The backend's batch-agnostic concurrency; "no limit" for the exact
+    /// path, whose parallelism is the host's.
+    fn max_concurrency(&self) -> usize {
+        match self {
+            BlockRunner::Sampled {
+                max_concurrency, ..
+            } => *max_concurrency,
+            BlockRunner::Exact { .. } => usize::MAX,
+        }
+    }
+
+    fn run(
+        &self,
+        circuits: Vec<BoundCircuit>,
+        cancel: &CancelToken,
+    ) -> Result<BlockResults, InfrastructureError> {
+        match self {
+            BlockRunner::Sampled {
+                scheduler, shots, ..
+            } => scheduler
+                .run_cancellable(
+                    RunCircuitFlow {
+                        circuits,
+                        shots: *shots,
+                    },
+                    cancel,
+                )
+                .map(BlockResults::Counts),
+            BlockRunner::Exact { native, params } => native
+                .run_circuits_exact(&circuits, params)
+                .map(BlockResults::Exact)
+                .map_err(InfrastructureError::Backend),
+        }
+    }
+
+    fn close(&self) {
+        if let BlockRunner::Sampled { scheduler, .. } = self {
+            scheduler.close();
+        }
+    }
+}
+
+/// Why a primitive call stopped once running.
+#[derive(Debug)]
+enum PrimitiveError {
+    /// The backend, a cancellation or a Ctrl+C.
+    Infrastructure(InfrastructureError),
+    /// Binding or reading a block.
+    Qml(QmlError),
+    /// A block outside the samples: a bookkeeping bug, never the caller's.
+    Internal(String),
+}
+
+impl From<QmlError> for PrimitiveError {
+    fn from(e: QmlError) -> Self {
+        PrimitiveError::Qml(e)
+    }
+}
+
+impl PrimitiveError {
+    fn into_py_err(self) -> PyErr {
+        match self {
+            PrimitiveError::Infrastructure(e) => {
+                crate::exceptions::infrastructure_error_to_pyerr(e)
+            }
+            PrimitiveError::Qml(e) => qml_to_py_err(e),
+            PrimitiveError::Internal(message) => {
+                PyRuntimeError::new_err(format!("internal error: {message}"))
+            }
+        }
+    }
+
+    fn block_out_of_range(samples: &Range<usize>, num_samples: usize) -> Self {
+        PrimitiveError::Internal(format!(
+            "block {samples:?} lies outside the {num_samples} sample(s)"
+        ))
+    }
+}
+
+/// One primitive call's state: its circuits block by block, and what it keeps
+/// from their results, appended in sample order.
+trait Primitive {
+    fn num_samples(&self) -> usize;
+    fn circuits_per_sample(&self) -> usize;
+    /// The circuits of the samples at `samples`, sample-major.
+    fn circuits(&self, samples: Range<usize>) -> Result<Vec<ConcreteCircuit>, PrimitiveError>;
+    /// Read the results of [`circuits`](Self::circuits)`(samples)`.
+    fn read(&mut self, samples: Range<usize>, results: BlockResults) -> Result<(), PrimitiveError>;
+}
+
+/// The detached part of a primitive call: create its one runner, size the
+/// blocks from the runner's concurrency (`block_size`), then run every block on
+/// it, in sample order: check for a cancellation or a Ctrl+C (as the planner
+/// does between waves; the exact path has no planner), bind the block's
+/// circuits, run them, read them and drop them before the next. Once created,
+/// the runner is closed on every path out, error and cancellation included.
+fn run_in_blocks(
+    primitive: &mut impl Primitive,
+    create: impl FnOnce() -> Result<BlockRunner, InfrastructureError>,
+    block_size: impl FnOnce(usize) -> usize,
+    cancel: &CancelToken,
+) -> Result<(), PrimitiveError> {
+    let runner = create().map_err(PrimitiveError::Infrastructure)?;
+    let block = block_size(runner.max_concurrency()).max(1);
+    log::debug!(
+        "qml primitive: {} sample(s) in blocks of {block}",
+        primitive.num_samples()
+    );
+    let outcome = run_blocks_on(&runner, primitive, block, cancel);
+    runner.close();
+    outcome
+}
+
+fn run_blocks_on(
+    runner: &BlockRunner,
+    primitive: &mut impl Primitive,
+    block: usize,
+    cancel: &CancelToken,
+) -> Result<(), PrimitiveError> {
+    let num_samples = primitive.num_samples();
+    let mut start = 0;
+    while start < num_samples {
+        if cancel.is_cancelled() {
+            return Err(PrimitiveError::Infrastructure(
+                InfrastructureError::Cancelled,
+            ));
+        }
+        cancel
+            .poll_interrupt()
+            .map_err(PrimitiveError::Infrastructure)?;
+        let end = start.saturating_add(block).min(num_samples);
+        let circuits = primitive
+            .circuits(start..end)?
+            .into_iter()
+            .map(BoundCircuit::Native)
+            .collect();
+        let results = runner
+            .run(circuits, cancel)
+            .map_err(PrimitiveError::Infrastructure)?;
+        primitive.read(start..end, results)?;
+        start = end;
+    }
+    Ok(())
+}
+
+/// `qml.expval`: one circuit per sample, every readout observable read from it.
+struct Expval {
+    compiled: CompiledModel,
+    /// One template per sample, built (and so checked) before any backend.
+    templates: Vec<ParameterizedCircuit>,
+    params: Vec<f64>,
+    /// `(num_samples, num_observables)`, row-major, filled block by block.
+    values: Vec<f64>,
+}
+
+impl Primitive for Expval {
+    fn num_samples(&self) -> usize {
+        self.templates.len()
+    }
+
+    fn circuits_per_sample(&self) -> usize {
+        1
+    }
+
+    fn circuits(&self, samples: Range<usize>) -> Result<Vec<ConcreteCircuit>, PrimitiveError> {
+        let templates = self
+            .templates
+            .get(samples.clone())
+            .ok_or_else(|| PrimitiveError::block_out_of_range(&samples, self.templates.len()))?;
+        Ok(templates
+            .iter()
+            .map(|template| template.assign_parameters(&self.params))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(QmlError::from)?)
+    }
+
+    fn read(&mut self, samples: Range<usize>, results: BlockResults) -> Result<(), PrimitiveError> {
+        let got = match &results {
+            BlockResults::Counts(counts) => counts.len(),
+            BlockResults::Exact(probabilities) => probabilities.len(),
+        };
+        if got != samples.len() {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: samples.len(),
+                got,
+            }
+            .into());
+        }
+        match results {
+            BlockResults::Counts(counts) => {
+                for counts in &counts {
+                    self.values
+                        .extend(self.compiled.expectations_from_counts(counts)?);
+                }
+            }
+            BlockResults::Exact(probabilities) => {
+                for probabilities in &probabilities {
+                    self.values.extend(
+                        self.compiled
+                            .expectations_from_probabilities(probabilities)?,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `qml.jacobian`: `2 · shifts` circuits per sample, read into the parts
+/// `wrt` asks for.
+struct JacobianRun {
+    plan: ExpectationJacobian,
+    params: Vec<f64>,
+    /// `(num_samples, num_observables, num_params)`, row-major.
+    by_params: Vec<f64>,
+    /// `(num_samples, num_observables, num_features)`, row-major.
+    by_inputs: Vec<f64>,
+}
+
+impl Primitive for JacobianRun {
+    fn num_samples(&self) -> usize {
+        self.plan.num_samples()
+    }
+
+    fn circuits_per_sample(&self) -> usize {
+        self.plan.circuits_per_sample()
+    }
+
+    fn circuits(&self, samples: Range<usize>) -> Result<Vec<ConcreteCircuit>, PrimitiveError> {
+        let block = self
+            .plan
+            .block(samples.clone())
+            .ok_or_else(|| PrimitiveError::block_out_of_range(&samples, self.plan.num_samples()))?;
+        Ok(block.circuits(&self.params)?)
+    }
+
+    fn read(&mut self, samples: Range<usize>, results: BlockResults) -> Result<(), PrimitiveError> {
+        let block = self
+            .plan
+            .block(samples.clone())
+            .ok_or_else(|| PrimitiveError::block_out_of_range(&samples, self.plan.num_samples()))?;
+        let jacobian = match &results {
+            BlockResults::Counts(counts) => block.jacobian_from_counts(counts)?,
+            BlockResults::Exact(probabilities) => {
+                block.jacobian_from_probabilities(probabilities)?
+            }
+        };
+        let (by_params, by_inputs) = jacobian.into_parts();
+        self.by_params.extend(by_params.unwrap_or_default());
+        self.by_inputs.extend(by_inputs.unwrap_or_default());
+        Ok(())
+    }
+}
+
+/// `model` as a native [`Model`], or the `TypeError` `qml.<entry>` raises for
+/// anything else.
+fn primitive_model<'py>(model: &Bound<'py, PyAny>, entry: &str) -> PyResult<Bound<'py, Model>> {
+    if let Ok(model) = model.cast::<Model>() {
+        return Ok(model.clone());
+    }
+    let hint = if model.is_instance_of::<TrainedModel>() {
+        "; for a TrainedModel, pass trained.model and trained.params"
+    } else {
+        ""
+    };
+    Err(PyTypeError::new_err(format!(
+        "qml.{entry} takes a polypus.qml.Model as model, got {}{hint}",
+        model.get_type().name()?
+    )))
+}
+
+/// The checks both primitives make after the execution arguments, in order and
+/// all before any backend exists: the rows of `x` (rows or a `Dataset`, whose
+/// labels are not used) against the model, then `params` as `Model.bind` checks
+/// them. Each a `polypus.ConfigurationError`. Returns the compiled model, the
+/// rows and the parameters.
+fn primitive_inputs(
+    model: &Model,
+    x: &Bound<'_, PyAny>,
+    params: Vec<f64>,
+) -> PyResult<(CompiledModel, polypus_qml::Dataset, Vec<f64>)> {
+    let (rows, _) = native_dataset(x, None)?;
+    let compiled = model
+        .spec
+        .clone()
+        .compile(rows.num_features())
+        .map_err(validation_to_config_err)?;
+    let bound = polypus_qml::TrainedModel::new(model.spec.clone(), params)
+        .map_err(validation_to_config_err)?;
+    Ok((compiled, rows, bound.params().to_vec()))
+}
+
+/// Run `primitive` on the backend `exec` names (`backend`, from
+/// [`Execution::check`]), with the GIL released for the whole block loop.
+/// Draws the seed and the id (logged, not returned: pass a `seed` to replay).
+fn run_primitive<P: Primitive + Send>(
+    py: Python<'_>,
+    entry: &str,
+    primitive: &mut P,
+    exec: Execution<'_, '_>,
+    backend: &str,
+) -> PyResult<()> {
+    let start = Instant::now();
+    let (infrastructure, n_qpus, shots, exact) =
+        (exec.infrastructure, exec.n_qpus, exec.shots, exec.exact);
+    let config = exec.into_config(backend, &format!("qml_{entry}_{n_qpus}_{infrastructure}"))?;
+    let (id, seed) = (config.id.clone(), config.seed);
+    let circuits_per_sample = primitive.circuits_per_sample();
+    log::info!(
+        "qml {entry} {id} starting: rows={}, circuits={}, infrastructure={infrastructure}, \
+         backend={backend}, n_qpus={n_qpus}, shots={shots}, exact={exact}, seed={seed:?}",
+        primitive.num_samples(),
+        primitive.num_samples() * circuits_per_sample,
+    );
+    py.detach(|| {
+        let create = || -> Result<BlockRunner, InfrastructureError> {
+            if exact {
+                return Ok(BlockRunner::Exact {
+                    native: NativeStatevectorBackend::new(seed.unwrap_or_default()),
+                    params: config.run_params(),
+                });
+            }
+            let backend =
+                Infrastructure::create_backend(&config).map_err(InfrastructureError::Backend)?;
+            BlockRunner::sampled(backend, config.run_params(), shots)
+        };
+        run_in_blocks(
+            primitive,
+            create,
+            // The `QmlOracle`'s window policy, with rows for candidates.
+            |backend| candidate_window_size(backend, circuits_per_sample),
+            &interruptible_token(),
+        )
+    })
+    .map_err(PrimitiveError::into_py_err)?;
+    log::info!("qml {entry} {id} completed: duration={:?}", start.elapsed());
+    Ok(())
+}
+
+/// `values` as the `(rows, cols)` array it holds row-major, or why not.
+fn array2(rows: usize, cols: usize, values: Vec<f64>) -> Result<Array2<f64>, ShapeError> {
+    Array2::from_shape_vec((rows, cols), values)
+}
+
+/// `values` as the `(samples, observables, columns)` array it holds row-major,
+/// or why not.
+fn array3(
+    samples: usize,
+    observables: usize,
+    columns: usize,
+    values: Vec<f64>,
+) -> Result<Array3<f64>, ShapeError> {
+    Array3::from_shape_vec((samples, observables, columns), values)
+}
+
+/// A flat result that does not fill its array: a bookkeeping bug.
+fn shape_to_py_err(e: ShapeError) -> PyErr {
+    PyRuntimeError::new_err(format!("internal error assembling the result: {e}"))
+}
+
+/// `polypus.qml.expval(model, x, params, *, …)`: the expectation of every
+/// readout observable for each row of `x`, as a `float64` `numpy.ndarray` of
+/// shape `(rows, observables)`, C-contiguous, in row order.
+///
+/// - **`model`** is a `polypus.qml.Model` (anything else is a `TypeError`);
+///   **`x`** is rows of features or a `Dataset` (its labels are not used);
+///   **`params`** is a list, tuple or NumPy array of exactly `num_params` finite
+///   values, as `Model.bind` takes them.
+/// - **Every observable**, whatever the readout's decision: one column per class
+///   for `"argmax"`, the weighted sum for an `Observable`.
+/// - **Execution** takes `TrainedModel.run`'s arguments with its rules: with
+///   `exact=True` the exact expectations (`infrastructure="local"`,
+///   `backend="polypus"`), otherwise each one estimated from `shots` shots;
+///   `backend=None` by infrastructure; `seed` drawn when omitted and refused on
+///   `qmio`. The seed is logged, not returned: pass one to replay.
+/// - **Runs** one circuit per row, in blocks of rows over one backend for the
+///   whole call, with the GIL released; Ctrl+C stops it between blocks.
+///
+/// Every check runs before a backend exists and raises
+/// `polypus.ConfigurationError` (a `ValueError`).
+#[pyfunction(name = "expval", signature = (
+    model, x, params, *, shots=1024, infrastructure="local", n_qpus=1, nodes=1,
+    cores_per_qpu=2, walltime=None, options=None, sim_method="automatic", noise_model=None,
+    backend=None, seed=None, exact=false,
+))]
+pub fn expval<'py>(
+    model: &Bound<'py, PyAny>,
+    x: &Bound<'py, PyAny>,
+    params: Vec<f64>,
+    shots: u32,
+    infrastructure: &str,
+    n_qpus: u32,
+    nodes: u32,
+    cores_per_qpu: u32,
+    walltime: Option<String>,
+    options: Option<OptionsArg>,
+    sim_method: &str,
+    noise_model: Option<Bound<'py, PyAny>>,
+    backend: Option<&str>,
+    seed: Option<u64>,
+    exact: bool,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let py = x.py();
+    let exec = Execution {
+        shots,
+        infrastructure,
+        n_qpus,
+        nodes,
+        cores_per_qpu,
+        walltime,
+        options,
+        sim_method,
+        noise_model,
+        backend,
+        seed,
+        exact,
+    };
+    let model = primitive_model(model, "expval")?;
+    let backend = exec.check()?;
+    let (compiled, rows, params) = primitive_inputs(model.get(), x, params)?;
+    let templates = (0..rows.num_samples())
+        .map(|i| compiled.template_for(rows.sample(i)))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(qml_to_config_err)?;
+    let (num_samples, num_observables) = (templates.len(), compiled.num_observables());
+    let mut primitive = Expval {
+        compiled,
+        templates,
+        params,
+        values: Vec::with_capacity(num_samples * num_observables),
+    };
+    run_primitive(py, "expval", &mut primitive, exec, backend)?;
+    let values = array2(num_samples, num_observables, primitive.values).map_err(shape_to_py_err)?;
+    Ok(values.into_pyarray(py))
+}
+
+/// `polypus.qml.jacobian(model, x, params, *, wrt="params", …)`: the Jacobian
+/// of every readout observable's expectation for each row of `x`, by the
+/// parameter-shift rule, as `float64` `numpy.ndarray`s, C-contiguous, in row
+/// order. The derivative of the expectations, not of a loss: compose the loss
+/// with the chain rule.
+///
+/// - **`wrt="params"`** gives shape `(rows, observables, num_params)`;
+///   **`"inputs"`** gives `(rows, observables, features)`, for angle and IQP
+///   encoders (an amplitude or basis encoder has no derivative in the sample:
+///   a `polypus.ConfigurationError` naming it); **`"both"`** gives the tuple
+///   `(by_params, by_inputs)` from one set of circuits. Any other `wrt` is a
+///   `polypus.ConfigurationError`.
+/// - **Circuits:** `2` per shifted gate per row: every gate that reads a
+///   trainable parameter (a parameter shared by several gates counts once per
+///   gate) for `"params"`, every encoder gate that reads the row for
+///   `"inputs"`, both for `"both"`. No unshifted circuit.
+/// - **`model`**, **`x`**, **`params`** and the execution arguments are
+///   [`expval`]'s, with its rules. With `exact=True` the result is the
+///   Jacobian itself; with shots, an unbiased estimate from `shots` shots per
+///   circuit.
+///
+/// Every check runs before a backend exists and raises
+/// `polypus.ConfigurationError` (a `ValueError`).
+#[pyfunction(name = "jacobian", signature = (
+    model, x, params, *, wrt="params", shots=1024, infrastructure="local", n_qpus=1, nodes=1,
+    cores_per_qpu=2, walltime=None, options=None, sim_method="automatic", noise_model=None,
+    backend=None, seed=None, exact=false,
+))]
+pub fn jacobian<'py>(
+    model: &Bound<'py, PyAny>,
+    x: &Bound<'py, PyAny>,
+    params: Vec<f64>,
+    wrt: &str,
+    shots: u32,
+    infrastructure: &str,
+    n_qpus: u32,
+    nodes: u32,
+    cores_per_qpu: u32,
+    walltime: Option<String>,
+    options: Option<OptionsArg>,
+    sim_method: &str,
+    noise_model: Option<Bound<'py, PyAny>>,
+    backend: Option<&str>,
+    seed: Option<u64>,
+    exact: bool,
+) -> PyResult<Py<PyAny>> {
+    let py = x.py();
+    let exec = Execution {
+        shots,
+        infrastructure,
+        n_qpus,
+        nodes,
+        cores_per_qpu,
+        walltime,
+        options,
+        sim_method,
+        noise_model,
+        backend,
+        seed,
+        exact,
+    };
+    let model = primitive_model(model, "jacobian")?;
+    let wrt = parse_wrt(wrt)?;
+    let backend = exec.check()?;
+    let (compiled, rows, params) = primitive_inputs(model.get(), x, params)?;
+    let samples: Vec<&[f64]> = (0..rows.num_samples()).map(|i| rows.sample(i)).collect();
+    let plan = compiled
+        .jacobian(&samples, wrt)
+        .map_err(qml_to_config_err)?;
+    let (n, k) = (plan.num_samples(), plan.num_observables());
+    let (num_params, num_features) = (plan.num_params(), plan.num_features());
+    let mut primitive = JacobianRun {
+        plan,
+        params,
+        by_params: Vec::new(),
+        by_inputs: Vec::new(),
+    };
+    run_primitive(py, "jacobian", &mut primitive, exec, backend)?;
+    let array = |columns: usize, values: Vec<f64>| {
+        array3(n, k, columns, values)
+            .map(|a| a.into_pyarray(py).into_any())
+            .map_err(shape_to_py_err)
+    };
+    let JacobianRun {
+        by_params,
+        by_inputs,
+        ..
+    } = primitive;
+    Ok(match wrt {
+        JacobianWrt::Params => array(num_params, by_params)?.unbind(),
+        JacobianWrt::Inputs => array(num_features, by_inputs)?.unbind(),
+        JacobianWrt::Both => PyTuple::new(
+            py,
+            [
+                array(num_params, by_params)?,
+                array(num_features, by_inputs)?,
+            ],
+        )?
+        .into_any()
+        .unbind(),
+    })
+}
+
 /// `qml.train` and `qml.predict` run Qiskit circuits. A native piece in their
 /// `feature_map` or `ansatz` is a `TypeError` that says so (plan D4-R), rather
 /// than a Qiskit error from composing it.
@@ -1827,6 +2458,8 @@ pub(crate) fn register(qml: &Bound<'_, PyModule>) -> PyResult<()> {
     qml.add_class::<TrainedModel>()?;
     qml.add_class::<ExactResult>()?;
     qml.add_function(wrap_pyfunction!(load, qml)?)?;
+    qml.add_function(wrap_pyfunction!(expval, qml)?)?;
+    qml.add_function(wrap_pyfunction!(jacobian, qml)?)?;
     qml.add_class::<PyDataset>()?;
     qml.add_class::<PauliTerm>()?;
     qml.add_class::<PyObservable>()?;
@@ -1839,6 +2472,7 @@ pub(crate) fn register(qml: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn every_loss_round_trips_through_its_name() {
@@ -2029,6 +2663,397 @@ mod tests {
             .any(|w| w == [GateInstruction::Sdg(0), GateInstruction::H(0)]));
         // Binding nothing gives back the very circuit the model runs.
         assert_eq!(circuit.assign_parameters(&[]).unwrap(), bound);
+    }
+
+    // ── qml.expval / qml.jacobian ────────────────────────────────────────────
+
+    #[test]
+    fn wrt_is_a_closed_set_naming_the_valid_values() {
+        Python::initialize();
+        assert_eq!(parse_wrt("params").unwrap(), JacobianWrt::Params);
+        assert_eq!(parse_wrt("inputs").unwrap(), JacobianWrt::Inputs);
+        assert_eq!(parse_wrt("both").unwrap(), JacobianWrt::Both);
+        let err = parse_wrt("theta").unwrap_err().to_string();
+        assert!(err.contains("\"params\", \"inputs\" or \"both\""), "{err}");
+    }
+
+    #[test]
+    fn flat_results_become_c_contiguous_arrays_or_an_error() {
+        let values: Vec<f64> = (0..12).map(f64::from).collect();
+        let a = array3(2, 3, 2, values.clone()).unwrap();
+        assert_eq!(a.shape(), &[2, 3, 2]);
+        assert!(a.is_standard_layout());
+        // Row-major: [s][o][p] is element (s·3 + o)·2 + p.
+        assert_eq!(a[[1, 2, 0]], 10.0);
+        let b = array2(4, 3, values.clone()).unwrap();
+        assert_eq!(b.shape(), &[4, 3]);
+        assert!(b.is_standard_layout());
+        // A length that does not fill the shape is an error, never a panic.
+        assert!(array3(2, 3, 3, values.clone()).is_err());
+        assert!(array2(5, 3, values).is_err());
+        // An empty part (no features, no rows) is a valid empty array.
+        assert_eq!(array3(2, 3, 0, Vec::new()).unwrap().shape(), &[2, 3, 0]);
+    }
+
+    /// A 3-qubit model with an angle encoder, a re-upload and an IQP encoder,
+    /// read out as `⟨Z₀⟩` and `⟨Z₁Z₂⟩`, over 5 rows.
+    fn primitive_model_and_rows() -> (CompiledModel, Vec<Vec<f64>>, Vec<f64>) {
+        let readout = Readout::new(
+            vec![
+                Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())])
+                    .unwrap(),
+                Observable::new(vec![(
+                    1.0,
+                    PauliString::new(vec![(1, Pauli::Z), (2, Pauli::Z)]).unwrap(),
+                )])
+                .unwrap(),
+            ],
+            Decision::Argmax,
+        )
+        .unwrap();
+        let compiled = QuantumModel::new(3)
+            .layer(Layer::AngleEncoder(AngleEncoder::new(RotationAxis::Ry)))
+            .layer(Layer::HardwareEfficient(HardwareEfficientAnsatz::new(1)))
+            .layer(Layer::Iqp(IqpEncoder::new()))
+            .layer(Layer::HardwareEfficient(
+                HardwareEfficientAnsatz::real_amplitudes(1),
+            ))
+            .readout(readout)
+            .compile(3)
+            .unwrap();
+        let rows = (0..5)
+            .map(|i| (0..3).map(|j| 0.3 + 0.21 * (i * 3 + j) as f64).collect())
+            .collect();
+        let theta = (0..compiled.num_params())
+            .map(|p| -0.7 + 0.13 * p as f64)
+            .collect();
+        (compiled, rows, theta)
+    }
+
+    fn jacobian_run(wrt: JacobianWrt) -> JacobianRun {
+        let (compiled, rows, theta) = primitive_model_and_rows();
+        JacobianRun {
+            plan: compiled.jacobian(&rows, wrt).unwrap(),
+            params: theta,
+            by_params: Vec::new(),
+            by_inputs: Vec::new(),
+        }
+    }
+
+    fn expval_run() -> Expval {
+        let (compiled, rows, theta) = primitive_model_and_rows();
+        let templates = rows
+            .iter()
+            .map(|row| compiled.template_for(row).unwrap())
+            .collect();
+        Expval {
+            compiled,
+            templates,
+            params: theta,
+            values: Vec::new(),
+        }
+    }
+
+    fn run_params(seed: u64, shots: u32) -> RunParams {
+        RunParams {
+            id: "qml-primitive-test".to_string(),
+            shots,
+            opt_level: OptLevel::default(),
+            seed: Some(seed),
+        }
+    }
+
+    /// Run `primitive` sampled on a native backend seeded with `seed`, in
+    /// blocks of `block`.
+    fn sampled_on_native(primitive: &mut impl Primitive, seed: u64, block: usize) {
+        run_in_blocks(
+            primitive,
+            || {
+                BlockRunner::sampled(
+                    Arc::new(NativeStatevectorBackend::new(seed)),
+                    run_params(seed, 256),
+                    256,
+                )
+            },
+            |_| block,
+            &CancelToken::default(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_seeded_native_result_does_not_depend_on_the_block_size() {
+        // The native backend's circuit counter keeps running across the blocks,
+        // so every circuit gets the seed of its position in the whole call.
+        let mut whole = jacobian_run(JacobianWrt::Both);
+        sampled_on_native(&mut whole, 7, usize::MAX);
+        assert!(!whole.by_params.is_empty() && !whole.by_inputs.is_empty());
+        for block in [1, 2, 3] {
+            let mut blocked = jacobian_run(JacobianWrt::Both);
+            sampled_on_native(&mut blocked, 7, block);
+            assert_eq!(blocked.by_params, whole.by_params, "block {block}");
+            assert_eq!(blocked.by_inputs, whole.by_inputs, "block {block}");
+        }
+        let mut other_seed = jacobian_run(JacobianWrt::Both);
+        sampled_on_native(&mut other_seed, 8, usize::MAX);
+        assert_ne!(other_seed.by_params, whole.by_params);
+
+        let mut whole = expval_run();
+        sampled_on_native(&mut whole, 11, usize::MAX);
+        for block in [1, 2, 4] {
+            let mut blocked = expval_run();
+            sampled_on_native(&mut blocked, 11, block);
+            assert_eq!(blocked.values, whole.values, "block {block}");
+        }
+    }
+
+    #[test]
+    fn rows_come_back_in_row_order_whatever_the_blocks() {
+        // Exactly, each row's values are those of the row on its own.
+        let (compiled, rows, theta) = primitive_model_and_rows();
+        for block in [1, 2, 5] {
+            let mut run = jacobian_run(JacobianWrt::Params);
+            let mut expval = expval_run();
+            for primitive in [&mut run as &mut dyn PrimitiveDyn, &mut expval] {
+                primitive.run_exact(block);
+            }
+            let k = compiled.num_observables();
+            let per_row = k * compiled.num_params();
+            for (i, row) in rows.iter().enumerate() {
+                let alone = compiled
+                    .jacobian(std::slice::from_ref(row), JacobianWrt::Params)
+                    .unwrap();
+                let circuits: Vec<BoundCircuit> = alone
+                    .circuits(&theta)
+                    .unwrap()
+                    .into_iter()
+                    .map(BoundCircuit::Native)
+                    .collect();
+                let probabilities = NativeStatevectorBackend::new(0)
+                    .run_circuits_exact(&circuits, &run_params(0, 1))
+                    .unwrap();
+                let expected = alone.jacobian_from_probabilities(&probabilities).unwrap();
+                assert_eq!(
+                    Some(&run.by_params[i * per_row..(i + 1) * per_row]),
+                    expected.params(),
+                    "block {block}, row {i}"
+                );
+                let bound = BoundCircuit::Native(compiled.bind(row, &theta).unwrap());
+                let probabilities = NativeStatevectorBackend::new(0)
+                    .run_circuits_exact(&[bound], &run_params(0, 1))
+                    .unwrap();
+                assert_eq!(
+                    expval.values[i * k..(i + 1) * k],
+                    compiled
+                        .expectations_from_probabilities(&probabilities[0])
+                        .unwrap(),
+                    "block {block}, row {i}"
+                );
+            }
+        }
+    }
+
+    /// Object-safe shim so one loop can drive both primitives exactly.
+    trait PrimitiveDyn {
+        fn run_exact(&mut self, block: usize);
+    }
+
+    impl<P: Primitive> PrimitiveDyn for P {
+        fn run_exact(&mut self, block: usize) {
+            run_in_blocks(
+                self,
+                || {
+                    Ok(BlockRunner::Exact {
+                        native: NativeStatevectorBackend::new(0),
+                        params: run_params(0, 1),
+                    })
+                },
+                |_| block,
+                &CancelToken::default(),
+            )
+            .unwrap();
+        }
+    }
+
+    /// A native backend that counts the calls it receives and its closes.
+    struct CountingBackend {
+        inner: NativeStatevectorBackend,
+        runs: Arc<AtomicUsize>,
+        closes: Arc<AtomicUsize>,
+    }
+
+    impl QuantumBackend for CountingBackend {
+        fn run_circuits(
+            &self,
+            qcs: &[BoundCircuit],
+            params: &RunParams,
+        ) -> Result<Vec<Counts>, crate::infrastructure::BackendError> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            self.inner.run_circuits(qcs, params)
+        }
+
+        fn close(&self) {
+            self.closes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct Counters {
+        creates: AtomicUsize,
+        runs: Arc<AtomicUsize>,
+        closes: Arc<AtomicUsize>,
+    }
+
+    impl Counters {
+        fn new() -> Self {
+            Counters {
+                creates: AtomicUsize::new(0),
+                runs: Arc::new(AtomicUsize::new(0)),
+                closes: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn create(&self) -> Result<BlockRunner, InfrastructureError> {
+            self.creates.fetch_add(1, Ordering::SeqCst);
+            BlockRunner::sampled(
+                Arc::new(CountingBackend {
+                    inner: NativeStatevectorBackend::new(3),
+                    runs: Arc::clone(&self.runs),
+                    closes: Arc::clone(&self.closes),
+                }),
+                run_params(3, 64),
+                64,
+            )
+        }
+
+        fn get(&self) -> (usize, usize, usize) {
+            (
+                self.creates.load(Ordering::SeqCst),
+                self.runs.load(Ordering::SeqCst),
+                self.closes.load(Ordering::SeqCst),
+            )
+        }
+    }
+
+    #[test]
+    fn several_blocks_share_one_backend_created_and_closed_once() {
+        let counters = Counters::new();
+        let mut run = jacobian_run(JacobianWrt::Params);
+        run_in_blocks(
+            &mut run,
+            || counters.create(),
+            |_| 2,
+            &CancelToken::default(),
+        )
+        .unwrap();
+        // 5 rows in blocks of 2: three blocks, each one call on the one backend.
+        assert_eq!(counters.get(), (1, 3, 1));
+    }
+
+    /// Wraps a primitive: counts the blocks it builds, and cancels `token`
+    /// once the first block is read, or fails building the second.
+    struct Interfering<P> {
+        inner: P,
+        token: CancelToken,
+        fail_second: bool,
+        built: std::cell::Cell<usize>,
+    }
+
+    impl<P: Primitive> Primitive for Interfering<P> {
+        fn num_samples(&self) -> usize {
+            self.inner.num_samples()
+        }
+
+        fn circuits_per_sample(&self) -> usize {
+            self.inner.circuits_per_sample()
+        }
+
+        fn circuits(&self, samples: Range<usize>) -> Result<Vec<ConcreteCircuit>, PrimitiveError> {
+            self.built.set(self.built.get() + 1);
+            if self.fail_second && self.built.get() == 2 {
+                return Err(QmlError::EmptyCounts.into());
+            }
+            self.inner.circuits(samples)
+        }
+
+        fn read(
+            &mut self,
+            samples: Range<usize>,
+            results: BlockResults,
+        ) -> Result<(), PrimitiveError> {
+            self.inner.read(samples, results)?;
+            self.token.cancel();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_cancellation_between_blocks_stops_before_the_next_and_still_closes() {
+        let counters = Counters::new();
+        let token = CancelToken::default();
+        let mut run = Interfering {
+            inner: jacobian_run(JacobianWrt::Params),
+            token: token.clone(),
+            fail_second: false,
+            built: std::cell::Cell::new(0),
+        };
+        let err = run_in_blocks(&mut run, || counters.create(), |_| 2, &token).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PrimitiveError::Infrastructure(InfrastructureError::Cancelled)
+            ),
+            "{err:?}"
+        );
+        // The first block ran; the second was never built nor run.
+        assert_eq!(run.built.get(), 1);
+        assert_eq!(counters.get(), (1, 1, 1));
+        // Only the first block's rows were read.
+        let per_row = run.inner.plan.num_observables() * run.inner.plan.num_params();
+        assert_eq!(run.inner.by_params.len(), 2 * per_row);
+    }
+
+    #[test]
+    fn an_error_in_a_later_block_still_closes_the_backend() {
+        let counters = Counters::new();
+        let mut run = Interfering {
+            inner: expval_run(),
+            token: CancelToken::default(),
+            fail_second: true,
+            built: std::cell::Cell::new(0),
+        };
+        // Its own token: the one it cancels is not the run's.
+        let err = run_in_blocks(
+            &mut run,
+            || counters.create(),
+            |_| 2,
+            &CancelToken::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, PrimitiveError::Qml(QmlError::EmptyCounts)),
+            "{err:?}"
+        );
+        assert_eq!(counters.get(), (1, 1, 1));
+    }
+
+    #[test]
+    fn a_backend_that_cannot_be_created_closes_nothing() {
+        let mut run = expval_run();
+        let err = run_in_blocks(
+            &mut run,
+            || {
+                Err(InfrastructureError::Backend(
+                    crate::infrastructure::BackendError::UnknownInfrastructure {
+                        name: "nowhere".to_string(),
+                    },
+                ))
+            },
+            |_| 2,
+            &CancelToken::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, PrimitiveError::Infrastructure(_)), "{err:?}");
+        assert!(run.values.is_empty());
     }
 
     #[test]
