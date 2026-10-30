@@ -113,6 +113,24 @@ pub enum CircuitError {
         /// Most qubits the template builds.
         max_qubits: usize,
     },
+    /// The qubits given to
+    /// [`ParameterizedCircuit::try_compose`](crate::ParameterizedCircuit::try_compose)
+    /// do not map the composed circuit one-to-one onto the target: there are
+    /// not as many as the composed circuit has qubits, or one is given twice.
+    InvalidQubitMap {
+        /// Human-readable description of the problem.
+        reason: String,
+    },
+    /// The composed circuit names a parameter differently from the target
+    /// circuit, or gives it a name that the target already gives to another
+    /// parameter
+    /// ([`ParameterizedCircuit::try_compose`](crate::ParameterizedCircuit::try_compose)).
+    ConflictingParamNames {
+        /// The first conflicting parameter of the composed circuit.
+        index: usize,
+        /// Its name in the composed circuit.
+        name: String,
+    },
 }
 
 impl fmt::Display for CircuitError {
@@ -194,6 +212,13 @@ impl fmt::Display for CircuitError {
             } => write!(
                 f,
                 "the {template} template builds at most {max_qubits} qubits, got {num_qubits}"
+            ),
+            CircuitError::InvalidQubitMap { reason } => {
+                write!(f, "invalid qubit map for compose: {reason}")
+            }
+            CircuitError::ConflictingParamNames { index, name } => write!(
+                f,
+                "cannot compose: the composed circuit names parameter {index} '{name}', which the target circuit names differently or gives to another parameter"
             ),
         }
     }

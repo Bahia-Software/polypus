@@ -135,6 +135,58 @@ fn same_instruction(
         && without_angles(a) == without_angles(b)
 }
 
+/// The checks [`ParameterizedCircuit::try_push`] makes before it appends
+/// `gate` to a circuit of `num_qubits` qubits whose measured qubits are those
+/// for which `is_measured` holds and whose expressions are `exprs`. The first
+/// that fails is the error. [`ParameterizedCircuit::try_compose`] makes them
+/// for every instruction it appends, before appending any.
+fn check_instruction(
+    gate: &GateInstruction,
+    num_qubits: usize,
+    is_measured: impl Fn(usize) -> bool,
+    exprs: &ExprArena,
+) -> Result<(), CircuitError> {
+    // The first measured operand in operand order, for any arity.
+    if let Some(&qubit) = gate.acts_on().qubits().iter().find(|&&q| is_measured(q)) {
+        return Err(CircuitError::QubitAlreadyMeasured { qubit });
+    }
+    // Every qubit reference in range: unitary operands, a measurement target
+    // and barrier operands (`MeasureAll` spans the register by definition).
+    if let Some(qubit) = qubit_index_violation(std::slice::from_ref(gate), num_qubits) {
+        return Err(CircuitError::QubitOutOfRange { qubit, num_qubits });
+    }
+    // A measurement target within the classical bound, so `num_clbits` and
+    // every export stay finite and agree with what an importer accepts.
+    if let Some(cbit) = gate.max_cbit().filter(|&c| c >= MAX_REGISTER_BITS) {
+        return Err(CircuitError::ClbitOutOfRange {
+            cbit,
+            max: MAX_REGISTER_BITS,
+        });
+    }
+    // A unitary never names the same qubit twice (a barrier may).
+    if let Some(qubit) = first_repeated_qubit(gate.acts_on().qubits()) {
+        return Err(CircuitError::IdenticalQubits { qubit });
+    }
+    // Every angle is validated before any is tracked, so a rejected gate
+    // leaves `num_params` untouched.
+    for param in gate.params() {
+        check_param(param, exprs)?;
+    }
+    Ok(())
+}
+
+/// Reject, at construction time, a `Fixed` angle that is not finite (`NaN`
+/// or infinity) and an `Expr` that `exprs` does not hold. `Param` angles are
+/// unchecked here — their values are only known at binding time, where
+/// [`GateParam::resolve`] enforces the same rule.
+fn check_param(param: &GateParam, exprs: &ExprArena) -> Result<(), CircuitError> {
+    match param {
+        GateParam::Fixed(v) if !v.is_finite() => Err(CircuitError::NonFiniteParam),
+        GateParam::Expr(id) if exprs.nodes(*id).is_none() => Err(CircuitError::UnknownExpression),
+        _ => Ok(()),
+    }
+}
+
 impl ParameterizedCircuit {
     /// Create an empty circuit over `num_qubits` qubits with no parameters.
     pub fn new(num_qubits: usize) -> Self {
@@ -361,20 +413,6 @@ impl ParameterizedCircuit {
         }
     }
 
-    /// Reject, at construction time, a `Fixed` angle that is not finite (`NaN`
-    /// or infinity) and an `Expr` this circuit does not hold. `Param` angles
-    /// are unchecked here — their values are only known at binding time, where
-    /// [`GateParam::resolve`] enforces the same rule.
-    fn check_param(&self, param: &GateParam) -> Result<(), CircuitError> {
-        match param {
-            GateParam::Fixed(v) if !v.is_finite() => Err(CircuitError::NonFiniteParam),
-            GateParam::Expr(id) if self.exprs.nodes(*id).is_none() => {
-                Err(CircuitError::UnknownExpression)
-            }
-            _ => Ok(()),
-        }
-    }
-
     /// Fallible version of [`push`](Self::push): append a raw
     /// [`GateInstruction`], validating qubit and classical bit indices (a
     /// `cbit` must be below `MAX_REGISTER_BITS`, the bound the importers put
@@ -389,40 +427,12 @@ impl ParameterizedCircuit {
         // a circuit quadratic in its gate count. Checked before any mutation
         // below; the cache itself is only advanced on the success path.
         self.measured.sync(&self.gates);
-        // The first measured operand in operand order, for any arity.
-        if let Some(&qubit) = gate
-            .acts_on()
-            .qubits()
-            .iter()
-            .find(|&&q| self.measured.contains(q))
-        {
-            return Err(CircuitError::QubitAlreadyMeasured { qubit });
-        }
-        // Every qubit reference in range: unitary operands, a measurement target
-        // and barrier operands (`MeasureAll` spans the register by definition).
-        if let Some(qubit) = qubit_index_violation(std::slice::from_ref(&gate), self.num_qubits) {
-            return Err(CircuitError::QubitOutOfRange {
-                qubit,
-                num_qubits: self.num_qubits,
-            });
-        }
-        // A measurement target within the classical bound, so `num_clbits` and
-        // every export stay finite and agree with what an importer accepts.
-        if let Some(cbit) = gate.max_cbit().filter(|&c| c >= MAX_REGISTER_BITS) {
-            return Err(CircuitError::ClbitOutOfRange {
-                cbit,
-                max: MAX_REGISTER_BITS,
-            });
-        }
-        // A unitary never names the same qubit twice (a barrier may).
-        if let Some(qubit) = first_repeated_qubit(gate.acts_on().qubits()) {
-            return Err(CircuitError::IdenticalQubits { qubit });
-        }
-        // Every angle is validated before any is tracked, so a rejected gate
-        // leaves `num_params` untouched.
-        for param in gate.params() {
-            self.check_param(param)?;
-        }
+        check_instruction(
+            &gate,
+            self.num_qubits,
+            |q| self.measured.contains(q),
+            &self.exprs,
+        )?;
         for param in gate.params() {
             self.track_param(param);
         }
@@ -446,6 +456,190 @@ impl ParameterizedCircuit {
             panic!("{e}");
         }
         self
+    }
+
+    /// Append the instructions of `other` with qubit `i` of `other` placed on
+    /// qubit `qubits[i]` of this circuit: a template on a subregister, or one
+    /// circuit after another.
+    ///
+    /// - Free parameters are shared by index: `Param(i)` of `other` is
+    ///   `Param(i)` here, and [`num_params`](Self::num_params) becomes the
+    ///   larger of the two. Expressions are copied into this circuit, and this
+    ///   circuit adopts the names `other` gives to parameters it does not name
+    ///   ([`param_names`](Self::param_names)).
+    /// - Classical bits are not renumbered: a measurement keeps its bit, and two
+    ///   measurements into one bit follow the last-write rule of contract C-3.
+    /// - [`MeasureAll`](GateInstruction::MeasureAll) and a barrier over all
+    ///   qubits stay as they are when both circuits have `n` qubits and
+    ///   `qubits` is `0..n`. Otherwise they become a measurement of
+    ///   `qubits[i]` into bit `i` for each `i`, and a barrier over `qubits`.
+    ///
+    /// Every instruction is checked as [`try_push`](Self::try_push) checks it,
+    /// in order and against the same record of measured qubits (contract C-4),
+    /// before any is appended: on error the circuit is unchanged. Nothing of
+    /// this circuit is copied to achieve that, and a call costs what `other`
+    /// holds rather than what this circuit holds, so composing in a loop stays
+    /// linear.
+    ///
+    /// ```
+    /// use polypus_circuit::templates::qft;
+    /// use polypus_circuit::{GateInstruction, ParameterizedCircuit};
+    ///
+    /// let mut qc = ParameterizedCircuit::new(3).x(0);
+    /// qc.try_compose(&qft(2).unwrap(), &[1, 2]).unwrap();
+    /// assert_eq!(qc.gates().len(), 5);
+    /// assert_eq!(qc.gates()[1], GateInstruction::H(2));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`CircuitError::InvalidQubitMap`] if `qubits` does not give one qubit
+    ///   per qubit of `other`, or gives one twice.
+    /// - [`CircuitError::QubitOutOfRange`] if a qubit of `qubits` is not in
+    ///   this circuit.
+    /// - [`CircuitError::ConflictingParamNames`] if `other` names a parameter
+    ///   differently from this circuit, or gives it a name this circuit gives
+    ///   to another parameter.
+    /// - Any error [`try_push`](Self::try_push) would return for one of the
+    ///   instructions, such as [`CircuitError::QubitAlreadyMeasured`] for a
+    ///   gate on a qubit this circuit has measured.
+    pub fn try_compose(
+        &mut self,
+        other: &ParameterizedCircuit,
+        qubits: &[usize],
+    ) -> Result<(), CircuitError> {
+        let n = other.num_qubits;
+        if qubits.len() != n {
+            return Err(CircuitError::InvalidQubitMap {
+                reason: format!("expected {n} target qubits, got {}", qubits.len()),
+            });
+        }
+        if let Some(&qubit) = qubits.iter().find(|&&q| q >= self.num_qubits) {
+            return Err(CircuitError::QubitOutOfRange {
+                qubit,
+                num_qubits: self.num_qubits,
+            });
+        }
+        if let Some(qubit) = first_repeated_qubit(qubits) {
+            return Err(CircuitError::InvalidQubitMap {
+                reason: format!("qubit {qubit} is targeted twice"),
+            });
+        }
+        // Only a circuit assembled unchecked (`from_parts_unchecked`) refers to
+        // qubits outside its register, which the map cannot place.
+        if let Some(qubit) = qubit_index_violation(&other.gates, n) {
+            return Err(CircuitError::QubitOutOfRange {
+                qubit,
+                num_qubits: n,
+            });
+        }
+        let adopted_names = self.adopted_param_names(other)?;
+
+        let whole_register = self.num_qubits == n && qubits.iter().copied().eq(0..n);
+        let mut placed = Vec::with_capacity(other.gates.len());
+        for gate in &other.gates {
+            match gate {
+                GateInstruction::MeasureAll if !whole_register => {
+                    placed.extend(
+                        qubits
+                            .iter()
+                            .enumerate()
+                            .map(|(cbit, &qubit)| GateInstruction::Measure { qubit, cbit }),
+                    );
+                }
+                GateInstruction::Barrier(operands) if operands.is_empty() && !whole_register => {
+                    placed.push(GateInstruction::Barrier(qubits.to_vec()));
+                }
+                // In range: every qubit `other` refers to is below `n`, checked above.
+                _ => placed.push(gate.map_qubits(|q| qubits[q])),
+            }
+        }
+
+        // Each instruction passes the checks `try_push` makes, in order, before
+        // any is appended. A qubit counts as measured when this circuit measured
+        // it or an instruction placed before it does: those are recorded apart,
+        // so the circuit's own record is neither changed nor copied. Its
+        // expressions are still `other`'s, so they must resolve there.
+        self.measured.sync(&self.gates);
+        let mut placed_measured = MeasuredQubits::default();
+        placed_measured.sync(&[]);
+        for gate in &placed {
+            check_instruction(
+                gate,
+                self.num_qubits,
+                |q| self.measured.contains(q) || placed_measured.contains(q),
+                &other.exprs,
+            )?;
+            placed_measured.record(gate);
+        }
+
+        // Nothing below fails: every expression resolves in `other` and every
+        // instruction passed the checks `try_push` repeats.
+        self.gates.reserve(placed.len());
+        for gate in placed {
+            let gate = if gate.params().any(|p| matches!(p, GateParam::Expr(_))) {
+                gate.try_map_params(|param| match param {
+                    GateParam::Expr(id) => match other.exprs.nodes(*id) {
+                        Some(nodes) => self.add_expr(ParamExpr::from_nodes(nodes.to_vec())),
+                        None => Err(CircuitError::UnknownExpression),
+                    },
+                    _ => Ok(*param),
+                })?
+            } else {
+                gate
+            };
+            self.try_push(gate)?;
+        }
+        self.param_names.extend_from_slice(adopted_names);
+        self.num_params = self.num_params.max(other.num_params);
+        self.declared_clbits = self.declared_clbits.max(other.declared_clbits);
+        Ok(())
+    }
+
+    /// Append the instructions of `other` with qubit `i` of `other` placed on
+    /// qubit `qubits[i]` of this circuit. See [`try_compose`](Self::try_compose).
+    ///
+    /// # Panics
+    ///
+    /// Panics with the error's message wherever
+    /// [`try_compose`](Self::try_compose) returns one, as [`push`](Self::push)
+    /// does.
+    pub fn compose(mut self, other: &ParameterizedCircuit, qubits: &[usize]) -> Self {
+        if let Err(e) = self.try_compose(other, qubits) {
+            panic!("{e}");
+        }
+        self
+    }
+
+    /// The names this circuit adopts when it composes `other`: those `other`
+    /// gives to the parameters this circuit does not name, in index order.
+    fn adopted_param_names<'a>(
+        &self,
+        other: &'a ParameterizedCircuit,
+    ) -> Result<&'a [String], CircuitError> {
+        let ours = &self.param_names;
+        let adopted = other.param_names.get(ours.len()..).unwrap_or_default();
+        // Only an adopted name can clash with one of ours at another index, so
+        // the set of ours is built only when there is one: a call goes over no
+        // more names than `other` gives.
+        let taken: BTreeSet<&str> = if adopted.is_empty() {
+            BTreeSet::new()
+        } else {
+            ours.iter().map(String::as_str).collect()
+        };
+        for (index, name) in other.param_names.iter().enumerate() {
+            let conflicts = match ours.get(index) {
+                Some(our_name) => our_name != name,
+                None => taken.contains(name.as_str()),
+            };
+            if conflicts {
+                return Err(CircuitError::ConflictingParamNames {
+                    index,
+                    name: name.clone(),
+                });
+            }
+        }
+        Ok(adopted)
     }
 
     // ── Single-qubit gates ───────────────────────────────────────────────
