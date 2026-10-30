@@ -4,12 +4,15 @@
 The classical post-processing (``order_from_measurement``,
 ``factors_from_order``) is checked on hand-computed measurements, and
 ``factor`` on the native simulator: the classical shortcuts, the quantum path
-for 15 and 21, and its argument validation.
+for 15 and 21, the share of the shots on the peaks of the order it reads, and
+its argument validation.
 """
 
 import gc
 import inspect
+import math
 import weakref
+from fractions import Fraction
 from types import SimpleNamespace
 
 import polypus
@@ -91,6 +94,48 @@ def test_helpers_reject_non_integers():
         factors_from_order(7, 15, True)
 
 
+@pytest.mark.parametrize("t", range(1, 8))
+def test_peak_shares_follow_their_definition(t):
+    # Outcome by outcome, against |y - s * 2**t / r| <= 1 for some s from 1 to
+    # r - 1, times r; the uniform share is the share of near outcomes. Orders
+    # up to 100 reach 2**t for t <= 6, from where every outcome is near, and
+    # 2**t / 2 for t = 7, from where all but 0 are.
+    size = 2**t
+    for r in range(2, 101):
+        near = [
+            any(abs(y * r - s * size) <= r for s in range(1, r)) for y in range(size)
+        ]
+        uniform = sum(near) / size
+        for y in range(size):
+            assert shor._peak_shares({format(y, f"0{t}b"): 1}, t, r) == (
+                float(near[y]),
+                uniform,
+            )
+
+
+def test_an_outcome_beyond_the_register_is_never_near():
+    # With an order of 2**t or more every outcome is near; 4 is not an
+    # outcome of 2 qubits.
+    assert shor._peak_shares({"100": 1, "11": 1}, 2, 4) == (0.5, 1.0)
+
+
+def test_peak_shares_are_exact_for_the_largest_registers():
+    # 48 counting qubits and an order near 2**24: the peaks are 2**24 apart,
+    # so only the nearest s can be within 1. For s * 2**48 = 1 or -1 modulo r,
+    # and for r // 3 and r - 1, the peak is less than 1e-6 from an integer,
+    # closer than a float of that size can tell.
+    t, r = 48, 2**24 - 3
+    inverse = pow(2**t, -1, r)
+    for s in (1, 2, r // 3, r - 1, inverse, r - inverse):
+        peak = Fraction(s * 2**t, r)
+        for y in range(math.floor(peak) - 2, math.ceil(peak) + 3):
+            near = abs(y - peak) <= 1
+            assert shor._peak_shares({format(y, "048b"): 1}, t, r) == (
+                float(near),
+                (2 * r + 1 - 3) / 2**t,
+            )
+
+
 NATIVE = dict(infrastructure="local", backend="polypus")
 
 # What a working circuit gives for 15 with a = 7 (order 4): the multiples of
@@ -99,8 +144,8 @@ PEAKS_15 = {"00000000", "01000000", "10000000", "11000000"}
 
 
 def _share_near_peaks(counts, t, r):
-    """The share of shots within 1 of a multiple of 2**t / r."""
-    peaks = [s * 2**t / r for s in range(r + 1)]
+    """The share of shots within 1 of s * 2**t / r for some s from 1 to r - 1."""
+    peaks = [s * 2**t / r for s in range(1, r)]
     near = sum(
         count
         for bits, count in counts.items()
@@ -109,18 +154,73 @@ def _share_near_peaks(counts, t, r):
     return near / sum(counts.values())
 
 
+def _run_returns(monkeypatch, *counts):
+    """Make the runs of the circuit give ``counts`` in turn, then the last
+    of them again."""
+    runs = iter(counts)
+
+    def run(*args, **kwargs):
+        return SimpleNamespace(merged_counts=next(runs, counts[-1]))
+
+    monkeypatch.setattr(polypus, "run_quantum_circuit", run)
+
+
 class TestFactor:
     def test_factors_15_with_the_quantum_circuit(self):
         result = factor(15, a=7, seed=1, **NATIVE)
         assert (result.factors, result.method, result.order) == ((3, 5), "quantum", 4)
         assert sum(result.counts.values()) == 1024
         assert set(result.counts) == PEAKS_15
+        # Every shot but those at 0, the peak that every order has.
+        assert result.peak_share == 1 - result.counts["00000000"] / 1024
+        assert result.uniform_peak_share == 9 / 256
+        # The values docs/guide/circuits.md shows.
+        assert (result.peak_share, result.uniform_peak_share) == (0.734375, 9 / 256)
 
     def test_factors_21_with_six_counting_qubits(self):
         result = factor(21, a=2, counting_qubits=6, seed=1, **NATIVE)
         assert (result.factors, result.order) == ((3, 7), 6)
-        # About 0.91 for the circuit, against 0.22 for noise.
-        assert _share_near_peaks(result.counts, 6, 6) >= 0.8
+        assert result.peak_share == _share_near_peaks(result.counts, 6, 6)
+        # About 0.74 for the circuit, against 11/64 for uniformly random
+        # outcomes.
+        assert result.peak_share >= 0.65
+        assert result.uniform_peak_share == 11 / 64
+
+    def test_counts_without_signal_give_the_uniform_share(self, monkeypatch):
+        # The order is still read, from the noise.
+        counts = {format(y, "08b"): 4 for y in range(256)}
+        _run_returns(monkeypatch, counts)
+        result = factor(15, a=7, seed=0, **NATIVE)
+        assert (result.factors, result.method, result.order) == ((3, 5), "quantum", 4)
+        assert result.peak_share == result.uniform_peak_share == 9 / 256
+
+    def test_a_circuit_that_does_nothing_scores_below_uniform(self, monkeypatch):
+        # Multiplications that do nothing leave the counting register at 0,
+        # the peak every order has; a little noise is enough to read the order.
+        counts = {format(y, "08b"): 1 for y in range(256)}
+        counts["00000000"] = 2305
+        _run_returns(monkeypatch, counts)
+        result = factor(15, a=7, seed=0, **NATIVE)
+        assert (result.factors, result.method) == ((3, 5), "quantum")
+        assert result.peak_share == 9 / 2560
+        assert result.peak_share < result.uniform_peak_share
+
+    @pytest.mark.parametrize(
+        "counts, peak_share",
+        [
+            # Keys no backend returns, after the one the order is read from:
+            # shots that are never near.
+            ({"01000000": 1000, "0x2": 8, "100000000": 8, "-1": 7, 3: 1}, 1000 / 1024),
+            # Counts below 1 are no shots.
+            ({"01000000": 1000, "00000000": 24, "10000000": -8}, 1000 / 1024),
+            ({"01000000": 0}, 0.0),
+        ],
+    )
+    def test_malformed_counts_never_raise(self, monkeypatch, counts, peak_share):
+        _run_returns(monkeypatch, counts)
+        result = factor(15, a=7, seed=0, **NATIVE)
+        assert (result.factors, result.method) == ((3, 5), "quantum")
+        assert (result.peak_share, result.uniform_peak_share) == (peak_share, 9 / 256)
 
     @pytest.mark.parametrize(
         "n, factors, method",
@@ -134,6 +234,7 @@ class TestFactor:
     def test_classical_shortcuts_skip_the_circuit(self, n, factors, method):
         result = factor(n, **NATIVE)
         assert (result.factors, result.method, result.attempts) == (factors, method, 0)
+        assert (result.peak_share, result.uniform_peak_share) == (None, None)
 
     def test_a_base_sharing_a_factor_is_a_gcd_shortcut(self):
         result = factor(15, a=6, **NATIVE)
@@ -143,6 +244,7 @@ class TestFactor:
             6,
             0,
         )
+        assert (result.peak_share, result.uniform_peak_share) == (None, None)
 
     @pytest.mark.parametrize("n", [3, 0, -15, 13, 2**24])
     def test_invalid_n_raises_value_error(self, n):
@@ -192,8 +294,13 @@ class TestFactor:
         with pytest.raises(TypeError):
             factor(15, **options, **NATIVE)
 
-    @pytest.mark.parametrize("n, a, t, order", [(15, 14, None, 2), (21, 4, 6, 3)])
-    def test_a_fixed_base_with_a_useless_order_stops_early(self, n, a, t, order):
+    @pytest.mark.parametrize(
+        "n, a, t, order, uniform_peak_share",
+        [(15, 14, None, 2, 3 / 256), (21, 4, 6, 3, 4 / 64)],
+    )
+    def test_a_fixed_base_with_a_useless_order_stops_early(
+        self, n, a, t, order, uniform_peak_share
+    ):
         result = factor(n, a=a, counting_qubits=t, seed=0, **NATIVE)
         assert (result.factors, result.method, result.order, result.attempts) == (
             None,
@@ -201,6 +308,8 @@ class TestFactor:
             order,
             1,
         )
+        assert result.peak_share == _share_near_peaks(result.counts, t or 8, order)
+        assert result.uniform_peak_share == uniform_peak_share
 
     def test_same_seed_same_result(self):
         first = factor(15, seed=7, **NATIVE)
@@ -250,11 +359,8 @@ class TestFactor:
             built.append(weakref.ref(qc))
             return qc
 
-        def run(*args, **kwargs):
-            return SimpleNamespace(merged_counts={"0": 1})
-
         monkeypatch.setattr(polypus.circuits.templates, "shor_order_finding", build)
-        monkeypatch.setattr(polypus, "run_quantum_circuit", run)
+        _run_returns(monkeypatch, {"0": 1})
         monkeypatch.setattr(shor, "order_from_measurement", lambda *args: None)
         result = factor(4093 * 4099, max_attempts=3, seed=0, **NATIVE)
         assert (result.attempts, alive_at_build) == (3, [0, 0, 0])
@@ -263,6 +369,57 @@ class TestFactor:
         monkeypatch.setattr(shor, "order_from_measurement", lambda *args: None)
         result = factor(15, a=7, max_attempts=2, seed=0, **NATIVE)
         assert (result.factors, result.method, result.attempts) == (None, None, 2)
+        assert (result.peak_share, result.uniform_peak_share) == (None, None)
+
+    def test_a_search_ending_without_an_order_keeps_no_earlier_shares(
+        self, monkeypatch
+    ):
+        # Seed 0 draws the base 8 twice for 15. The first attempt reads an odd
+        # order, which does not split 15; the second reads none.
+        orders = iter([3])
+        monkeypatch.setattr(
+            shor, "order_from_measurement", lambda *args: next(orders, None)
+        )
+        _run_returns(monkeypatch, {"01000000": 1024})
+        result = factor(15, max_attempts=2, seed=0, **NATIVE)
+        assert (result.a, result.order, result.attempts) == (8, None, 2)
+        assert (result.peak_share, result.uniform_peak_share) == (None, None)
+
+    def test_a_failed_search_has_the_shares_of_its_last_order(self, monkeypatch):
+        # Seed 0 draws the base 8 twice for 15; both attempts read an odd
+        # order. 85 is near 256 / 3 but no multiple of 256 / 5.
+        orders = iter([5, 3])
+        monkeypatch.setattr(shor, "order_from_measurement", lambda *args: next(orders))
+        _run_returns(monkeypatch, {"01000000": 1024}, {"01010101": 1024})
+        result = factor(15, max_attempts=2, seed=0, **NATIVE)
+        assert (result.factors, result.order, result.attempts) == (None, 3, 2)
+        assert (result.peak_share, result.uniform_peak_share) == (1.0, 4 / 256)
+
+    def test_a_split_after_a_useless_order_has_its_own_shares(self, monkeypatch):
+        # The first attempt reads an odd order, the second the order 4.
+        orders = iter([3, 4])
+        monkeypatch.setattr(shor, "order_from_measurement", lambda *args: next(orders))
+        _run_returns(
+            monkeypatch, {"01010101": 1024}, {"00000000": 768, "01000000": 256}
+        )
+        result = factor(15, max_attempts=2, seed=0, **NATIVE)
+        assert (result.factors, result.method, result.order, result.attempts) == (
+            (3, 5),
+            "quantum",
+            4,
+            2,
+        )
+        assert (result.peak_share, result.uniform_peak_share) == (0.25, 9 / 256)
+
+    def test_a_fixed_base_has_the_shares_of_the_attempt_that_read_its_order(
+        self, monkeypatch
+    ):
+        # 0 gives no order; 128 gives the order 2 of 14, which does not split
+        # 15 since 14 is -1 modulo 15.
+        _run_returns(monkeypatch, {"00000000": 1024}, {"10000000": 1024})
+        result = factor(15, a=14, max_attempts=3, seed=0, **NATIVE)
+        assert (result.factors, result.order, result.attempts) == (None, 2, 2)
+        assert (result.peak_share, result.uniform_peak_share) == (1.0, 3 / 256)
 
 
 def test_docstring_example_runs():
