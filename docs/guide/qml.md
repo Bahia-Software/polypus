@@ -263,6 +263,43 @@ for _ in range(40):
 - **Execution.** A call opens one backend for all its rows (one allocation on CUNQA) and runs them in blocks sized from the cores and the backend, so memory stays bounded however many rows you pass; Ctrl+C stops it between blocks. The result does not depend on the blocks: a call on all the rows equals the calls on pieces of them, put together.
 - **Seeds.** The functions return bare arrays, so the seed drawn when you omit `seed` is only logged: pass `seed=` to repeat a sampled call exactly. On Aer and CUNQA, a seeded call repeats on the same machine and configuration.
 
+### In a PyTorch network: `polypus.torch.QuantumLayer`
+
+`polypus.torch.QuantumLayer(model, ...)` is a `torch.nn.Module` built on those two functions: its forward pass is `qml.expval`, its backward pass `qml.jacobian`, and its trainable parameters (`layer.params`) are the model's. Put it between classical layers and train the whole network with any `torch.optim` optimizer. PyTorch is not a dependency of Polypus; install it with the extra, and import the module explicitly (`import polypus` does not import it):
+
+```bash
+pip install "polypus-quantum[torch]"
+```
+
+```python
+import torch
+from polypus import qml
+from polypus.torch import QuantumLayer
+
+model = qml.Model(
+    qml.Encoder(2).angle_encoder("ry"),
+    qml.Ansatz(2).real_amplitudes(1),
+    qml.Readout([qml.Z(0), qml.Z(1)]),
+)
+quantum = QuantumLayer(model, exact=True)
+net = torch.nn.Sequential(
+    torch.nn.Linear(4, 2),  # four features onto the two qubits' angles
+    quantum,  # (batch, 2) -> (batch, quantum.num_observables)
+    torch.nn.Linear(quantum.num_observables, 1),
+)
+optimizer = torch.optim.Adam(net.parameters(), lr=0.1)
+```
+
+[`examples/qml_torch_hybrid.py`](../../examples/qml_torch_hybrid.py) trains this network on two classes and checks that it learns them.
+
+- **Arguments.** `QuantumLayer(model, *, initial_params=None, seed=None, ...)` takes a `Model` and `qml.expval`'s execution arguments (`shots`, `infrastructure`, `backend`, `exact`, …), which `expval` checks at the first forward pass. Without `initial_params` the parameters start uniform in `[-π, π)`, drawn with PyTorch's generator (`torch.manual_seed` repeats them). `layer.num_params` and `layer.num_observables` (also `model.num_observables`) size the neighbouring layers. For a model trained with `fit` or read with `qml.load`, `polypus.torch.from_trained(trained, ...)` starts from its parameters.
+- **Shapes.** The input is `(batch, features)` and the output `(batch, num_observables)`; a 1-D input is one sample and gives `(num_observables,)`. Each forward pass is one `expval` call with the whole batch, and each backward pass one `jacobian` call, with respect to what needs a gradient: the parameters, the input (which a layer before it needs), or both.
+- **Inputs.** The gradient with respect to the input needs an angle or IQP encoder, as `qml.jacobian` does: with an amplitude or basis encoder, an input that requires a gradient makes the backward pass raise `polypus.ConfigurationError`. Put such a layer first, or detach its input.
+- **dtype and device.** The quantum computation runs in `float64` on the CPU. The output comes back in the dtype and on the device of the input, and each gradient in its tensor's, so a `float32` network needs no `.double()`; the input is rounded at the boundary. The layer's own parameter is `float64` unless you convert the layer. GPU tensors are moved to the CPU and back; CI does not test that path.
+- **Seeds.** With `shots`, `seed=` makes training repeatable: every forward and backward pass gets its own seed, derived from `seed` and the number of the forward pass, so two layers built with the same `seed` and fed the same batches give the same values and gradients at every step. That counter is not saved in the `state_dict`: to replay, build a new layer with the same `seed`. A seeded layer is not safe to call from several threads at once. Without `seed`, each call draws its own.
+- **Cost.** Every forward pass and every backward pass opens and closes a backend: two per training step, so on CUNQA two `qraise` allocations per step. Prefer `exact=True` on the local simulator while you develop.
+- **Limits.** No second derivatives (no `create_graph=True` through the layer), no `torch.compile` and no `torch.vmap`. Save the `state_dict`; `copy.deepcopy(layer)` works too.
+
 ### Data
 
 `qml.Dataset(x, y=None)` checks the rows once (non-empty, equal width, finite) and keeps the labels with them. It splits reproducibly and scales features:

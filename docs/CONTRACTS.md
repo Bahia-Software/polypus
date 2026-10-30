@@ -30,7 +30,7 @@ Rules of the road:
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 | C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
-| C-11 | Native QML (problem ↔ oracle, expectation Jacobian, `polypus.qml.Model`, `qml.expval`/`qml.jacobian`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `tests/jacobian.rs` + `src/model.rs` serde tests + `polypus-evaluation` `qml_oracle.rs` + the primitive tests in `crates/polypus/src/bindings/qml.rs` + `tests/python/test_qml_native*.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
+| C-11 | Native QML (problem ↔ oracle, expectation Jacobian, `polypus.qml.Model`, `qml.expval`/`qml.jacobian`, `polypus.torch.QuantumLayer`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `tests/jacobian.rs` + `src/model.rs` serde tests + `polypus-evaluation` `qml_oracle.rs` + the primitive tests in `crates/polypus/src/bindings/qml.rs` + `tests/python/test_qml_native*.py` + `tests/python/test_torch_*.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
 
 ✅ means the listed test enforces the contract; a ⏳ contract would be
 specified but only review-enforced until its test lands (none today). Known
@@ -1694,7 +1694,8 @@ This contract governs the outer Rust↔Python boundary of the public entry
 points `polypus.run_quantum_circuit`, `polypus.train`, `polypus.qml.train` and
 `polypus.qml.predict`, and of the native QML API's `Model.fit`,
 `TrainedModel.predict`, `TrainedModel.run`, `polypus.qml.expval` and
-`polypus.qml.jacobian` (C-11): their `seed` kwarg and their return shape. (It is distinct from C-1, which
+`polypus.qml.jacobian`, and `polypus.torch.QuantumLayer` over them (C-11):
+their `seed` kwarg and their return shape. (It is distinct from C-1, which
 freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 
 ### The `seed` kwarg
@@ -1813,6 +1814,16 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   is at least one call, and the block size follows the host's cores and the
   backend's concurrency, so a seeded call replays on the same configuration, as
   a `qml.train` does (below).
+- **`polypus.torch.QuantumLayer(..., seed=None)`** never passes its `seed` on
+  as such: forward pass `n` of the layer calls `qml.expval` with
+  `SeedSequence([seed, n, 0]).generate_state(1, uint64)[0]`, and the backward
+  pass of that forward pass calls `qml.jacobian` with `[seed, n, 1]`, so every
+  backend call of a training gets its own stream, a layer rebuilt with the same
+  `seed` replays the values and gradients step by step, and seeds `s` and
+  `s+1` share no stream. The counter is the layer's, outside the `state_dict`.
+  `seed=None` passes `None` to every call, which draws and logs its own; an
+  explicit `seed` on `qmio` is `qml.expval`'s error at the first forward pass.
+  Enforced by `test_torch_quantum_layer.py`'s `TestSeeds`.
 - **OS entropy failure.** If the OS entropy source cannot be read, the entry
   point raises `polypus.BackendError` instead of panicking — whether while
   drawing a default seed (`seed=None` and, for `train`/`qml.train`, no `seed`
@@ -2413,7 +2424,12 @@ that does not depend on the data is checked where it is written, as a plain
   that the readout's positions exist among the qubits still active at the end.
 
 What depends on the data — how many features the encoders can carry — is
-checked when the model meets a dataset.
+checked when the model meets a dataset. `num_params` and `num_observables` (the
+readout's observables, the columns of `qml.expval`) are fixed at construction.
+A `Model` pickles, and so copies with `copy.deepcopy`, as the JSON of its spec
+(the `spec` of the save format below), rebuilt by `Model._from_spec` through
+the checks `qml.load` runs: a corrupt or edited spec is a `ValueError`, never an
+inconsistent model.
 
 **Readout observables.** `Readout(observables, decision="raw", threshold=None)`.
 Each observable is a `polypus.qml.PauliTerm` (`Z(0)`, `Z(0) @ Z(1)`: one product,
@@ -2589,6 +2605,58 @@ for a training loop of the caller's own:
   model and rows against `wrt` ((g)'s errors); a `seed` on `qmio`. The
   `TypeError` for `model` comes first.
 
+**The PyTorch layer (`polypus.torch`).** `polypus.torch.QuantumLayer(model, *,
+initial_params=None, <qml.expval's execution arguments>)` is a
+`torch.nn.Module` over a native `Model`, and `polypus.torch.from_trained(trained,
+**same)` is `QuantumLayer(trained.model, initial_params=trained.params, ...)`.
+It adds no quantum logic: everything it computes comes from the primitives
+above.
+
+- **Import.** PyTorch is an optional extra (`polypus-quantum[torch]`, floor =
+  the CPU torch CI tests). `import polypus` imports neither `polypus.torch` nor
+  `torch`; `import polypus.torch` without PyTorch is an `ImportError` naming the
+  extra.
+- **Arguments.** `model` is a `Model` (a `TrainedModel` is a `TypeError` naming
+  `from_trained`, which in turn takes only a `TrainedModel`, a `Model` being a
+  `TypeError` naming `QuantumLayer`). `initial_params` is checked as `bind`
+  checks it; without it the parameters are uniform on `[-π, π)` from PyTorch's
+  global generator. `seed` is `None` or an integer `>= 0` (`TypeError` /
+  `polypus.ConfigurationError` at construction). The other arguments are
+  `qml.expval`'s, names, defaults and rules, kept and checked by it at the first
+  forward pass, before a backend exists. The one trainable parameter is
+  `params`, 1-D, `num_params` values, `float64` unless the layer is converted
+  (`layer.float()`); `num_params` and `num_observables` are the model's.
+- **Forward = `expval`.** A `(batch, features)` tensor gives
+  `(batch, num_observables)`; a 1-D tensor is one sample and gives
+  `(num_observables,)`, the row of the 2-D result; another rank is a
+  `ValueError`. One `qml.expval` call per forward pass with the whole batch;
+  in exact mode the output is, bit for bit, `qml.expval(model, x, params,
+  exact=True)`. The rows' checks (empty batch, feature count, non-finite
+  values) are `expval`'s errors.
+- **Backward = the VJP of `jacobian`.** One `qml.jacobian` call per backward
+  pass, with `wrt` exactly what needs a gradient (`"params"`, `"inputs"`, or
+  `"both"`), none when nothing does; `∂L/∂θ = Σ_b,o g[b,o]·J_θ[b,o,:]` and
+  `∂L/∂x[b] = Σ_o g[b,o]·J_x[b,o,:]`. An amplitude or basis encoder raises
+  `jacobian`'s `polypus.ConfigurationError` only when the input's gradient is
+  wanted. The backward pass is not differentiable (no second derivatives); in
+  exact mode `torch.autograd.gradcheck` passes with its default tolerances.
+- **dtype and device.** The computation is `float64` on the CPU: the input and
+  parameter are converted at the boundary; the output comes back in the
+  input's dtype (`float64` for a non-floating input) and device, each gradient
+  in its tensor's dtype and device.
+- **Seeds (C-7).** With `seed=s`, forward pass `n` (counted per layer from 0,
+  not in the `state_dict`, so not thread-safe) calls `expval` with
+  `SeedSequence([s, n, 0]).generate_state(1, uint64)[0]` and its backward pass
+  calls `jacobian` with `[s, n, 1]` (a forward pass counts even when it raises,
+  so twin layers stay in step): two layers with the same `seed` replay the
+  same values and gradients step by step, every call has its own stream, and
+  neighbouring seeds share none. Without `seed`, `None` reaches every call,
+  which draws its own. A `seed` on `qmio` is `expval`'s `ConfigurationError` at
+  the first forward pass.
+- **Cost.** One backend per forward pass and one per backward pass (two
+  allocations per training step on CUNQA). Not supported: `torch.compile`,
+  `torch.vmap`. `copy.deepcopy` and `state_dict` keep `params` bit for bit.
+
 **Save format.** `TrainedModel.save(path)` writes, and `polypus.qml.load(path)`
 reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
 
@@ -2658,14 +2726,23 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   types, shapes and contiguity, `expval` against `run`/`predict`, the Jacobian
   against finite differences for every layer and readout and against the
   chain rule of a loss, chunks, seeds, shots, every rejection),
+  `test_torch_quantum_layer.py` (the PyTorch layer: forward bit for bit
+  `expval` in one call per batch, `gradcheck` with default tolerances for the
+  parameters and the inputs, the `wrt` each backward pass asks for, amplitude
+  and basis encoders, dtype and device, shapes, the derived seeds and their
+  replay, training with SGD, Adam and LBFGS, `state_dict`, `deepcopy` and
+  `from_trained`), `test_torch_import.py` (the import without PyTorch, the
+  wheel's module, the extra's floor against CI's pin),
+  `test_qml_native.py`'s `TestModel` (`num_observables`, pickle and
+  `deepcopy`, an edited spec rejected),
   `test_qml_native_initial_point_final_shots.py` (`fit`'s `initial_point` and
   `final_shots`: every rejection before the CUNQA seam and their order, the
   refusal of `final_shots` with `exact=True`, where each optimizer starts, a
   model read back with `qml.load` trained on, and the final re-evaluation on
   every sample, minibatches included, with its shots and every sample at the
   seam), `test_typing_stubs.py`'s
-  `TestFitTypes` (the stub types of both) and `TestPrimitiveTypes` (each
-  `wrt`'s result type), the native
+  `TestFitTypes` (the stub types of both), `TestPrimitiveTypes` (each
+  `wrt`'s result type) and `TestTorchTypes` (the layer's inline types), the native
   QML cases of `test_interrupt.py` (Ctrl+C during `fit`, with and without a
   `callback`, and during `qml.jacobian`, exact and sampled; the minibatch
   rescore runs with the GIL released),
