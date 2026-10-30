@@ -5,17 +5,17 @@
 # `[workspace.lints]` table of the root Cargo.toml (see "Lint policy" in
 # docs/CONTRIBUTING.md).
 
-# Polypus is pre-1.0 (0.7.2) and under active development: don't hold back lints
+# Polypus is pre-1.0 and under active development: don't hold back lints
 # just to preserve a frozen public API.
 avoid-breaking-exported-api = false
 
 # The PyO3 entry points in `crates/polypus/src/bindings` mirror their Python
 # kwargs one-for-one, so their arity is set by the API they expose (contract C-1
 # for the execution seam), not by design choice -- `qml_train` and `Model.fit`
-# are the widest at 21. Tune the threshold once here instead of per-function
-# `#[allow(...)]`: 21 is exactly today's widest signature, so a new kwarg raises
+# are the widest at 22. Tune the threshold once here instead of per-function
+# `#[allow(...)]`: 22 is exactly today's widest signature, so a new kwarg raises
 # it here, in the diff that adds it, where a reviewer sees the list grow.
-too-many-arguments-threshold = 21
+too-many-arguments-threshold = 22
 
 # `Uuid::new_v4` panics if `getrandom` fails, and a panic must never cross the
 # FFI edge (contract C-1, #264). The root Cargo.toml drops uuid's `v4` feature,

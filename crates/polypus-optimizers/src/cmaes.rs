@@ -3,6 +3,7 @@
 use crate::error::OptimizerError;
 use crate::linalg::symmetric_eigen;
 use crate::objective::EvaluationOracle;
+use crate::observer::{IterationObserver, IterationReport};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
 use crate::util::{
@@ -256,6 +257,7 @@ impl AlgorithmCmaEs {
     fn run_with_rng<R: Rng>(
         args: AlgorithmCmaEsArgs,
         rng: &mut R,
+        observer: &mut dyn IterationObserver,
     ) -> Result<OptimizationOutcome, OptimizerError> {
         let AlgorithmCmaEsArgs {
             oracle,
@@ -324,6 +326,17 @@ impl AlgorithmCmaEs {
                     recent_improvement(&run_history, patience),
                 );
 
+                // A stop asked for here wins over the run's own stops and
+                // restarts below, so the run then reports `converged = false`.
+                let report = IterationReport {
+                    iteration: fitness_history.len(),
+                    best_fitness: best.fitness,
+                    best_params: &best.params,
+                };
+                if observer.observe(&report).is_break() {
+                    break 'runs;
+                }
+
                 let stop = dist.degeneration(sigma0).or_else(|| {
                     stagnated(&run_history, tolerance, patience).then_some(StopReason::Stagnation)
                 });
@@ -358,8 +371,12 @@ impl AlgorithmCmaEs {
 impl Optimizer for AlgorithmCmaEs {
     type Args = AlgorithmCmaEsArgs;
 
-    fn optimize(&self, args: Self::Args) -> Result<OptimizationOutcome, OptimizerError> {
-        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng))
+    fn optimize_observed(
+        &self,
+        args: Self::Args,
+        observer: &mut dyn IterationObserver,
+    ) -> Result<OptimizationOutcome, OptimizerError> {
+        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng, observer))
     }
 }
 

@@ -51,6 +51,8 @@ result = polypus.qml.train(
 )
 ```
 
+Like `train()`, it takes a keyword-only `callback`, called once per iteration with a `polypus.TrainProgress`; returning `True` stops the run with what it has reached (see [Watching and stopping a run](training.md#watching-and-stopping-a-run)). Its `evaluations` count candidates, each one circuit per training sample.
+
 ### Cost functions
 
 With `y_train`, `expectation_function` takes one of three forms:
@@ -188,12 +190,13 @@ model = qml.Model(
 result = model.fit(X_unlabeled, method=polypus.Adam(max_iters=100))
 ```
 
-Four more options are keyword-only:
+Five more options are keyword-only:
 
 - `exact=True` computes each circuit's probabilities exactly instead of sampling, so `shots` no longer matters and the run has no shot noise. It needs the local native simulator, and memory grows as `2^n` per circuit.
 - `batch_size=b` scores each evaluation on `b` samples drawn afresh from the seed (`1 ≤ b < number of samples`). Adam uses the batch for its gradient and keeps its best result on the whole set; the other optimizers report `best_fitness` re-scored on the whole set at the end.
 - `initial_point` starts the optimizer from `num_params` parameters you choose instead of random ones, as in `train()` (see [Starting point](training.md#starting-point)): the `best_params` of an earlier run, or the `params` of a saved model to keep training it (see [Saving](#saving)).
 - `final_shots=n` re-evaluates the best candidates once the optimizer has stopped, with `n` shots per circuit, as in `train()` (see [Final re-evaluation](training.md#final-re-evaluation)): `result.final_params` is the one with the best value and `result.final_fitness` that value. The final batch scores every training sample, also with `batch_size`, and the run before it is the one without `final_shots`. `exact=True` uses no shots, so `fit` refuses `final_shots` with it.
+- `callback=f` calls `f` once per iteration with a `polypus.TrainProgress`, as in `train()`: returning `True` stops the run, which returns what it has reached, and the `final_shots` batch is still sent (see [Watching and stopping a run](training.md#watching-and-stopping-a-run)). With `batch_size`, the `best_fitness` it sees is the minibatch estimate, except for Adam, whose best is on the whole set. With Adam, `evaluations` counts the point each gradient batch measures, not the gradient's shifted circuits.
 
 **Cost of the exact gradient.** One gradient runs `samples × (1 + 2 × occurrences)` circuits, where `occurrences` counts the trainable gates. A parameter that several gates share costs two circuits per gate: a basic convolution over 4 qubits has 4 parameters on 3 pairs, so 12 occurrences and 25 circuits per sample instead of 9. The `1` is the parameters' own circuits, so an Adam iteration is that one batch: Adam reads the iteration's fitness from it rather than running them again. With `batch_size`, the gradient runs on the minibatch and Adam scores the parameters on the whole set apart, one more batch of `samples` circuits.
 
