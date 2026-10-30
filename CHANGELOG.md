@@ -11,33 +11,6 @@ Entries were curated from the Conventional Commits history. Releases before
 
 ## [Unreleased]
 
-### Added
-- `shor_order_finding` template: Beauregard's order-finding circuit for
-  Shor's algorithm, moduli up to 24 bits.
-  `polypus.circuits.templates.shor_order_finding(a, modulus,
-  counting_qubits=None)` / `polypus_circuit::templates::shor_order_finding`
-  returns the circuit (2n counting qubits by default, no measurements) whose
-  counting register estimates the order of `a` modulo `modulus`;
-  `MAX_SHOR_MODULUS_BITS` is the 24-bit limit, the largest circuit the
-  OpenQASM importers read back. The arithmetic blocks it is built from are
-  public in Rust under `templates::arithmetic`: `phase_adder`,
-  `modular_phase_adder`, `controlled_modular_multiplier` and
-  `controlled_modular_multiplication`. Their invalid arguments are the new
-  `CircuitError::InvalidTemplateArgument` (`ValueError` in Python). `qft` and
-  `shor_order_finding` build without holding the GIL.
-- `polypus.shor.factor`: Shor's algorithm end to end, from the classical
-  shortcuts to the order-finding circuit. `factor(n, infrastructure=...,
-  shots=1024, a=None, counting_qubits=None, max_attempts=10, seed=None,
-  **run_kwargs)` splits a composite `n` below `2**24` on any backend and
-  returns a `ShorResult` (factors, method, base, order, attempts,
-  peak_share, uniform_peak_share, counts). `method="quantum"` says where
-  the order was read, not that the circuit worked: to judge the circuit,
-  compare `peak_share`, the share of the shots on the peaks of the order
-  (all but the one at 0), with the level of an ideal circuit and with
-  `uniform_peak_share`, the share uniformly random outcomes would put there.
-  `order_from_measurement` and `factors_from_order`, its classical
-  post-processing, are public in the same module.
-
 ## [0.8.0] - 2026-10-30
 
 ### Upgrading from 0.7
@@ -63,7 +36,9 @@ to look first:
   `polypus_orchestration::Method` are `#[non_exhaustive]`, and
   `EvaluationError` has new variants; the DE, PSO and QNG argument structs,
   `DeConfig` and `TrainFlow` have new fields and `dispatch_optimizer` a new
-  argument (#395, #397, #410); `OracleFactory::build`, `templates::qft`,
+  argument (#395, #397, #410, #500); an `Optimizer` implemented outside
+  `polypus-optimizers` implements `optimize_observed` instead of `optimize`
+  (#500); `OracleFactory::build`, `templates::qft`,
   `Statevector::expectation_z` and `polypus_sim::sample_projected` changed
   their return types; `BackendConfig::Local` and `Cunqa` have no `backend`
   field (#230); the `polypus-physics` samplers take rand 0.10's `Rng` (#273).
@@ -400,6 +375,31 @@ to look first:
   seeded runs are unchanged. It comes after `seed` in the positional order.
   Rust: `AlgorithmSPSAArgs::stability_constant` and
   `polypus_orchestration::SpsaConfig::stability_constant` (#467).
+- `shor_order_finding` template: Beauregard's order-finding circuit for
+  Shor's algorithm, moduli up to 24 bits.
+  `polypus.circuits.templates.shor_order_finding(a, modulus,
+  counting_qubits=None)` / `polypus_circuit::templates::shor_order_finding`
+  returns the circuit (2n counting qubits by default, no measurements) whose
+  counting register estimates the order of `a` modulo `modulus`;
+  `MAX_SHOR_MODULUS_BITS` is the 24-bit limit, the largest circuit the
+  OpenQASM importers read back. The arithmetic blocks it is built from are
+  public in Rust under `templates::arithmetic`: `phase_adder`,
+  `modular_phase_adder`, `controlled_modular_multiplier` and
+  `controlled_modular_multiplication`. Their invalid arguments are the new
+  `CircuitError::InvalidTemplateArgument` (`ValueError` in Python). `qft` and
+  `shor_order_finding` build without holding the GIL.
+- `polypus.shor.factor`: Shor's algorithm end to end, from the classical
+  shortcuts to the order-finding circuit. `factor(n, infrastructure=...,
+  shots=1024, a=None, counting_qubits=None, max_attempts=10, seed=None,
+  **run_kwargs)` splits a composite `n` below `2**24` on any backend and
+  returns a `ShorResult` (factors, method, base, order, attempts,
+  peak_share, uniform_peak_share, counts). `method="quantum"` says where
+  the order was read, not that the circuit worked: to judge the circuit,
+  compare `peak_share`, the share of the shots on the peaks of the order
+  (all but the one at 0), with the level of an ideal circuit and with
+  `uniform_peak_share`, the share uniformly random outcomes would put there.
+  `order_from_measurement` and `factors_from_order`, its classical
+  post-processing, are public in the same module.
 
 ### Changed
 - `polypus-quantum` requires `qiskit>=2.0,<3` and `qiskit-aer>=0.17,<0.18`,
