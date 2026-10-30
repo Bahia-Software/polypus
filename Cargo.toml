@@ -43,7 +43,7 @@ resolver = "3"
 
 # Shared package metadata, inherited by member crates via `<key>.workspace = true`.
 [workspace.package]
-version = "0.8.0"
+version = "0.8.1-dev"
 edition = "2021"
 # MSRV, guarded by the `msrv` CI job. Currently set by the dependency tree
 # (the qmio feature pulls `saa`, which uses edition 2024 → Cargo 1.85); the
@@ -60,19 +60,19 @@ license = "EUPL-1.2"
 repository = "https://github.com/Bahia-Software/polypus"
 
 [workspace.dependencies]
-polypus-circuit    = { path = "crates/polypus-circuit", version = "0.8.0" }
-polypus-backend    = { path = "crates/polypus-backend", version = "0.8.0" }
-polypus-backend-conformance = { path = "crates/polypus-backend-conformance", version = "0.8.0" }
-polypus-physics    = { path = "crates/polypus-physics", version = "0.8.0" }
-polypus-sim        = { path = "crates/polypus-sim", version = "0.8.0" }
-polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.8.0" }
-polypus-observable = { path = "crates/polypus-observable", version = "0.8.0" }
-polypus-qml        = { path = "crates/polypus-qml", version = "0.8.0" }
-polypus-subprocess-backend = { path = "crates/polypus-subprocess-backend", version = "0.8.0" }
-polypus-infrastructure = { path = "crates/polypus-infrastructure", version = "0.8.0" }
-polypus-orchestration = { path = "crates/polypus-orchestration", version = "0.8.0" }
-polypus-evaluation = { path = "crates/polypus-evaluation", version = "0.8.0" }
-polypus-logger     = { path = "crates/polypus-logger", version = "0.8.0" }
+polypus-circuit    = { path = "crates/polypus-circuit", version = "0.8.1-dev" }
+polypus-backend    = { path = "crates/polypus-backend", version = "0.8.1-dev" }
+polypus-backend-conformance = { path = "crates/polypus-backend-conformance", version = "0.8.1-dev" }
+polypus-physics    = { path = "crates/polypus-physics", version = "0.8.1-dev" }
+polypus-sim        = { path = "crates/polypus-sim", version = "0.8.1-dev" }
+polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.8.1-dev" }
+polypus-observable = { path = "crates/polypus-observable", version = "0.8.1-dev" }
+polypus-qml        = { path = "crates/polypus-qml", version = "0.8.1-dev" }
+polypus-subprocess-backend = { path = "crates/polypus-subprocess-backend", version = "0.8.1-dev" }
+polypus-infrastructure = { path = "crates/polypus-infrastructure", version = "0.8.1-dev" }
+polypus-orchestration = { path = "crates/polypus-orchestration", version = "0.8.1-dev" }
+polypus-evaluation = { path = "crates/polypus-evaluation", version = "0.8.1-dev" }
+polypus-logger     = { path = "crates/polypus-logger", version = "0.8.1-dev" }
 
 # Shared external dependencies pinned once for the whole workspace.
 # Each requirement is a tested floor: the `rust-minimal-versions` CI job builds

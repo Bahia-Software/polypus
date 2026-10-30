@@ -783,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "polypus"
-version = "0.8.0"
+version = "0.8.1-dev"
 dependencies = [
  "log",
  "numpy",
@@ -804,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-backend"
-version = "0.8.0"
+version = "0.8.1-dev"
 dependencies = [
  "log",
  "polypus-circuit",
@@ -813,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-backend-conformance"
-version = "0.8.0"
+version = "0.8.1-dev"
 dependencies = [
  "polypus-backend",
  "polypus-circuit",
@@ -821,11 +821,11 @@ dependencies = [
 
 [[package]]
 name = "polypus-circuit"
-version = "0.8.0"
+version = "0.8.1-dev"
 
 [[package]]
 name = "polypus-evaluation"
-version = "0.8.0"
+version = "0.8.1-dev"
 dependencies = [
  "polypus-circuit",
  "polypus-infrastructure",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-infrastructure"
-version = "0.8.0"
+version = "0.8.1-dev"
 dependencies = [
  "log",
  "polypus-backend",
@@ -858,7 +858,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-logger"
-version = "0.8.0"
+version = "0.8.1-dev"
 dependencies = [
  "chrono",
  "log",
@@ -867,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-observable"
-version = "0.8.0"
+version = "0.8.1-dev"
 dependencies = [
  "rand 0.10.3",
  "rayon",
@@ -875,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-optimizers"
-version = "0.8.0"
+version = "0.8.1-dev"
 dependencies = [
  "log",
  "ndarray",
@@ -884,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-orchestration"
-version = "0.8.0"
+version = "0.8.1-dev"
 dependencies = [
  "log",
  "polypus-infrastructure",
@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-physics"
-version = "0.8.0"
+version = "0.8.1-dev"
 dependencies = [
  "csv",
  "log",
@@ -904,7 +904,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-qml"
-version = "0.8.0"
+version = "0.8.1-dev"
 dependencies = [
  "log",
  "polypus-circuit",
@@ -916,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-sim"
-version = "0.8.0"
+version = "0.8.1-dev"
 dependencies = [
  "fs4",
  "log",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-subprocess-backend"
-version = "0.8.0"
+version = "0.8.1-dev"
 dependencies = [
  "log",
  "nix",
