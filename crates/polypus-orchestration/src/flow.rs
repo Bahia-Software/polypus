@@ -11,8 +11,9 @@ use std::sync::Arc;
 use polypus_infrastructure::{BoundCircuit, CancelToken, CircuitTask, Counts, InfrastructureError};
 use polypus_optimizers::{EvaluationOracle, OptimizationOutcome, OptimizerError};
 
-use crate::dispatch::{dispatch_optimizer, Method, OracleError, OracleErrorSlot, Oracles};
+use crate::dispatch::{dispatch_optimizer_observed, Method, OracleError, OracleErrorSlot, Oracles};
 use crate::final_batch::{final_batch, EliteRecorder};
+use crate::progress::TrainObserver;
 use crate::scheduler::Resources;
 use crate::walltime::{watched, SystemClock};
 
@@ -138,6 +139,13 @@ pub struct TrainFlow<F: OracleFactory> {
     /// `best_fitness` are logged before it, and again if it fails, since its
     /// error is then the run's.
     pub final_shots: Option<u32>,
+    /// Shown every iteration of the optimizer, with the evaluations spent so
+    /// far (a `callback` of `train`, `qml.train` or `Model.fit`); it can stop
+    /// the run, which then returns what it has reached and still sends the
+    /// final batch of [`final_shots`](Self::final_shots). An error it records
+    /// in [`errors`](Self::errors) is the run's, and skips the final batch.
+    /// `None` runs exactly as before. See [`TrainObserver`].
+    pub observer: Option<Box<dyn TrainObserver>>,
     /// Shared failure slot: the oracle records into it, `dispatch_optimizer` takes
     /// it, and the edge downcasts + re-raises.
     pub errors: OracleErrorSlot,
@@ -206,14 +214,16 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
             ),
             None => oracles,
         };
+        let mut observer = self.observer;
         let Some(final_shots) = self.final_shots else {
-            let optimization = dispatch_optimizer(
+            let optimization = dispatch_optimizer_observed(
                 self.method,
                 oracles,
                 self.dimensions,
                 &self.errors,
                 self.seed,
                 self.initial_point,
+                observer.as_deref_mut().map(|o| o as &mut dyn TrainObserver),
             )?;
             return Ok(TrainOutcome {
                 optimization,
@@ -233,8 +243,9 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
         } = oracles;
         let evaluation: Arc<dyn EvaluationOracle> = Arc::from(evaluation);
         let elite = Arc::new(EliteRecorder::new(Arc::clone(&evaluation), count));
-        // An optimizer error or an interrupt returns here: no final batch.
-        let optimization = dispatch_optimizer(
+        // An optimizer error, an interrupt or a failure the observer recorded
+        // returns here: no final batch. A stop the observer asked for does not.
+        let optimization = dispatch_optimizer_observed(
             self.method,
             Oracles {
                 evaluation: Box::new(Arc::clone(&elite)),
@@ -245,6 +256,7 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
             &self.errors,
             self.seed,
             self.initial_point,
+            observer.as_deref_mut().map(|o| o as &mut dyn TrainObserver),
         )?;
         // A failure or an interrupt in the final batch is the run's error, and
         // the optimizer's result is not returned: log it first, at full
@@ -490,6 +502,7 @@ mod tests {
             seed: 7,
             initial_point: None,
             final_shots: None,
+            observer: None,
             errors: OracleErrorSlot::new(),
         };
         // `OracleError` does not implement `Debug`, so match rather than
@@ -575,6 +588,7 @@ mod tests {
             seed: 7,
             initial_point: None,
             final_shots: None,
+            observer: None,
             errors: OracleErrorSlot::new(),
         };
         assert!(scheduler.run(flow).is_ok(), "the train flow must run");
@@ -873,6 +887,21 @@ mod tests {
         final_shots: Option<u32>,
         walltime: Option<std::time::Duration>,
     ) -> Result<TrainOutcome, OracleError> {
+        noisy_run_watched(run_id, method, factory, final_shots, walltime, |_| None)
+    }
+
+    /// [`noisy_run_as`] with the observer `observer` builds over the run's
+    /// failure slot.
+    fn noisy_run_watched(
+        run_id: &str,
+        method: Method,
+        factory: NoisyFactory,
+        final_shots: Option<u32>,
+        walltime: Option<std::time::Duration>,
+        observer: impl FnOnce(&OracleErrorSlot) -> Option<Box<dyn TrainObserver>>,
+    ) -> Result<TrainOutcome, OracleError> {
+        let errors = OracleErrorSlot::new();
+        let observer = observer(&errors);
         let resources = Resources::new(
             Arc::new(ExpiringBackend(walltime)),
             Some(Arc::new(EchoPlanner)),
@@ -890,7 +919,8 @@ mod tests {
             seed: 11,
             initial_point: None,
             final_shots,
-            errors: OracleErrorSlot::new(),
+            observer,
+            errors,
         });
         scheduler.close();
         result
@@ -1095,5 +1125,175 @@ mod tests {
             }))
         ));
         assert!(!built.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    // ── Watching a run ───────────────────────────────────────────────────────
+
+    /// What an observer saw: each report's iteration, best fitness and
+    /// evaluations, with the candidates the oracle had been handed by then.
+    type Reports = Arc<std::sync::Mutex<Vec<(usize, f64, u64, u64)>>>;
+
+    /// An observer that records every report into `reports`, with the
+    /// candidates in `calls` so far, and stops the run on iteration `stop_at`.
+    fn recording(
+        reports: &Reports,
+        calls: &Arc<std::sync::Mutex<Vec<Call>>>,
+        stop_at: Option<usize>,
+    ) -> Box<dyn TrainObserver> {
+        let reports = Arc::clone(reports);
+        let calls = Arc::clone(calls);
+        Box::new(move |progress: &crate::TrainProgress<'_>| {
+            let scored: usize = calls.lock().unwrap().iter().map(|(c, ..)| c.len()).sum();
+            reports.lock().unwrap().push((
+                progress.iteration,
+                progress.best_fitness,
+                progress.evaluations,
+                scored as u64,
+            ));
+            if Some(progress.iteration) == stop_at {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        })
+    }
+
+    /// A watched run is the unwatched one, shown once an iteration with the
+    /// candidates scored so far, the final batch of `final_shots` not counted.
+    #[test]
+    fn a_watched_run_counts_every_candidate_but_the_final_batch() {
+        for (name, method) in every_method() {
+            let plain = noisy_run(method, NoisyFactory::default(), Some(4096), None)
+                .unwrap_or_else(|_| panic!("{name}: the run succeeds"));
+
+            let (_, method) = every_method()
+                .into_iter()
+                .find(|(n, _)| *n == name)
+                .unwrap();
+            let factory = NoisyFactory::default();
+            let calls = Arc::clone(&factory.calls);
+            let reports = Reports::default();
+            let watched =
+                noisy_run_watched(&config().id, method, factory, Some(4096), None, |_| {
+                    Some(recording(&reports, &calls, None))
+                })
+                .unwrap_or_else(|_| panic!("{name}: the watched run succeeds"));
+            assert_eq!(watched, plain, "{name}");
+
+            let reports = reports.lock().unwrap();
+            let history = &watched.optimization.fitness_history;
+            assert_eq!(reports.len(), history.len(), "{name}");
+            for (i, &(iteration, best, evaluations, scored)) in reports.iter().enumerate() {
+                assert_eq!(iteration, i + 1, "{name}");
+                assert_eq!(best.to_bits(), history[i].to_bits(), "{name}");
+                assert_eq!(evaluations, scored, "{name}: iteration {iteration}");
+            }
+            // The final batch comes after the last report and is not counted.
+            let calls = calls.lock().unwrap();
+            let before_final: usize = calls[..calls.len() - 1].iter().map(|(c, ..)| c.len()).sum();
+            assert_eq!(reports.last().unwrap().2, before_final as u64, "{name}");
+            assert_eq!(calls.last().unwrap().1, Some(4096), "{name}");
+        }
+    }
+
+    /// A stop returns the run's result so far and still sends the final batch.
+    #[test]
+    fn a_stop_returns_the_result_and_sends_the_final_batch() {
+        for (name, method) in every_method() {
+            let factory = NoisyFactory::default();
+            let calls = Arc::clone(&factory.calls);
+            let reports = Reports::default();
+            let outcome =
+                noisy_run_watched(&config().id, method, factory, Some(4096), None, |_| {
+                    Some(recording(&reports, &calls, Some(1)))
+                })
+                .unwrap_or_else(|_| panic!("{name}: a stopped run succeeds"));
+            let optimization = &outcome.optimization;
+            assert_eq!(optimization.iterations_run, 1, "{name}");
+            assert_eq!(optimization.fitness_history.len(), 1, "{name}");
+            assert!(!optimization.converged, "{name}");
+            assert_eq!(
+                optimization.fitness_history[0].to_bits(),
+                optimization.best_fitness.to_bits(),
+                "{name}"
+            );
+            assert_eq!(reports.lock().unwrap().len(), 1, "{name}");
+
+            // One final batch, right after the batches of the first iteration.
+            let calls = calls.lock().unwrap();
+            let (candidates, shots, _) = calls.last().expect("a final batch");
+            assert_eq!(*shots, Some(4096), "{name}");
+            assert_eq!(&candidates[0], &optimization.best_params, "{name}");
+            let scored: usize = calls[..calls.len() - 1].iter().map(|(c, ..)| c.len()).sum();
+            assert_eq!(reports.lock().unwrap()[0].2, scored as u64, "{name}");
+            let evaluation = outcome
+                .final_evaluation
+                .as_ref()
+                .expect("a final evaluation");
+            assert_eq!(evaluation.shots, 4096, "{name}");
+        }
+    }
+
+    /// An error the observer records is the run's: no more batches, no final
+    /// batch, no result.
+    #[test]
+    fn an_observer_error_is_the_runs_and_skips_the_final_batch() {
+        for (name, method) in every_method() {
+            let factory = NoisyFactory::default();
+            let calls = Arc::clone(&factory.calls);
+            let at_failure = Arc::new(std::sync::Mutex::new(None));
+            let result =
+                noisy_run_watched(&config().id, method, factory, Some(4096), None, |errors| {
+                    let errors = errors.clone();
+                    let calls = Arc::clone(&calls);
+                    let at_failure = Arc::clone(&at_failure);
+                    Some(Box::new(move |_: &crate::TrainProgress<'_>| {
+                        errors.record(Box::new(Failed("the callback raised")), "flow-test");
+                        *at_failure.lock().unwrap() = Some(calls.lock().unwrap().len());
+                        std::ops::ControlFlow::Break(())
+                    }))
+                });
+            match result {
+                Err(OracleError::Evaluation(cause)) => {
+                    assert_eq!(cause.to_string(), "the callback raised", "{name}")
+                }
+                _ => panic!("{name}: the observer's error must be the run's"),
+            }
+            let calls = calls.lock().unwrap();
+            assert_eq!(Some(calls.len()), *at_failure.lock().unwrap(), "{name}");
+            assert!(calls.iter().all(|(_, s, _)| s.is_none()), "{name}");
+        }
+    }
+
+    /// Once the oracle has failed, the observer is not shown another
+    /// iteration, and the run's error is the oracle's.
+    #[test]
+    fn a_failed_run_is_not_shown_to_the_observer() {
+        for (name, method) in every_method() {
+            let factory = NoisyFactory {
+                fail_at: Some(2),
+                ..NoisyFactory::default()
+            };
+            let saw_a_failure = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let result =
+                noisy_run_watched(&config().id, method, factory, Some(4096), None, |errors| {
+                    let errors = errors.clone();
+                    let saw_a_failure = Arc::clone(&saw_a_failure);
+                    Some(Box::new(move |_: &crate::TrainProgress<'_>| {
+                        if errors.failed() {
+                            saw_a_failure.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        std::ops::ControlFlow::Continue(())
+                    }))
+                });
+            assert!(
+                matches!(result, Err(OracleError::Evaluation(_))),
+                "{name}: the failure must be the run's"
+            );
+            assert!(
+                !saw_a_failure.load(std::sync::atomic::Ordering::SeqCst),
+                "{name}"
+            );
+        }
     }
 }

@@ -74,6 +74,7 @@ __all__ = [
     "euler",
     "RunResult",
     "TrainResult",
+    "TrainProgress",
     "Qubo",
     "Ising",
     "CachedCost",
@@ -111,6 +112,10 @@ _Options = dict[str, Union[str, list[str], tuple[str, ...]]]
 # `train`'s `expectation_function`: a `bitstring -> float` callable, the same
 # memoised, or a native GIL-free observable.
 _CostFunction = Union[Callable[[str], float], CachedCost, Qubo, Ising]
+# The `callback` of `train`, `qml.train` and `qml.Model.fit`: called once per
+# iteration; `True` (or a true NumPy `bool_`) stops the run, `None` or `False`
+# lets it go on, and any other return value raises `TypeError`.
+_TrainCallback = Callable[[TrainProgress], Union[bool, np.bool_, None]]
 
 class _CalibrationOutcome(TypedDict):
     threshold: int
@@ -491,6 +496,19 @@ class TrainResult:
     @property
     def id(self) -> str: ...
 
+# What a training `callback` receives once per iteration; read-only, and
+# `best_params` is a new list on every access.
+@final
+class TrainProgress:
+    @property
+    def iteration(self) -> int: ...
+    @property
+    def best_fitness(self) -> float: ...
+    @property
+    def best_params(self) -> list[float]: ...
+    @property
+    def evaluations(self) -> int: ...
+
 # ── Native cost observables ─────────────────────────────────────────────────
 
 @final
@@ -560,6 +578,8 @@ def train(
     walltime: Optional[str] = None,
     initial_point: Optional[_FloatVector] = None,
     final_shots: Optional[SupportsIndex] = None,
+    *,
+    callback: Optional[_TrainCallback] = None,
 ) -> TrainResult: ...
 def run_quantum_circuit(
     qc: Union[QuantumCircuit, Circuit, str],

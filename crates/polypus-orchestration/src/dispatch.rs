@@ -32,8 +32,12 @@ use polypus_optimizers::{
 use polypus_optimizers::{AlgorithmExternal, AlgorithmExternalArgs, AskTell};
 use polypus_optimizers::{AlgorithmRotosolve, AlgorithmRotosolveArgs};
 use polypus_optimizers::{AlgorithmSPSA, AlgorithmSPSAArgs};
+use polypus_optimizers::{IterationObserver, Unobserved};
 use std::error::Error;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
+
+use crate::progress::{Counted, CountedGradient, TrainObserver, Watch};
 
 /// DE configuration, mirroring the `polypus.DE` object minus the shared
 /// execution parameters (`oracle`, `dimensions`, `seed`) dispatch supplies.
@@ -426,11 +430,65 @@ pub fn dispatch_optimizer(
     seed: u64,
     initial_point: Option<Vec<f64>>,
 ) -> Result<OptimizationOutcome, OracleError> {
+    dispatch_optimizer_observed(
+        method,
+        oracles,
+        dimensions,
+        errors,
+        seed,
+        initial_point,
+        None,
+    )
+}
+
+/// [`dispatch_optimizer`], showing `observer`, when there is one, the run at
+/// the end of every iteration of the optimizer (see [`TrainObserver`]).
+///
+/// With an observer, the evaluation oracles (`evaluation` and
+/// `full_evaluation`) are wrapped in a counter of the candidates they are
+/// handed, and the exact gradient in one of the `θ`s it scores itself, which
+/// the observer sees as
+/// [`TrainProgress::evaluations`](crate::TrainProgress::evaluations), and the
+/// run stops at the end of the first iteration after `errors` records a
+/// failure, without calling the observer. A stop the observer asks for
+/// returns the outcome the run has reached; a failure it records in `errors`
+/// is the run's error, like an oracle's. `None` runs exactly as
+/// [`dispatch_optimizer`] always has.
+pub fn dispatch_optimizer_observed(
+    method: Method,
+    oracles: impl Into<Oracles>,
+    dimensions: u32,
+    errors: &OracleErrorSlot,
+    seed: u64,
+    initial_point: Option<Vec<f64>>,
+    observer: Option<&mut dyn TrainObserver>,
+) -> Result<OptimizationOutcome, OracleError> {
     let Oracles {
-        evaluation: oracle,
-        gradient,
+        evaluation: mut oracle,
+        mut gradient,
         mut full_evaluation,
     } = oracles.into();
+    let mut unobserved = Unobserved;
+    let mut watch;
+    let observer: &mut dyn IterationObserver = match observer {
+        Some(observer) => {
+            let evaluations = Arc::new(AtomicU64::new(0));
+            oracle = Box::new(Counted::new(oracle, &evaluations));
+            full_evaluation = full_evaluation.map(|full| -> Box<dyn EvaluationOracle> {
+                Box::new(Counted::new(full, &evaluations))
+            });
+            gradient = gradient.map(|exact| -> Box<dyn GradientOracle> {
+                Box::new(CountedGradient::new(exact, &evaluations))
+            });
+            watch = Watch {
+                observer,
+                evaluations,
+                errors,
+            };
+            &mut watch
+        }
+        None => &mut unobserved,
+    };
     let result = match method {
         // Adam tracks its best on the full set itself, so it takes the view and
         // its outcome is not re-scored below.
@@ -442,8 +500,9 @@ pub fn dispatch_optimizer(
             dimensions,
             seed,
             initial_point,
+            observer,
         ),
-        Method::De(cfg) => AlgorithmDifferentialEvolution.optimize_with_strategy(
+        Method::De(cfg) => AlgorithmDifferentialEvolution.optimize_with_strategy_observed(
             cfg.strategy,
             AlgorithmDifferentialEvolutionArgs {
                 oracle,
@@ -457,79 +516,98 @@ pub fn dispatch_optimizer(
                 mutation_factor: cfg.mutation_factor,
                 crossover_rate: cfg.crossover_rate,
             },
+            observer,
         ),
-        Method::Pso(cfg) => AlgorithmPSO.optimize(AlgorithmPSOArgs {
-            oracle,
-            population_size: cfg.population_size,
-            generations: cfg.generations,
-            dimensions,
-            bounds: cfg.bounds,
-            inertia_weight: cfg.inertia_weight,
-            cognitive_weight: cfg.cognitive_weight,
-            social_weight: cfg.social_weight,
-            tolerance: cfg.tolerance,
-            seed: Some(seed),
-            initial_point,
-        }),
-        Method::Qng(cfg, variance_oracle) => AlgorithmQNG.optimize(AlgorithmQNGArgs {
-            oracle,
-            max_iters: cfg.max_iters,
-            learning_rate: cfg.learning_rate,
-            finite_difference_step: cfg.finite_difference_step,
-            bounds: cfg.bounds,
-            dimensions,
-            variance_oracle,
-            tikhonov_reg: cfg.tikhonov_reg,
-            seed: Some(seed),
-            initial_point,
-        }),
-        Method::Cmaes(cfg) => AlgorithmCmaEs.optimize(AlgorithmCmaEsArgs {
-            oracle,
-            population_size: cfg.population_size,
-            generations: cfg.generations,
-            dimensions,
-            sigma0: cfg.sigma0,
-            tolerance: cfg.tolerance,
-            patience: cfg.patience,
-            restarts: cfg.restarts,
-            seed: Some(seed),
-            initial_point,
-        }),
-        Method::Spsa(cfg) => AlgorithmSPSA.optimize(AlgorithmSPSAArgs {
-            oracle,
-            max_iters: cfg.max_iters,
-            resamplings: cfg.resamplings,
-            perturbation: cfg.perturbation,
-            target_step: cfg.target_step,
-            alpha: cfg.alpha,
-            gamma: cfg.gamma,
-            stability_constant: cfg.stability_constant,
-            eval_interval: cfg.eval_interval,
-            dimensions,
-            seed: Some(seed),
-            initial_point,
-        }),
-        Method::Rotosolve(cfg) => AlgorithmRotosolve.optimize(AlgorithmRotosolveArgs {
-            oracle,
-            sweeps: cfg.sweeps,
-            reevaluate_every: cfg.reevaluate_every,
-            tolerance: cfg.tolerance,
-            patience: cfg.patience,
-            dimensions,
-            seed: Some(seed),
-            initial_point,
-        }),
+        Method::Pso(cfg) => AlgorithmPSO.optimize_observed(
+            AlgorithmPSOArgs {
+                oracle,
+                population_size: cfg.population_size,
+                generations: cfg.generations,
+                dimensions,
+                bounds: cfg.bounds,
+                inertia_weight: cfg.inertia_weight,
+                cognitive_weight: cfg.cognitive_weight,
+                social_weight: cfg.social_weight,
+                tolerance: cfg.tolerance,
+                seed: Some(seed),
+                initial_point,
+            },
+            observer,
+        ),
+        Method::Qng(cfg, variance_oracle) => AlgorithmQNG.optimize_observed(
+            AlgorithmQNGArgs {
+                oracle,
+                max_iters: cfg.max_iters,
+                learning_rate: cfg.learning_rate,
+                finite_difference_step: cfg.finite_difference_step,
+                bounds: cfg.bounds,
+                dimensions,
+                variance_oracle,
+                tikhonov_reg: cfg.tikhonov_reg,
+                seed: Some(seed),
+                initial_point,
+            },
+            observer,
+        ),
+        Method::Cmaes(cfg) => AlgorithmCmaEs.optimize_observed(
+            AlgorithmCmaEsArgs {
+                oracle,
+                population_size: cfg.population_size,
+                generations: cfg.generations,
+                dimensions,
+                sigma0: cfg.sigma0,
+                tolerance: cfg.tolerance,
+                patience: cfg.patience,
+                restarts: cfg.restarts,
+                seed: Some(seed),
+                initial_point,
+            },
+            observer,
+        ),
+        Method::Spsa(cfg) => AlgorithmSPSA.optimize_observed(
+            AlgorithmSPSAArgs {
+                oracle,
+                max_iters: cfg.max_iters,
+                resamplings: cfg.resamplings,
+                perturbation: cfg.perturbation,
+                target_step: cfg.target_step,
+                alpha: cfg.alpha,
+                gamma: cfg.gamma,
+                stability_constant: cfg.stability_constant,
+                eval_interval: cfg.eval_interval,
+                dimensions,
+                seed: Some(seed),
+                initial_point,
+            },
+            observer,
+        ),
+        Method::Rotosolve(cfg) => AlgorithmRotosolve.optimize_observed(
+            AlgorithmRotosolveArgs {
+                oracle,
+                sweeps: cfg.sweeps,
+                reevaluate_every: cfg.reevaluate_every,
+                tolerance: cfg.tolerance,
+                patience: cfg.patience,
+                dimensions,
+                seed: Some(seed),
+                initial_point,
+            },
+            observer,
+        ),
         // As every optimizer: the configuration, then the point.
         Method::External(cfg, optimizer) => {
             AlgorithmExternal::check_preconditions(cfg.max_evaluations, dimensions)
                 .and_then(|()| refuse_external_initial_point(initial_point.as_deref()))
                 .and_then(|()| {
-                    AlgorithmExternal.optimize(AlgorithmExternalArgs {
-                        oracle,
-                        optimizer,
-                        max_evaluations: cfg.max_evaluations,
-                        dimensions,
-                    })
+                    AlgorithmExternal.optimize_observed(
+                        AlgorithmExternalArgs {
+                            oracle,
+                            optimizer,
+                            max_evaluations: cfg.max_evaluations,
+                            dimensions,
+                        },
+                        observer,
+                    )
                 })
         }
     };
@@ -571,6 +649,7 @@ fn dispatch_adam(
     dimensions: u32,
     seed: u64,
     initial_point: Option<Vec<f64>>,
+    observer: &mut dyn IterationObserver,
 ) -> Result<OptimizationOutcome, OptimizerError> {
     // Checked even when an exact gradient leaves it unused, so a bad step is
     // refused whatever oracles the run has, as `check_preconditions` refuses it.
@@ -597,22 +676,25 @@ fn dispatch_adam(
                 }
             }
         };
-    AlgorithmAdam.optimize(AlgorithmAdamArgs {
-        oracle: tracking,
-        gradient_oracle,
-        max_iters: cfg.max_iters,
-        learning_rate: cfg.learning_rate,
-        beta1: cfg.beta1,
-        beta2: cfg.beta2,
-        epsilon: cfg.epsilon,
-        bounds: cfg.bounds,
-        dimensions,
-        tolerance: cfg.tolerance,
-        patience: cfg.patience,
-        rule: cfg.rule,
-        seed: Some(seed),
-        initial_point,
-    })
+    AlgorithmAdam.optimize_observed(
+        AlgorithmAdamArgs {
+            oracle: tracking,
+            gradient_oracle,
+            max_iters: cfg.max_iters,
+            learning_rate: cfg.learning_rate,
+            beta1: cfg.beta1,
+            beta2: cfg.beta2,
+            epsilon: cfg.epsilon,
+            bounds: cfg.bounds,
+            dimensions,
+            tolerance: cfg.tolerance,
+            patience: cfg.patience,
+            rule: cfg.rule,
+            seed: Some(seed),
+            initial_point,
+        },
+        observer,
+    )
 }
 
 /// A gradient oracle without its [`GradientOracle::value_and_gradient`], so
@@ -2015,5 +2097,272 @@ mod tests {
             }
             _ => panic!("expected an InvalidConfig for max_evaluations"),
         }
+    }
+
+    // ── Watching a run: the evaluation count and the failure slot ──────────────
+
+    /// Dispatch `method` over `oracles` with an observer that never stops the
+    /// run, and return the outcome and the `evaluations` of every report.
+    fn watched(
+        method: Method,
+        oracles: Oracles,
+        errors: &OracleErrorSlot,
+    ) -> (Result<OptimizationOutcome, OracleError>, Vec<u64>) {
+        let mut seen = Vec::new();
+        let mut observer = |progress: &crate::TrainProgress<'_>| {
+            seen.push(progress.evaluations);
+            std::ops::ControlFlow::Continue(())
+        };
+        let result =
+            dispatch_optimizer_observed(method, oracles, 3, errors, 5, None, Some(&mut observer));
+        (result, seen)
+    }
+
+    #[test]
+    fn de_evaluations_count_the_initial_population_and_each_generation() {
+        for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade] {
+            let (oracle, log) = recorder();
+            let (result, seen) =
+                watched(de_method(strategy), oracle.into(), &OracleErrorSlot::new());
+            let outcome = result.unwrap_or_else(|_| panic!("the run succeeds"));
+            // 12 members: the initial population, then one batch a generation.
+            let expected: Vec<u64> = (1..=outcome.iterations_run as u64)
+                .map(|g| 12 * (g + 1))
+                .collect();
+            assert_eq!(seen, expected, "{strategy}");
+            assert_eq!(
+                *seen.last().unwrap(),
+                sizes(&log).iter().sum::<usize>() as u64,
+                "{strategy}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_never_stopping_observer_leaves_the_outcome_unchanged() {
+        for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade, DeStrategy::LShade] {
+            let (oracle, _) = recorder();
+            let plain = dispatch_optimizer(
+                de_method(strategy),
+                oracle,
+                3,
+                &OracleErrorSlot::new(),
+                5,
+                None,
+            )
+            .unwrap_or_else(|_| panic!("the run succeeds"));
+            let (oracle, _) = recorder();
+            let (watched, _) = watched(de_method(strategy), oracle.into(), &OracleErrorSlot::new());
+            assert_eq!(
+                watched.unwrap_or_else(|_| panic!("the run succeeds")),
+                plain,
+                "{strategy}"
+            );
+        }
+        let (oracle, _) = recorder();
+        let plain =
+            dispatch_optimizer(adam_method(25), oracle, 3, &OracleErrorSlot::new(), 5, None)
+                .unwrap_or_else(|_| panic!("the run succeeds"));
+        let (oracle, _) = recorder();
+        let (watched, _) = watched(adam_method(25), oracle.into(), &OracleErrorSlot::new());
+        assert_eq!(
+            watched.unwrap_or_else(|_| panic!("the run succeeds")),
+            plain
+        );
+    }
+
+    #[test]
+    fn adam_with_a_finite_difference_counts_theta_and_its_stencil() {
+        let (oracle, log) = recorder();
+        let (result, seen) = watched(adam_method(10), oracle.into(), &OracleErrorSlot::new());
+        let outcome = result.unwrap_or_else(|_| panic!("the run succeeds"));
+        assert_eq!(outcome.iterations_run, 10);
+        // θ and its central stencil, 2·3 + 1 candidates an iteration, and the
+        // final θ, measured on the last iteration before its report.
+        let mut expected: Vec<u64> = (1..=10).map(|i| 7 * i).collect();
+        *expected.last_mut().unwrap() += 1;
+        assert_eq!(seen, expected);
+        assert_eq!(
+            *seen.last().unwrap(),
+            sizes(&log).iter().sum::<usize>() as u64
+        );
+    }
+
+    #[test]
+    fn adam_with_an_exact_gradient_counts_only_theta() {
+        let (oracle, _) = recorder();
+        let calls = Arc::new(Mutex::new(0));
+        let oracles = Oracles {
+            evaluation: oracle,
+            gradient: Some(Box::new(QuadraticGradient(Arc::clone(&calls)))),
+            full_evaluation: None,
+        };
+        let (result, seen) = watched(adam_method(10), oracles, &OracleErrorSlot::new());
+        let outcome = result.unwrap_or_else(|_| panic!("the run succeeds"));
+        // The gradient's own circuits are not counted: one θ an iteration, and
+        // the final θ on the last.
+        let mut expected: Vec<u64> = (1..=outcome.iterations_run as u64).collect();
+        *expected.last_mut().unwrap() += 1;
+        assert_eq!(seen, expected);
+        assert_eq!(*calls.lock().unwrap(), outcome.iterations_run);
+    }
+
+    #[test]
+    fn a_minibatched_adam_counts_the_minibatch_and_the_full_dataset() {
+        let (minibatch, minibatch_log) = recorder();
+        let (full, full_log) = recorder();
+        let oracles = Oracles {
+            evaluation: minibatch,
+            gradient: None,
+            full_evaluation: Some(full),
+        };
+        let (result, seen) = watched(adam_method(10), oracles, &OracleErrorSlot::new());
+        let outcome = result.unwrap_or_else(|_| panic!("the run succeeds"));
+        // θ on every sample, its 2·3 stencil on the minibatch, and the final θ
+        // on every sample on the last iteration.
+        let mut expected: Vec<u64> = (1..=outcome.iterations_run as u64).map(|i| 7 * i).collect();
+        *expected.last_mut().unwrap() += 1;
+        assert_eq!(seen, expected);
+        let total =
+            sizes(&minibatch_log).iter().sum::<usize>() + sizes(&full_log).iter().sum::<usize>();
+        assert_eq!(*seen.last().unwrap(), total as u64);
+    }
+
+    /// `quadratic`'s exact gradient that also scores θ in its own batch, as a
+    /// parameter shift does, counting the θs it scores.
+    struct ScoringGradient(Arc<Mutex<usize>>);
+    impl GradientOracle for ScoringGradient {
+        fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
+            -2.0 * (theta[param_index] - 1.0)
+        }
+        fn value_and_gradient(&self, theta: &[f64], dims: usize) -> Option<(f64, Vec<f64>)> {
+            *self.0.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+            let value = -theta.iter().map(|x| (x - 1.0).powi(2)).sum::<f64>();
+            Some((value, self.gradient_batch(theta, dims)))
+        }
+        fn scores_theta(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn adam_counts_the_theta_an_exact_gradient_scores_itself() {
+        let (oracle, log) = recorder();
+        let scored = Arc::new(Mutex::new(0));
+        let oracles = Oracles {
+            evaluation: oracle,
+            gradient: Some(Box::new(ScoringGradient(Arc::clone(&scored)))),
+            full_evaluation: None,
+        };
+        let (result, seen) = watched(adam_method(10), oracles, &OracleErrorSlot::new());
+        let outcome = result.unwrap_or_else(|_| panic!("the run succeeds"));
+        // One θ an iteration, scored by the gradient, and the final θ, scored
+        // by the evaluation oracle on the last.
+        let mut expected: Vec<u64> = (1..=outcome.iterations_run as u64).collect();
+        *expected.last_mut().unwrap() += 1;
+        assert_eq!(seen, expected);
+        assert_eq!(*scored.lock().unwrap(), outcome.iterations_run);
+        assert_eq!(sizes(&log), vec![1]);
+
+        // The same run, unwatched, is unchanged.
+        let (oracle, _) = recorder();
+        let oracles = Oracles {
+            evaluation: oracle,
+            gradient: Some(Box::new(ScoringGradient(Arc::default()))),
+            full_evaluation: None,
+        };
+        let plain = dispatch_optimizer(
+            adam_method(10),
+            oracles,
+            3,
+            &OracleErrorSlot::new(),
+            5,
+            None,
+        )
+        .unwrap_or_else(|_| panic!("the run succeeds"));
+        assert_eq!(plain, outcome);
+    }
+
+    /// Records `Failed` in its slot from its `fail_at`-th call on.
+    struct FailingFrom {
+        errors: OracleErrorSlot,
+        fail_at: usize,
+        calls: Arc<Mutex<usize>>,
+    }
+    impl EvaluationOracle for FailingFrom {
+        fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+            let mut calls = self.calls.lock().unwrap_or_else(|p| p.into_inner());
+            if *calls >= self.fail_at {
+                self.errors.record(boxed("backend"), "dispatch-test");
+            }
+            *calls += 1;
+            vec![0.0; candidates.len()]
+        }
+    }
+
+    #[test]
+    fn a_failed_run_stops_without_showing_the_observer_another_iteration() {
+        let errors = OracleErrorSlot::new();
+        let calls = Arc::new(Mutex::new(0));
+        let oracle = Box::new(FailingFrom {
+            errors: errors.clone(),
+            fail_at: 2,
+            calls: Arc::clone(&calls),
+        });
+        let mut shown = Vec::new();
+        let mut observer = |progress: &crate::TrainProgress<'_>| {
+            shown.push(progress.iteration);
+            std::ops::ControlFlow::Continue(())
+        };
+        let result = dispatch_optimizer_observed(
+            de_method(DeStrategy::Rand1Bin),
+            oracle,
+            3,
+            &errors,
+            5,
+            None,
+            Some(&mut observer),
+        );
+        match result {
+            Err(OracleError::Evaluation(cause)) => assert_eq!(cause.to_string(), "backend"),
+            _ => panic!("expected the recorded failure"),
+        }
+        // The initial population and generation 1 succeed; generation 2 fails,
+        // and the run ends there without showing it.
+        assert_eq!(shown, vec![1]);
+        assert_eq!(*calls.lock().unwrap(), 3);
+    }
+
+    #[test]
+    fn an_error_the_observer_records_is_the_runs() {
+        let (oracle, log) = recorder();
+        let errors = OracleErrorSlot::new();
+        let mut shown = 0;
+        let mut observer = |_: &crate::TrainProgress<'_>| {
+            shown += 1;
+            if shown == 2 {
+                errors.record(boxed("the callback raised"), "dispatch-test");
+                return std::ops::ControlFlow::Break(());
+            }
+            std::ops::ControlFlow::Continue(())
+        };
+        let result = dispatch_optimizer_observed(
+            de_method(DeStrategy::Rand1Bin),
+            oracle,
+            3,
+            &errors,
+            5,
+            None,
+            Some(&mut observer),
+        );
+        match result {
+            Err(OracleError::Evaluation(cause)) => {
+                assert_eq!(cause.to_string(), "the callback raised")
+            }
+            _ => panic!("expected the recorded failure"),
+        }
+        assert_eq!(shown, 2);
+        // The initial population and two generations: nothing after the stop.
+        assert_eq!(sizes(&log), vec![12, 12, 12]);
     }
 }
