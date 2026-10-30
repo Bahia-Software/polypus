@@ -69,7 +69,7 @@ def check(root, tag=None, publish=False):
     if tag is not None:
         if not TAG.fullmatch(tag):
             errors.append(f"tag '{tag}' is not of the form vX.Y.Z")
-        elif tag != f"v{version}":
+        elif tag != f"v{version}" and not DEV_VERSION.fullmatch(version):
             errors.append(
                 f"tag '{tag}' does not match the Cargo.toml workspace version "
                 f"'{version}' (expected 'v{version}')"

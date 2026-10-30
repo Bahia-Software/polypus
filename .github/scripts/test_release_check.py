@@ -90,6 +90,13 @@ def test_dev_version_is_refused_on_a_tag(tmp_path):
     assert any("development version" in e for e in errors(root, tag="v0.8.1-dev"))
 
 
+def test_dev_version_does_not_suggest_a_dev_tag(tmp_path):
+    root = tree(tmp_path, version="0.8.1-dev")
+    msgs = errors(root, tag="v0.8.1")
+    assert not any("v0.8.1-dev" in e for e in msgs), msgs
+    assert any("development version" in e for e in msgs)
+
+
 def test_dev_version_is_refused_for_a_publish_without_tag(tmp_path):
     root = tree(tmp_path, version="0.8.1-dev")
     assert any("development version" in e for e in errors(root, publish=True))
