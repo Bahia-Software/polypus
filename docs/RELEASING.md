@@ -30,25 +30,100 @@ ordering later.)
 Keep the two in sync: the author list and ORCIDs are identical in both today,
 and any future change must be applied to both.
 
+## Versions
+
+`[workspace.package].version` in the root `Cargo.toml` is the single source of
+truth (contract C-6 in [`CONTRACTS.md`](CONTRACTS.md)).
+
+| | release | `main` between releases |
+|---|---|---|
+| `Cargo.toml` and internal pins | `0.8.0` | `0.8.1-dev` |
+| wheel / sdist (maturin, PEP 440) | `0.8.0` | `0.8.1.dev0` |
+| `polypus.__version__` | `0.8.0` | `0.8.1.dev0` |
+| `CITATION.cff` `version` | `0.8.0` | `0.8.0` (the last release) |
+
+A pull request that breaks the API of a crate on crates.io raises `main` to the
+next minor (`0.9.0-dev`); the `semver` CI job enforces it
+([`CONTRIBUTING.md`](CONTRIBUTING.md#versioning-and-releases)).
+
+The release gate (`gate` job of [`release.yml`](../.github/workflows/release.yml),
+rules in [`release_check.py`](../.github/scripts/release_check.py)) refuses a
+tag or a manual run with `target=pypi` unless:
+
+- the workspace version is `X.Y.Z`, with no `-dev` suffix;
+- a tag is `v` + that version;
+- every internal pin in `[workspace.dependencies]` equals that version;
+- `CHANGELOG.md` has a `## [X.Y.Z] - YYYY-MM-DD` section;
+- `CITATION.cff` has the same `version` and `date-released`;
+- `ci.yml` has a successful push run for the tagged commit.
+
+Run the same check locally with
+`python .github/scripts/release_check.py --tag vX.Y.Z --publish` (Python 3.11+).
+Without arguments it applies the rules for any branch, as `hygiene.yml` does on
+every pull request: an `X.Y.Z` or `X.Y.Z-dev` version, the pins, and no
+`X.Y.Z` that is already tagged.
+
 ## Release steps
 
-1. **Bump the version and release date.** Set `version:` and `date-released:`
-   in `CITATION.cff` to match the workspace `Cargo.toml` version and the day
-   the release actually happens (also update `Cargo.toml` / `Cargo.lock` if the
-   version itself is changing). Validate:
+1. **Freeze.** The release ships what is merged on `main`. Every workflow is
+   green on the commit to release.
+2. **Release pull request** (branch `release/X.Y.Z`):
+   1. Set the version of every crate, the internal pins and `Cargo.lock` in
+      one step with [cargo-edit](https://github.com/killercup/cargo-edit):
+      ```bash
+      cargo set-version --workspace X.Y.Z
+      for t in examples/*-backend-template; do cargo metadata --format-version 1 --manifest-path "$t/Cargo.toml" > /dev/null; done
+      ```
+      The second line refreshes the lockfiles of the backend templates, which
+      depend on the workspace crates by path. Also set the `version` of the
+      BibTeX entry in `README.md`.
+   2. In `CHANGELOG.md`, rename `## [Unreleased]` to
+      `## [X.Y.Z] - YYYY-MM-DD`, add an empty `## [Unreleased]` above it, and
+      update the comparison links at the end. A release with **BREAKING**
+      entries opens with a short *Upgrading from X.(Y-1)* subsection, grouped
+      by audience, that points to those entries.
+   3. In `CITATION.cff`, set `version:` to `X.Y.Z` and `date-released:` to the
+      CHANGELOG date. `.zenodo.json` carries no version. Validate:
+      ```bash
+      pipx run cffconvert --validate -i CITATION.cff   # "valid according to schema 1.2.0"
+      ```
+   4. Check: `python .github/scripts/release_check.py --tag vX.Y.Z --publish`.
+
+   The date is the day of the tag. If the pull request merges on an earlier
+   day, update both dates on `main` before tagging.
+3. **TestPyPI dry run.** Actions → Release → Run workflow on `main` with
+   `target=testpypi`. It builds and smoke-tests every wheel and the sdist and
+   uploads them to test.pypi.org; then, in a clean environment:
    ```bash
-   pipx run cffconvert --validate -i CITATION.cff   # "valid according to schema 1.2.0"
+   pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ polypus-quantum==X.Y.Z
    ```
-2. **Publish the GitHub release.** Create a **GitHub Release** (not just a bare
-   tag) named `vX.Y.Z`. This:
-   - triggers [`release.yml`](../.github/workflows/release.yml) → builds the
-     wheels + sdist, smoke-tests every wheel on its platform and the sdist
-     (built from source in a clean container), publishes to PyPI
+   TestPyPI never accepts the same file twice, so a second dry run of the same
+   version skips the files already there. Every commit of a `-dev` version
+   builds the same `X.Y.Z.dev0`, so only its first dry run uploads anything.
+4. **crates.io credentials.** If the release adds a crate (`python
+   .github/scripts/publish_crates.py --plan` prints `(new crate)`), a
+   `CARGO_REGISTRY_TOKEN` secret with the `publish-new` and `publish-update`
+   scopes must exist before the tag; see [crates.io](#cratesio).
+5. **Publish the GitHub release.** Create a **GitHub Release** (not just a bare
+   tag) named `vX.Y.Z` on the release commit. This:
+   - triggers [`release.yml`](../.github/workflows/release.yml) → the gate,
+     then builds the wheels + sdist, smoke-tests every wheel on its platform and
+     the sdist (built from source in a clean container), publishes to PyPI
      (Trusted Publishing) and the Rust crates to crates.io (see
-     [crates.io](#cratesio)), then runs the clean-install verification;
+     [crates.io](#cratesio); new crates hit a 429 rate limit, resumed with
+     "Re-run failed jobs"), then runs the clean-install verification;
    - fires the Zenodo webhook → Zenodo archives the release, reads `.zenodo.json`,
      and mints a version DOI under the existing concept DOI (below) —
      no manual step needed.
+6. **Back to a development version.** Right after the tag, a pull request
+   moves `main` to the next patch with `-dev`; until it merges, hygiene fails
+   every pull request, since `main` would build as the tagged release:
+   ```bash
+   cargo set-version --workspace X.Y.(Z+1)-dev
+   for t in examples/*-backend-template; do cargo metadata --format-version 1 --manifest-path "$t/Cargo.toml" > /dev/null; done
+   ```
+   `CHANGELOG.md` keeps its empty `## [Unreleased]`; `CITATION.cff` and the
+   README BibTeX keep the release.
 
 ## crates.io
 

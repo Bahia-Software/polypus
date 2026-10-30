@@ -2,6 +2,7 @@
 
 use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
+use crate::observer::{IterationObserver, IterationReport, Unobserved};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
 use crate::shade;
@@ -347,13 +348,27 @@ impl AlgorithmDifferentialEvolution {
         strategy: DeStrategy,
         args: AlgorithmDifferentialEvolutionArgs,
     ) -> Result<OptimizationOutcome, OptimizerError> {
+        self.optimize_with_strategy_observed(strategy, args, &mut Unobserved)
+    }
+
+    /// [`optimize_with_strategy`](Self::optimize_with_strategy), showing
+    /// `observer` every generation as
+    /// [`Optimizer::optimize_observed`] does: a generation is one
+    /// [`IterationReport`], and the run stops after the one on which it
+    /// answers [`Break`](std::ops::ControlFlow::Break).
+    pub fn optimize_with_strategy_observed(
+        &self,
+        strategy: DeStrategy,
+        args: AlgorithmDifferentialEvolutionArgs,
+        observer: &mut dyn IterationObserver,
+    ) -> Result<OptimizationOutcome, OptimizerError> {
         match strategy {
-            DeStrategy::Rand1Bin => self.optimize(args),
+            DeStrategy::Rand1Bin => self.optimize_observed(args, observer),
             DeStrategy::Shade => with_seeded_rng(args.seed, |rng| {
-                shade::run_with_rng(args, shade::Variant::Shade, rng)
+                shade::run_with_rng(args, shade::Variant::Shade, rng, observer)
             }),
             DeStrategy::LShade => with_seeded_rng(args.seed, |rng| {
-                shade::run_with_rng(args, shade::Variant::LShade, rng)
+                shade::run_with_rng(args, shade::Variant::LShade, rng, observer)
             }),
         }
     }
@@ -361,6 +376,7 @@ impl AlgorithmDifferentialEvolution {
     fn run_with_rng<R: Rng>(
         args: AlgorithmDifferentialEvolutionArgs,
         rng: &mut R,
+        observer: &mut dyn IterationObserver,
     ) -> Result<OptimizationOutcome, OptimizerError> {
         let AlgorithmDifferentialEvolutionArgs {
             oracle,
@@ -489,6 +505,16 @@ impl AlgorithmDifferentialEvolution {
             // search dynamics (DE/rand/1/bin, [0, 2π) init) are
             // unchanged; only the stopping rule differs.
             fitness_history.push(fitness[best_idx]);
+            // A stop asked for here wins over the stagnation stop below, so the
+            // run then reports `converged = false`.
+            let report = IterationReport {
+                iteration: iterations_run,
+                best_fitness: fitness[best_idx],
+                best_params: &best,
+            };
+            if observer.observe(&report).is_break() {
+                break;
+            }
             if fitness_stagnated(&fitness_history, tolerance, patience, generation) {
                 converged = true;
                 break;
@@ -508,7 +534,11 @@ impl AlgorithmDifferentialEvolution {
 impl Optimizer for AlgorithmDifferentialEvolution {
     type Args = AlgorithmDifferentialEvolutionArgs;
 
-    fn optimize(&self, args: Self::Args) -> Result<OptimizationOutcome, OptimizerError> {
-        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng))
+    fn optimize_observed(
+        &self,
+        args: Self::Args,
+        observer: &mut dyn IterationObserver,
+    ) -> Result<OptimizationOutcome, OptimizerError> {
+        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng, observer))
     }
 }
