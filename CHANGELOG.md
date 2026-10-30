@@ -18,22 +18,28 @@ Entries were curated from the Conventional Commits history. Releases before
 Breaking changes are marked **BREAKING** under *Changed* and *Fixed*. Where
 to look first:
 
-- **Python users.** Python 3.10 or newer (#360), `qiskit-aer` below 0.18
-  (#362). Seeded results differ from 0.7 on every backend (#348, #401, #410,
-  #411, `rand` 0.10): re-run stored baselines instead of expecting them to
-  replay. Arguments that were ignored
-  or silently accepted now raise: `noise_model`, `sim_method` and `backend`
-  where they do not apply (#334), non-integer counts (`TypeError`, #467),
-  `patience=0` (#467), counts that sum to zero in `expectation_value`.
+- **Python users.** Python 3.10 or newer (#360), `qiskit<3` and
+  `qiskit-aer<0.18` (#362), CUNQA 2.4 or newer (#204). Seeded results differ
+  from 0.7 on every backend (#348, #401, #410, #411, `rand` 0.10): re-run
+  stored baselines instead of expecting them to replay. Arguments that were
+  ignored now raise: `noise_model`, `sim_method` and `backend` where they do
+  not apply (#332, #334), `patience=0` in `polypus.DE` and `polypus.CMAES`
+  (#467), and counts that sum to zero in `expectation_value` (#227).
   Configuration errors are `polypus.ConfigurationError`, still a `ValueError`
-  (#418). QMIO needs `ZMQ_SERVER` or `options={"endpoint": ...}`, and
-  `run_qc_in_qpu`, `run_qcs_in_qpu` and `run_worker_qpu.py` are gone.
+  (#418), and Qiskit and Aer exceptions are raised as `polypus.BackendError`
+  or `polypus.EvaluationError` (#218). QMIO needs `ZMQ_SERVER` or
+  `options={"endpoint": ...}`, and `run_qc_in_qpu`, `run_qcs_in_qpu` and
+  `run_worker_qpu.py` are gone.
 - **Rust users.** The `polypus` crate has no default features (#414); the
-  circuit types' fields are private (#349); the error enums and
-  `polypus_orchestration::Method` are `#[non_exhaustive]`; the optimizer
-  argument and configuration structs have new fields (#395, #397, #410,
-  #467); `OracleFactory::build`, `templates::qft` and
-  `Statevector::expectation_z` changed their return types.
+  circuit types' fields are private (#349); `GateInstruction`,
+  `CircuitError`, `SimError`, `BackendError`, `OptimizerError` and
+  `polypus_orchestration::Method` are `#[non_exhaustive]`, and
+  `EvaluationError` has new variants; the DE, PSO and QNG argument structs,
+  `DeConfig` and `TrainFlow` have new fields and `dispatch_optimizer` a new
+  argument (#395, #397, #410); `OracleFactory::build`, `templates::qft`,
+  `Statevector::expectation_z` and `polypus_sim::sample_projected` changed
+  their return types; `BackendConfig::Local` and `Cunqa` have no `backend`
+  field (#230); the `polypus-physics` samplers take rand 0.10's `Rng` (#273).
 - **Third-party backend authors.** `polypus-backend`,
   `polypus-backend-conformance` and `polypus-subprocess-backend` are on
   crates.io from this release; depend on `"0.8"`. Registry options are typed
@@ -246,8 +252,9 @@ to look first:
   `GradientOracle` by central differences, in one batch per gradient, and
   through `GradientOracle::value_and_gradient` scores the parameters in the
   same batch (#394, #395).
-- `polypus.backend_compatibility` reports `"cunqa"` and `"qmio"` next to
-  `"aer"` and `"polypus"` (#254). The CUNQA entry prepares the circuit as a run
+- `polypus.backend_compatibility(circuit, *, resources=False)` lists, for each
+  backend, why it would reject a circuit, without running it (#218). It also
+  reports `"cunqa"` and `"qmio"` next to `"aer"` and `"polypus"` (#254). The CUNQA entry prepares the circuit as a run
   does and converts it with CUNQA's own converter, without raising QPUs; the
   QMIO entry reports a build without the `qmio` feature, a Qiskit circuit and a
   program that is not a terminal-measurement circuit. The keyword-only
@@ -377,8 +384,7 @@ to look first:
   copy of its parent. Seeded DE results change (#410).
 - **BREAKING (Rust):** `AlgorithmDifferentialEvolutionArgs` and
   `polypus_orchestration::DeConfig` have the fields `mutation_factor` and
-  `crossover_rate`, and `AlgorithmDifferentialEvolution::check_preconditions`
-  takes the strategy and both rates (#410).
+  `crossover_rate` (#410).
 - **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
   `External`, so an exhaustive `match` on it outside its crate must handle
   it (#399).
@@ -427,10 +433,20 @@ to look first:
   `SimError::UnsupportedInstruction` (#349).
 - **BREAKING:** the declared classical width is kept through circuit binding
   and export (`fix(circuit)!`).
-- **BREAKING:** migrated to the `rand` 0.10 API (`fix(deps)!`); seeded streams
-  may differ from earlier releases.
-- Native and Aer backends lower gates outside Aer's basis before running; the
-  Aer lowering of a repeated OpenQASM program is cached.
+- **BREAKING:** migrated to the `rand` 0.10 API; seeded streams may differ
+  from earlier releases, and the public `polypus-physics` samplers
+  (`EnergySpectrum::sample_energy_mev`, `BeamSource::sample_state`,
+  `DivergentBeam`/`ParallelBeam::sample`, `sample_step_length`,
+  `MonteCarloEngine::run*`, `interactions::*`) take rand 0.10's `rand::Rng`
+  (#273).
+- **BREAKING:** an exception Qiskit or Aer raises during a run is raised as
+  `polypus.BackendError`, or as `polypus.EvaluationError` while composing or
+  binding circuits, with the original as `__cause__`; `except QiskitError` no
+  longer catches it. In Rust, `polypus_evaluation::EvaluationError` has the
+  variants `Qiskit` and `Qml`, and `Python` carries a `DisplaySafePyErr`
+  (#218).
+- Native, Aer and CUNQA backends lower gates outside the target's basis
+  before running; the Aer lowering of a repeated OpenQASM program is cached.
 - **BREAKING:** `templates::qft` and `qft_with_options` return a `Result`:
   above `MAX_QFT_QUBITS` (2827) qubits, whose gates would exceed what the
   OpenQASM importers read back, they fail with
@@ -446,8 +462,10 @@ to look first:
   `required_num_results`, as the OpenQASM exports do.
 - **BREAKING:** `expectation_value` and `expectation_values` raise `ValueError`
   for counts that sum to zero instead of returning `0.0`.
-- Rust no longer sends the `backend` and `id` kwargs that `run_qcs` never read
-  (contract C-1).
+- **BREAKING (Rust):** Rust no longer sends the `backend` and `id` kwargs that
+  `run_qcs` never read (contract C-1): `BackendConfig::Local` and
+  `BackendConfig::Cunqa` have no `backend` field, and `LocalBackend::new` and
+  `CunqaBackend::new` no longer take one (#230).
 - The QML candidate window also follows the backend's concurrency, within the
   memory bound.
 - **BREAKING (Rust):** `polypus_orchestration::DeConfig` has a `strategy`
@@ -491,7 +509,7 @@ to look first:
   as `polypus.Adam` and `polypus.Rotosolve` already did: it compared a
   generation's best fitness with itself, so any `tolerance > 0` ended the run
   at once (#467).
-- **BREAKING:** a `final_shots` (`train`, `qml.train`), a `max_evaluations`
+- A `final_shots` (`train`, `qml.train`), a `max_evaluations`
   (`polypus.External`) or an adapter's `dimensions` or `batch_size`
   (`polypus.ask_tell`) that is not an integer, such as `4096.0`, `True` or a
   `str`, raises `TypeError` instead of `ValueError`, as `shots` and every
@@ -501,17 +519,14 @@ to look first:
   had `final_shots` (#467).
 - **BREAKING (Rust):** `polypus_orchestration::Method` is
   `#[non_exhaustive]`: a `match` on it outside its crate needs a wildcard
-  arm, and a new optimizer is no longer a breaking change.
-  `AlgorithmDifferentialEvolution::check_preconditions` and
-  `AlgorithmCmaEs::check_preconditions` take `patience` (#467).
+  arm, and a new optimizer is no longer a breaking change (#467).
 - With `polypus.External` on CUNQA, the walltime warning times the first
   batch until the second starts, so the library's own time in `tell()` and
   the next `ask()` is in the projection; it left that time out, which for a
   model-based library can be much of the run. The warning comes when the
   second batch starts, and a run of one batch gets none (#467).
-- **BREAKING (Rust):** `AlgorithmSPSAArgs` and
-  `polypus_orchestration::SpsaConfig` have a `stability_constant` field, and
-  `AlgorithmSPSA::check_preconditions` takes it (#467).
+- `AlgorithmSPSAArgs` and `polypus_orchestration::SpsaConfig` have a
+  `stability_constant` field (#467).
 
 ### Deprecated
 - Rust: `ConcreteCircuit::to_qasm2` and `to_qir`, which panic on circuits
@@ -519,6 +534,23 @@ to look first:
   internal caller uses the panicking exports any more (#350).
 
 ### Fixed
+- `backend="aer"` reads a circuit without measurements on the full register
+  (`num_qubits`-wide keys, C-3), as the native backend does, instead of
+  raising `QiskitError` (#218).
+- The `polypus_python` helpers no longer set their logger to DEBUG or write
+  log files to the working directory; `serialize_quantum_circuit` writes to a
+  private per-user temporary directory (or `directory=`) instead of
+  `<cwd>/temp`, and the helpers validate run ids as the Rust entry points do
+  (C-9, #219).
+- With `infrastructure="subprocess"`, a worker started from a short-lived
+  thread (a pool worker or a `threading.Thread`) is no longer killed when
+  that thread exits (#220).
+- The native backend refuses a measured circuit whose classical width exceeds
+  its counts key (`creg c[65536]`) with `polypus.NativeCircuitError` instead
+  of panicking (#346).
+- Sampling shots no longer builds a `2^n` cumulative table next to the
+  statevector, memory the budget did not count; the samples are unchanged
+  (#215).
 - A process waiting for the calibration cache lock behind other writers no
   longer writes without it after a fixed 5 s and loses an entry: only a lock
   with no write for the timeout counts as stale (#281).
@@ -627,7 +659,9 @@ to look first:
 - The OpenQASM importers normalise the instructions in place instead of
   copying them; QIR bitcode export stops `llvm-as` after 120 s and always
   reaps it (#356).
-- CUNQA receives `cores_per_qpu` under the name CUNQA >= 2.4 expects.
+- **BREAKING:** CUNQA receives `cores_per_qpu` under the name CUNQA 2.4 and
+  later expect; CUNQA 2.3 is no longer supported (supported range
+  `>=2.4,<4`, #204).
 - Python errors and OS-entropy failures surface as typed errors, not panics.
 - Memory budget honours `K`/`M`/`G` suffixes and detects the cgroup/RAM limit.
 - CI runs every push to `main` to completion: the next push cancelled it, and
