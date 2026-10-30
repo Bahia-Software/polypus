@@ -12,6 +12,7 @@
 
 use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
+use crate::observer::{IterationObserver, IterationReport};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::util::{check_oracle_len, BestMeasured};
 use std::fmt::Write;
@@ -74,7 +75,9 @@ pub trait AskTell: Send + Sync {
 /// `fitness_history` has one entry per batch, the best measured up to it, so
 /// the last is `best_fitness`; `iterations_run` counts the batches scored and
 /// told. `converged` is `true` when the optimizer ended the run with an empty
-/// `ask`, and `false` when the budget did.
+/// `ask`, and `false` when the budget did, or an
+/// [`IterationObserver`], which sees each batch once
+/// it is told and stops the run without another `ask`.
 ///
 /// # Errors
 ///
@@ -195,7 +198,10 @@ impl AlgorithmExternal {
         validate(max_evaluations, dimensions)
     }
 
-    fn run(args: AlgorithmExternalArgs) -> Result<OptimizationOutcome, OptimizerError> {
+    fn run(
+        args: AlgorithmExternalArgs,
+        observer: &mut dyn IterationObserver,
+    ) -> Result<OptimizationOutcome, OptimizerError> {
         let AlgorithmExternalArgs {
             oracle,
             mut optimizer,
@@ -276,6 +282,17 @@ impl AlgorithmExternal {
             optimizer
                 .tell(&batch, &values)
                 .map_err(|err| failed("tell", err.as_ref()))?;
+
+            // ── 5. Report, once the optimizer knows the whole batch ─────────
+            // A stop ends the run here, without another `ask`.
+            let report = IterationReport {
+                iteration: fitness_history.len(),
+                best_fitness: best.value(),
+                best_params: best.params(),
+            };
+            if observer.observe(&report).is_break() {
+                break;
+            }
         }
 
         // `max_evaluations >= 1`, and a run that scored nothing returned an
@@ -294,8 +311,12 @@ impl AlgorithmExternal {
 impl Optimizer for AlgorithmExternal {
     type Args = AlgorithmExternalArgs;
 
-    fn optimize(&self, args: Self::Args) -> Result<OptimizationOutcome, OptimizerError> {
-        Self::run(args)
+    fn optimize_observed(
+        &self,
+        args: Self::Args,
+        observer: &mut dyn IterationObserver,
+    ) -> Result<OptimizationOutcome, OptimizerError> {
+        Self::run(args, observer)
     }
 }
 

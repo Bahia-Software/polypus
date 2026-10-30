@@ -7,7 +7,9 @@ Acceptance criterion: a ``KeyboardInterrupt`` takes effect *promptly* while
 or ``polypus.qml.Model.fit`` (native QML) is running, rather than being ignored
 until the whole optimization finishes. ``polypus.train`` with
 ``polypus.External`` (issue #399) gets the same check, with the interrupt
-landing in a batch or in the external optimizer's ``ask()``. A minibatched
+landing in a batch or in the external optimizer's ``ask()``.
+``polypus.train`` and ``Model.fit`` are checked again with a ``callback``
+(issue #500), which attaches after every iteration. A minibatched
 native QML run also re-scores its result on the whole training set at the end;
 that step is checked for GIL release directly, with a background thread.
 
@@ -321,6 +323,27 @@ def test_native_training_responds_to_sigint_promptly():
     )
 
 
+# The same native run with a `callback` (issue #500): it is called after
+# every generation, attaching to the interpreter each time, and checks for a
+# pending signal before the user's code runs, so Ctrl+C still raises
+# `KeyboardInterrupt` promptly. The callback never stops the run.
+_ID_LINE = 'id="interrupt_test",'
+assert _NATIVE_CHILD.count(_ID_LINE) == 1
+_NATIVE_CHILD_WITH_CALLBACK = _NATIVE_CHILD.replace(
+    _ID_LINE, _ID_LINE + " callback=lambda progress: None,"
+)
+
+
+def test_native_training_with_a_callback_responds_to_sigint_promptly():
+    _assert_responds_to_sigint_promptly(
+        _NATIVE_CHILD_WITH_CALLBACK,
+        failure_hint=(
+            "native-backend training with a callback — the callback bridge is "
+            "likely holding the GIL or swallowing the pending signal"
+        ),
+    )
+
+
 def test_qml_training_responds_to_sigint_promptly():
     _assert_responds_to_sigint_promptly(
         _QML_CHILD,
@@ -451,6 +474,24 @@ def test_native_qml_training_responds_to_sigint_promptly():
         failure_hint=(
             "Model.fit (the native QML oracle) — the interrupt guard is likely "
             "not attached to the run token, or the GIL is held around the run"
+        ),
+    )
+
+
+# `Model.fit` with a `callback` (issue #500), as for `train` above.
+_FIT_ID_LINE = 'id="native_qml_interrupt_test",'
+assert _NATIVE_QML_CHILD.count(_FIT_ID_LINE) == 1
+_NATIVE_QML_CHILD_WITH_CALLBACK = _NATIVE_QML_CHILD.replace(
+    _FIT_ID_LINE, _FIT_ID_LINE + " callback=lambda progress: None,"
+)
+
+
+def test_native_qml_training_with_a_callback_responds_to_sigint_promptly():
+    _assert_responds_to_sigint_promptly(
+        _NATIVE_QML_CHILD_WITH_CALLBACK,
+        failure_hint=(
+            "Model.fit with a callback — the callback bridge is likely holding "
+            "the GIL or swallowing the pending signal"
         ),
     )
 

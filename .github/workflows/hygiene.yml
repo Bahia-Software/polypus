@@ -1,9 +1,10 @@
 name: Hygiene
 
 # Blocks internal files, ignored artefacts, infrastructure data, notebooks with
-# outputs, oversized blobs and Cargo.toml/CITATION.cff version drift. Logic and
-# policy live in .github/scripts/hygiene.py and .github/hygiene-allow.txt;
-# changes to either, or to this file, need human review.
+# outputs, oversized blobs, Cargo.toml/CITATION.cff version drift and stale
+# internal version pins. Logic and policy live in .github/scripts/hygiene.py,
+# .github/scripts/release_check.py and .github/hygiene-allow.txt; changes to
+# any of them, or to this file, need human review.
 #
 # Pull requests run the public rules only. The maintainers' private patterns
 # (secret HYGIENE_LEAK_PATTERNS) run after the merge, on the push to main: they
@@ -39,7 +40,7 @@ jobs:
           submodules: false
           lfs: false
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.10"
       - name: Test the check (Python 3.10)
@@ -47,13 +48,14 @@ jobs:
           python -m pip install pytest==8.3.5
           python -m pytest -p no:cacheprovider -q .github/scripts/test_hygiene.py
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
-      - name: Test the check (Python 3.11)
+      - name: Test the checks (Python 3.11)
         run: |
           python -m pip install pytest==8.3.5
-          python -m pytest -p no:cacheprovider -q .github/scripts/test_hygiene.py
+          python -m pytest -p no:cacheprovider -q .github/scripts/test_hygiene.py \
+            .github/scripts/test_release_check.py .github/scripts/test_publish_crates.py
 
       - name: Check (pull request, public rules)
         if: github.event_name == 'pull_request'
@@ -78,3 +80,11 @@ jobs:
           python .github/scripts/hygiene.py \
             --base "$base" --head "$HEAD_SHA" --comparison direct \
             --require-leak-patterns
+
+      # The release gate's rules that hold on every branch: an `X.Y.Z` or
+      # `X.Y.Z-dev` workspace version, internal pins equal to it, and no
+      # `X.Y.Z` that is already tagged. Last, so a failure here never skips
+      # the private patterns of a push to main.
+      - name: Version and internal pins
+        if: ${{ !cancelled() }}
+        run: python .github/scripts/release_check.py

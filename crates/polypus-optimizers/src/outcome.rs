@@ -1,6 +1,7 @@
 //! Optimizer result type and the shared optimizer trait.
 
 use crate::error::OptimizerError;
+use crate::observer::{IterationObserver, Unobserved};
 
 /// Outcome of an optimization run.
 ///
@@ -17,12 +18,15 @@ pub struct OptimizationOutcome {
     pub best_fitness: f64,
     /// Number of generations/iterations actually executed.
     ///
-    /// Lower than the configured budget when an early-stopping criterion fired.
+    /// Lower than the configured budget when an early-stopping criterion fired,
+    /// or when an [`IterationObserver`] stopped the run.
     pub iterations_run: usize,
     /// Whether the algorithm's convergence criterion was satisfied.
     ///
     /// Optimizers without an early-stopping test (QNG, SPSA) always report
-    /// `false` — they simply exhaust their iteration budget.
+    /// `false` — they simply exhaust their iteration budget. A run an
+    /// [`IterationObserver`] stopped reports `false` too, even when the
+    /// criterion fired on the iteration it stopped at.
     pub converged: bool,
     /// Best fitness recorded at the end of each generation/iteration, in order.
     ///
@@ -59,5 +63,24 @@ pub trait Optimizer {
 
     /// Run the optimization loop and return the best solution found, or an
     /// [`OptimizerError`] if the arguments or the oracle violate a contract.
-    fn optimize(&self, args: Self::Args) -> Result<OptimizationOutcome, OptimizerError>;
+    ///
+    /// The same as [`optimize_observed`](Optimizer::optimize_observed) with an
+    /// observer that never stops the run: the same oracle calls, RNG draws and
+    /// outcome.
+    fn optimize(&self, args: Self::Args) -> Result<OptimizationOutcome, OptimizerError> {
+        self.optimize_observed(args, &mut Unobserved)
+    }
+
+    /// Run the optimization loop as [`optimize`](Optimizer::optimize) does,
+    /// showing `observer` the run at the end of every iteration; the run stops
+    /// after the iteration on which it answers
+    /// [`Break`](std::ops::ControlFlow::Break) (see [`IterationObserver`]).
+    ///
+    /// The observer only reads, so an observer that never stops the run leaves
+    /// the outcome exactly as [`optimize`](Optimizer::optimize) returns it.
+    fn optimize_observed(
+        &self,
+        args: Self::Args,
+        observer: &mut dyn IterationObserver,
+    ) -> Result<OptimizationOutcome, OptimizerError>;
 }

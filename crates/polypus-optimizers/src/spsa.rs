@@ -32,9 +32,10 @@
 
 use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
+use crate::observer::{IterationObserver, IterationReport};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
-use crate::util::{check_initial_point, check_oracle_len, BestMeasured};
+use crate::util::{check_initial_point, check_oracle_len, measure_last_point, BestMeasured};
 use rand::{Rng, RngExt};
 use std::f64::consts::TAU;
 
@@ -93,7 +94,11 @@ use std::f64::consts::TAU;
 /// `best_fitness`.
 ///
 /// There is no early stop: the run makes `max_iters` iterations and, like
-/// [`AlgorithmQNG`](crate::AlgorithmQNG), reports `converged = false`.
+/// [`AlgorithmQNG`](crate::AlgorithmQNG), reports `converged = false`. Only an
+/// [`IterationObserver`] can stop it sooner; the
+/// final θ is measured within the last iteration, before the observer sees
+/// it, so a run stopped earlier ends without measuring the θ its last step
+/// reached.
 ///
 /// # Reproducibility
 ///
@@ -276,6 +281,7 @@ impl AlgorithmSPSA {
     fn run_with_rng<R: Rng>(
         args: AlgorithmSPSAArgs,
         rng: &mut R,
+        observer: &mut dyn IterationObserver,
     ) -> Result<OptimizationOutcome, OptimizerError> {
         let AlgorithmSPSAArgs {
             oracle,
@@ -328,8 +334,10 @@ impl AlgorithmSPSA {
         // Best measured fitness after each iteration (see
         // `OptimizationOutcome::fitness_history`).
         let mut fitness_history: Vec<f64> = Vec::with_capacity(max_iters as usize);
+        let mut iterations_run = 0usize;
 
         for k in 1..=max_iters {
+            iterations_run = k as usize;
             let a_k = a / (f64::from(k) + stability_constant).powf(alpha);
             let c_k = perturbation / f64::from(k).powf(gamma);
             let deltas: Vec<Vec<f64>> = (0..resamplings).map(|_| rademacher(rng, dims)).collect();
@@ -374,18 +382,28 @@ impl AlgorithmSPSA {
                     *x += a_k * (g / count);
                 }
             }
-        }
 
-        // ── Measure the θ the last step reached ─────────────────────────────────
-        // One candidate, so the last pairs do not go into an unmeasured step;
-        // its value joins the last iteration's entry, which ends the history at
-        // the reported best (C-5).
-        let values = oracle.evaluate_batch(std::slice::from_ref(&theta));
-        check_oracle_len(1, values.len())?;
-        log::debug!("Final θ: fitness {:.4}", values[0]);
-        best.offer(&theta, values[0]);
-        if let Some(last) = fitness_history.last_mut() {
-            *last = best.value();
+            // ── 3. On the last iteration, measure the θ the step reached ────────
+            // One candidate, so the last pairs do not go into an unmeasured
+            // step; its value joins this iteration's entry, which ends the
+            // history at the reported best (C-5). Measured before the report,
+            // so the observer sees the run's final best.
+            let last = k == max_iters;
+            if last {
+                let fitness =
+                    measure_last_point(oracle.as_ref(), &theta, &mut best, &mut fitness_history)?;
+                log::debug!("Final θ: fitness {fitness:.4}");
+            }
+
+            // ── 4. Report; a stop leaves the θ this step reached unmeasured ─────
+            let report = IterationReport {
+                iteration: iterations_run,
+                best_fitness: best.value(),
+                best_params: best.params(),
+            };
+            if observer.observe(&report).is_break() {
+                break;
+            }
         }
 
         // `max_iters >= 1` and the first iteration measures θ₀, so `best` holds
@@ -394,7 +412,7 @@ impl AlgorithmSPSA {
         Ok(OptimizationOutcome {
             best_params,
             best_fitness,
-            iterations_run: max_iters as usize,
+            iterations_run,
             converged: false,
             fitness_history,
         })
@@ -536,8 +554,12 @@ fn validate(
 impl Optimizer for AlgorithmSPSA {
     type Args = AlgorithmSPSAArgs;
 
-    fn optimize(&self, args: Self::Args) -> Result<OptimizationOutcome, OptimizerError> {
-        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng))
+    fn optimize_observed(
+        &self,
+        args: Self::Args,
+        observer: &mut dyn IterationObserver,
+    ) -> Result<OptimizationOutcome, OptimizerError> {
+        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng, observer))
     }
 }
 

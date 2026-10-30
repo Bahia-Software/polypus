@@ -111,7 +111,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # PyO3's build script needs a Python interpreter.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
       - name: Install Rust (rust-toolchain.toml, and nightly for the resolver)
@@ -120,7 +120,7 @@ jobs:
           rustup toolchain install "$NIGHTLY" --profile minimal --no-self-update
       - name: Resolve direct dependencies to their floors
         run: cargo "+$NIGHTLY" update -Z direct-minimal-versions
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Check (workspace, default features)
         run: cargo check --workspace --all-targets
       - name: Check (optional features)
@@ -140,7 +140,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.10"
       - name: Install Rust (rust-toolchain.toml)
@@ -151,7 +151,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends llvm
           llvm-as --version
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install uv
         run: python -m pip install uv==0.13.5
       # `uv build --resolution` does not apply to build requirements, so
@@ -192,12 +192,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # PyO3's build script needs to locate a Python interpreter even for a
       # `cargo check`/clippy build of the `polypus` crate.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Default features only. Do NOT add --all-features here: the `polypus`
       # crate's `extension-module` feature tells PyO3 not to link libpython,
       # which breaks building the test/bench targets that --all-targets compiles.
@@ -225,14 +225,14 @@ jobs:
       RUSTUP_TOOLCHAIN: "1.85.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
       - name: Install Rust ${{ env.RUSTUP_TOOLCHAIN }}
         run: |
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
           rustc --version
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Check (workspace, default features)
         run: cargo check --locked --workspace --all-targets
       - name: Check (qmio backend)
@@ -254,16 +254,52 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The PyO3 crates' build scripts need an interpreter.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: cargo package --workspace
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo package --workspace --locked
+
+  # Compare the public API of every published crate with its latest version on
+  # crates.io (cargo-semver-checks). A breaking change needs the next minor
+  # while the version is 0.x (`0.8.1-dev` → `0.9.0-dev`, docs/CONTRIBUTING.md);
+  # a `-dev` version is judged like its release. Crates not on crates.io yet
+  # have no baseline and are skipped. Default features only: the
+  # all-features default would enable polypus-logger's mutually exclusive
+  # `*-logs` features. A rust-toolchain.toml bump can need a newer
+  # cargo-semver-checks (rustdoc JSON format).
+  semver:
+    name: semver (crates.io API)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The PyO3 crates' build scripts need an interpreter.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: cargo package --workspace
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-semver-checks@0.51.0
+      - name: cargo semver-checks (crates on crates.io)
         env:
           CARGO_INCREMENTAL: "0"
-        run: cargo package --workspace --locked
+        run: |
+          new=$(python .github/scripts/publish_crates.py --unpublished)
+          exclude=()
+          for name in $new; do
+            echo "::notice::$name is not on crates.io yet: skipped"
+            exclude+=(--exclude "$name")
+          done
+          cargo semver-checks --workspace --default-features "${exclude[@]}"
 
   test:
     name: test (Rust)
@@ -278,7 +314,7 @@ jobs:
       # PyO3 links libpython at build time, and the PyO3-touching crates' tests
       # start a bare embedded interpreter. No Python package is installed: the
       # Rust tests need no Qiskit/Aer/polypus_python (docs/ENGINEERING.md §3).
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
       - name: Install Rust (rust-toolchain.toml)
@@ -289,7 +325,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends llvm
           llvm-as --version
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Every workspace member, with no hand-maintained list: a crate added to
       # the workspace is tested without touching this file. Default features,
       # so `polypus` builds without extension-module (see the clippy note).
@@ -364,12 +400,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # PyO3's build script needs a Python interpreter to compile `polypus`.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build docs (no deploy)
         run: cargo doc --locked --workspace --no-deps
         env:
@@ -389,12 +425,12 @@ jobs:
         python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install maturin
         run: python -m pip install --upgrade maturin
       # Smoke-test that the full distribution wheel builds — the root
@@ -424,7 +460,7 @@ jobs:
             qiskit: fixtures
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install Rust (rust-toolchain.toml)
@@ -435,7 +471,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends llvm
           llvm-as --version
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install dev dependencies
         run: |
           python -m pip install --upgrade pip maturin pytest
@@ -532,12 +568,12 @@ jobs:
       MPLBACKEND: Agg
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install build tooling
         run: python -m pip install --upgrade pip maturin
       # Same pattern as the python-tests job: build the full wheel (extension
@@ -580,7 +616,7 @@ jobs:
         run: |
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
           rustc --version
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Pinned like the nightly: a newer cargo-fuzz may need a newer Rust.
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked --version 0.13.2
@@ -615,7 +651,7 @@ jobs:
         run: |
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component miri,rust-src --no-self-update
           rustc --version
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo miri setup
       - name: Miri (kernel unit tests, parallel)
         run: cargo miri test --locked -p polypus-sim --features parallel --lib "kernels::"

@@ -97,7 +97,8 @@ boundary stays out-of-process and explicit; see
   why the entry points (`train`, `qml.train`, `run_quantum_circuit`) run
   `Scheduler::run_cancellable` inside `py.detach`: the Python-backed pieces
   below it (the Aer and CUNQA backends, Python cost callbacks, a
-  `polypus.External` optimizer's `ask()` and `tell()`) attach on their own,
+  `polypus.External` optimizer's `ask()` and `tell()`, the training
+  `callback` of `train`, `qml.train` and `Model.fit`) attach on their own,
   on whichever thread evaluates them. Each of those attaches is a *fresh*
   one (`detach` resets the thread's attachment), so each goes through
   `attach_or` and turns an unreachable interpreter into the typed
@@ -558,7 +559,9 @@ and CUNQA `run_circuits`, `LocalBackend::capabilities_for`, CUNQA's `raise_qpus`
 (it fails before anything is asked of SLURM), the noise-model clone in
 `Infrastructure::create_backend` (only when there is a noise model), the Qiskit
 parameter binding, `PyCallbackObservable`, the supervised objectives,
-`PyVarianceOracle` and the planner's between-wave guard (`SignalInterrupt`). The
+`PyVarianceOracle`, the External bridge (`PyAskTell`), the training callback
+(`PyTrainObserver`, which calls `py.check_signals()` before the user's code, as
+`PyAskTell` does) and the planner's between-wave guard (`SignalInterrupt`). The
 `attach_or` "unavailable" branch of each of these sites returns
 `polypus_infrastructure::InterpreterUnavailable` (in `attach.rs`), an error that
 holds nothing from Python and so can be formatted, logged or dropped anywhere.
@@ -567,7 +570,8 @@ It is boxed in `BackendError::External` (`From` impls exist for `BackendError`,
 never added as a variant: none of those enums is `#[non_exhaustive]`, and
 `BackendError` is the third-party backend contract. A site whose signature
 cannot fail (`VarianceOracle`) records it in the run's `OracleErrorSlot` and
-returns its finite sentinel, as it does for a callback error. The FFI edge
+returns its finite sentinel, as it does for a callback error; the training
+callback records it there too and stops the run. The FFI edge
 downcasts it after `DisplaySafePyErr` and raises `KeyboardInterrupt` ("the run
 was aborted: …"), the class `BackendError::Aborted` and a Ctrl+C get: the run is
 abandoned and its result could not reach Python anyway (contract C-1, failure

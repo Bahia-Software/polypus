@@ -19,9 +19,12 @@
 
 use crate::error::OptimizerError;
 use crate::objective::{EvaluationOracle, GradientOracle};
+use crate::observer::{IterationObserver, IterationReport};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
-use crate::util::{check_initial_point, check_oracle_len, fitness_stagnated, BestMeasured};
+use crate::util::{
+    check_initial_point, check_oracle_len, fitness_stagnated, measure_last_point, BestMeasured,
+};
 use rand::{Rng, RngExt};
 use std::fmt;
 use std::str::FromStr;
@@ -117,6 +120,10 @@ impl FromStr for AdamRule {
 /// gradient feeds a measured step. `best_params` is the measured `θ` with the
 /// best fitness (a `NaN` never wins), and `fitness_history` holds the best
 /// measured up to each iteration, the final `θ` counted in the last entry.
+/// The final `θ` is measured within the last iteration, before an
+/// [`IterationObserver`] sees it; a run the
+/// observer stops earlier ends without measuring the `θ` its last step
+/// reached, and reports `converged = false`.
 ///
 /// # Preconditions
 ///
@@ -243,6 +250,7 @@ impl AlgorithmAdam {
     fn run_with_rng<R: Rng>(
         args: AlgorithmAdamArgs,
         rng: &mut R,
+        observer: &mut dyn IterationObserver,
     ) -> Result<OptimizationOutcome, OptimizerError> {
         let AlgorithmAdamArgs {
             oracle,
@@ -351,21 +359,35 @@ impl AlgorithmAdam {
             // ── 4. Stop when the best fitness stagnates (C-5) ─────────────────
             // Judged on the θs measured so far; the θ this step reached is
             // measured below, like the last iteration's.
-            if fitness_stagnated(&fitness_history, tolerance, patience, iteration) {
-                converged = true;
+            converged = fitness_stagnated(&fitness_history, tolerance, patience, iteration);
+            let last = converged || iterations_run == max_iters as usize;
+
+            // ── 5. On the last iteration, measure the θ the step reached ──────
+            // One candidate, so no gradient goes into an unmeasured step; its
+            // value joins this iteration's entry, which stays the reported best
+            // (C-5). Measured before the report, so the observer sees the
+            // run's final best and no oracle call follows it.
+            if last {
+                let fitness =
+                    measure_last_point(oracle.as_ref(), &theta, &mut best, &mut fitness_history)?;
+                log::debug!("Final θ: fitness {fitness:.4}");
+            }
+
+            // ── 6. Report; a stop asked for here wins over the stagnation stop ─
+            let report = IterationReport {
+                iteration: iterations_run,
+                best_fitness: best.value(),
+                best_params: best.params(),
+            };
+            if observer.observe(&report).is_break() {
+                // The θ this step reached stays unmeasured, unless this was
+                // the last iteration anyway.
+                converged = false;
                 break;
             }
-        }
-
-        // ── 5. Measure the θ the last step reached ───────────────────────────
-        // One candidate, so no gradient goes into an unmeasured step; its value
-        // joins the last iteration's entry, which stays the reported best (C-5).
-        let fitness = oracle.evaluate_batch(std::slice::from_ref(&theta));
-        check_oracle_len(1, fitness.len())?;
-        log::debug!("Final θ: fitness {:.4}", fitness[0]);
-        best.offer(&theta, fitness[0]);
-        if let Some(last) = fitness_history.last_mut() {
-            *last = best.value();
+            if last {
+                break;
+            }
         }
 
         // `max_iters >= 1` and every iteration measures θ before it steps, so
@@ -435,7 +457,11 @@ fn validate(
 impl Optimizer for AlgorithmAdam {
     type Args = AlgorithmAdamArgs;
 
-    fn optimize(&self, args: Self::Args) -> Result<OptimizationOutcome, OptimizerError> {
-        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng))
+    fn optimize_observed(
+        &self,
+        args: Self::Args,
+        observer: &mut dyn IterationObserver,
+    ) -> Result<OptimizationOutcome, OptimizerError> {
+        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng, observer))
     }
 }
