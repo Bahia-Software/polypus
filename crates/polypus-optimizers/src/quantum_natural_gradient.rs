@@ -2,6 +2,7 @@
 
 use crate::error::OptimizerError;
 use crate::objective::{EvaluationOracle, VarianceOracle};
+use crate::observer::{IterationObserver, IterationReport};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
 use crate::util::{check_initial_point, check_oracle_len};
@@ -201,6 +202,7 @@ impl AlgorithmQNG {
     fn run_with_rng<R: Rng>(
         args: AlgorithmQNGArgs,
         rng: &mut R,
+        observer: &mut dyn IterationObserver,
     ) -> Result<OptimizationOutcome, OptimizerError> {
         let AlgorithmQNGArgs {
             oracle,
@@ -270,6 +272,15 @@ impl AlgorithmQNG {
             }
 
             fitness_history.push(best_energy);
+
+            let report = IterationReport {
+                iteration: iterations_run,
+                best_fitness: best_energy,
+                best_params: &best_theta,
+            };
+            if observer.observe(&report).is_break() {
+                break;
+            }
         }
 
         Ok(OptimizationOutcome {
@@ -286,7 +297,11 @@ impl AlgorithmQNG {
 impl Optimizer for AlgorithmQNG {
     type Args = AlgorithmQNGArgs;
 
-    fn optimize(&self, args: Self::Args) -> Result<OptimizationOutcome, OptimizerError> {
-        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng))
+    fn optimize_observed(
+        &self,
+        args: Self::Args,
+        observer: &mut dyn IterationObserver,
+    ) -> Result<OptimizationOutcome, OptimizerError> {
+        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng, observer))
     }
 }

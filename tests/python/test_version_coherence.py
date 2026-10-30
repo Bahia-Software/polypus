@@ -8,6 +8,10 @@ it to the two other places the version lives: the ``[workspace.package]``
 version in the root ``Cargo.toml`` (the single source of truth) and the
 installed ``polypus-quantum`` distribution, whose version maturin derives from
 that same ``Cargo.toml`` at build time.
+
+Between releases ``main`` carries ``X.Y.Z-dev`` in ``Cargo.toml``; maturin
+publishes it as the PEP 440 version ``X.Y.Z.dev0``, and ``__version__`` uses
+that same form.
 """
 
 import re
@@ -36,12 +40,27 @@ def _workspace_version(text):
     return match.group(1)
 
 
+def _python_version(cargo_version):
+    """The PEP 440 form maturin gives a ``Cargo.toml`` version."""
+    if cargo_version.endswith("-dev"):
+        return cargo_version[: -len("-dev")] + ".dev0"
+    return cargo_version
+
+
 class TestVersionCoherence:
-    def test_version_is_a_release_string(self):
+    def test_version_is_a_release_or_dev_string(self):
         import polypus
 
         assert isinstance(polypus.__version__, str)
-        assert re.fullmatch(r"\d+\.\d+\.\d+", polypus.__version__), polypus.__version__
+        assert re.fullmatch(r"\d+\.\d+\.\d+(\.dev0)?", polypus.__version__), (
+            polypus.__version__
+        )
+
+    @pytest.mark.parametrize(
+        "cargo, python", [("0.8.0", "0.8.0"), ("0.8.1-dev", "0.8.1.dev0")]
+    )
+    def test_cargo_versions_map_to_pep_440(self, cargo, python):
+        assert _python_version(cargo) == python
 
     def test_version_is_exported(self):
         import polypus
@@ -69,6 +88,6 @@ class TestVersionCoherence:
             pytest.skip(
                 f"no Cargo.toml at {CARGO_TOML}: tests run outside the repository"
             )
-        assert polypus.__version__ == _workspace_version(
-            CARGO_TOML.read_text(encoding="utf-8")
+        assert polypus.__version__ == _python_version(
+            _workspace_version(CARGO_TOML.read_text(encoding="utf-8"))
         )

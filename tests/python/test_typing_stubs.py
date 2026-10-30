@@ -126,6 +126,41 @@ class TestOptionsType:
         assert status == 1 and "snippet.py:3: error" in report, report
 
 
+class TestFitTypes:
+    """`Model.fit` types `initial_point` and `final_shots` as `train` does."""
+
+    _FIT = (
+        "import numpy as np\n"
+        "import polypus\n"
+        "from polypus import qml\n"
+        "model = qml.Model(\n"
+        '    qml.Encoder(1).angle_encoder("ry"),\n'
+        "    qml.Ansatz(1).real_amplitudes(1),\n"
+        "    qml.Readout([qml.Z(0)]),\n"
+        ")\n"
+    )
+
+    def test_a_point_and_numpy_integer_shots_type_check(self, tmp_path):
+        source = self._FIT + (
+            "trained = qml.load('model.json')\n"
+            "model.fit([[0.1]], method=polypus.Adam(), initial_point=trained.params)\n"
+            "model.fit(\n"
+            "    [[0.1]], method=polypus.Adam(), initial_point=np.array([0.1, 0.2]),\n"
+            "    final_shots=np.int64(4096),\n"
+            ")\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+    def test_a_float_final_shots_does_not_type_check(self, tmp_path):
+        # A TypeError at run time, so mypy must reject it too.
+        source = self._FIT + (
+            "model.fit([[0.1]], method=polypus.Adam(), final_shots=4096.0)\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 1 and "snippet.py:9: error" in report, report
+
+
 class TestAskTellTypes:
     def test_only_the_optuna_adapter_types_close(self, tmp_path):
         # `from_optuna` returns an `OptunaAskTell`, the other adapters an
