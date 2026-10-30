@@ -18,9 +18,10 @@ Entries were curated from the Conventional Commits history. Releases before
 Breaking changes are marked **BREAKING** under *Changed* and *Fixed*. Where
 to look first:
 
-- **Python users.** Python 3.10 or newer (#360). Seeded results differ from
-  0.7 on every backend (#348, #401, #410, #411, `rand` 0.10): re-run stored
-  baselines instead of expecting them to replay. Arguments that were ignored
+- **Python users.** Python 3.10 or newer (#360), `qiskit-aer` below 0.18
+  (#362). Seeded results differ from 0.7 on every backend (#348, #401, #410,
+  #411, `rand` 0.10): re-run stored baselines instead of expecting them to
+  replay. Arguments that were ignored
   or silently accepted now raise: `noise_model`, `sim_method` and `backend`
   where they do not apply (#334), non-integer counts (`TypeError`, #467),
   `patience=0` (#467), counts that sum to zero in `expectation_value`.
@@ -175,6 +176,10 @@ to look first:
   `final_shots` with `exact=True` is a `polypus.ConfigurationError`. `fit`
   now checks the optimizer's configuration before any backend exists, as
   `train` does (#498).
+- `Model.circuit(x, params=None)` and `TrainedModel.circuit(x)` return the
+  circuit a native model runs for one sample as a `polypus.Circuit`, measured
+  in the readout's basis; without `params` the trainable angles stay free,
+  named `theta_0`, `theta_1`, ... (#497).
 - The final batch in Rust: `EvaluationOracle::evaluate_batch_with_shots`
   (`polypus-optimizers`), a provided method that `VqcOracle` and `QmlOracle`
   implement by putting the shots in every task; `TrainFlow::final_shots`,
@@ -342,6 +347,9 @@ to look first:
   `polypus_orchestration::SpsaConfig::stability_constant` (#467).
 
 ### Changed
+- `polypus-quantum` requires `qiskit>=2.0,<3` and `qiskit-aer>=0.17,<0.18`,
+  the releases the execution seam is tested on (contract C-10); 0.7.2 set no
+  upper bound (#362).
 - Argument and configuration errors are now `polypus.ConfigurationError`, a
   `polypus.PolypusError`, so an `except polypus.PolypusError` placed before an
   `except ValueError` now catches them (#418).
@@ -511,6 +519,11 @@ to look first:
   internal caller uses the panicking exports any more (#350).
 
 ### Fixed
+- A process waiting for the calibration cache lock behind other writers no
+  longer writes without it after a fixed 5 s and loses an entry: only a lock
+  with no write for the timeout counts as stale (#281).
+- A missing optional library is logged with its own message instead of the
+  generic Qiskit error (#256).
 - With `infrastructure="subprocess"`, a worker that answers with a frame that
   is no protocol message (an unknown `op`, a field of the wrong type, a payload
   that is not JSON) fails the call at once with a protocol error, and the
@@ -582,6 +595,11 @@ to look first:
   qubit twice (`Cx(0, 0)` in a hand-built `ConcreteCircuit`) with the new
   `SimError::RepeatedQubit` instead of writing out of bounds; the kernels'
   operand checks are now `assert!`s (#342).
+- **BREAKING (Rust):** a measurement's classical bit index is bounded instead
+  of overflowing: `try_push` rejects a `cbit` from `MAX_REGISTER_BITS` up with
+  the new `CircuitError::ClbitOutOfRange`, and `polypus_sim::sample_projected`
+  returns a `Result`, with `SimError::ClbitOutOfRange` for a bit beyond the
+  counts key (#345).
 - **BREAKING (Rust):** `Statevector::expectation_z` returns
   `Result<f64, SimError>` and rejects a qubit outside the register instead of
   returning a wrong value or overflowing; a repeated qubit cancels (`Z·Z = I`).
