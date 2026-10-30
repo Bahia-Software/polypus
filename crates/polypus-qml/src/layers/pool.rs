@@ -16,7 +16,7 @@ use polypus_circuit::{GateInstruction, Param, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
 use crate::layers::even_pairs;
-use crate::model::{LayerAllocation, LayerContext, LayerOps};
+use crate::model::{InputTrace, LayerAllocation, LayerContext, LayerOps};
 
 /// The two-qubit block emitted on every pooled pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,11 +112,12 @@ impl LayerOps for PoolLayer {
         })
     }
 
-    fn emit(
+    fn emit_traced(
         &self,
         qc: &mut ParameterizedCircuit,
         alloc: &LayerAllocation,
         _x: &[f64],
+        _trace: &mut InputTrace,
     ) -> Result<(), QmlError> {
         let start = alloc.params.start;
         // Recompute the same pairs and keep rule `plan` used — a pure function
