@@ -188,10 +188,12 @@ model = qml.Model(
 result = model.fit(X_unlabeled, method=polypus.Adam(max_iters=100))
 ```
 
-Two more options are keyword-only:
+Four more options are keyword-only:
 
 - `exact=True` computes each circuit's probabilities exactly instead of sampling, so `shots` no longer matters and the run has no shot noise. It needs the local native simulator, and memory grows as `2^n` per circuit.
 - `batch_size=b` scores each evaluation on `b` samples drawn afresh from the seed (`1 ≤ b < number of samples`). Adam uses the batch for its gradient and keeps its best result on the whole set; the other optimizers report `best_fitness` re-scored on the whole set at the end.
+- `initial_point` starts the optimizer from `num_params` parameters you choose instead of random ones, as in `train()` (see [Starting point](training.md#starting-point)): the `best_params` of an earlier run, or the `params` of a saved model to keep training it (see [Saving](#saving)).
+- `final_shots=n` re-evaluates the best candidates once the optimizer has stopped, with `n` shots per circuit, as in `train()` (see [Final re-evaluation](training.md#final-re-evaluation)): `result.final_params` is the one with the best value and `result.final_fitness` that value. The final batch scores every training sample, also with `batch_size`, and the run before it is the one without `final_shots`. `exact=True` uses no shots, so `fit` refuses `final_shots` with it.
 
 **Cost of the exact gradient.** One gradient runs `samples × (1 + 2 × occurrences)` circuits, where `occurrences` counts the trainable gates. A parameter that several gates share costs two circuits per gate: a basic convolution over 4 qubits has 4 parameters on 3 pairs, so 12 occurrences and 25 circuits per sample instead of 9. The `1` is the parameters' own circuits, so an Adam iteration is that one batch: Adam reads the iteration's fitness from it rather than running them again. With `batch_size`, the gradient runs on the minibatch and Adam scores the parameters on the whole set apart, one more batch of `samples` circuits.
 
@@ -258,3 +260,13 @@ trained = qml.load("classifier.json")
 ```
 
 The file is JSON: the model and its parameters, with a format name and a version. Loading checks it as `Model` and `bind` would, so a damaged or edited file raises `ValueError`, and it never runs code. The parameters read back exactly, so a loaded model predicts as the saved one did. `save` replaces any file at that path.
+
+A loaded model can keep training from where it stopped: its `model` is the `Model`, and its `params` are the starting point.
+
+```python
+trained = qml.load("classifier.json")
+more = trained.model.fit(
+    X, y, method=polypus.Adam(), loss="hinge", initial_point=trained.params
+)
+trained = trained.model.bind(more.best_params)
+```

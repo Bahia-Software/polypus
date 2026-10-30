@@ -141,6 +141,13 @@ Changes on `main` since 0.7.2.
   logged before it, and as a warning if it fails. A value that is not an
   integer `>= 1` raises `ValueError` before anything runs. The batch is not
   part of the CUNQA walltime projection (#397).
+- `initial_point` and `final_shots` in a native model's `Model.fit`
+  (keyword-only), with `train`'s checks: a model read back with
+  `polypus.qml.load` keeps training from its `params`, and the final
+  re-evaluation scores every training sample, also with `batch_size`;
+  `final_shots` with `exact=True` is a `polypus.ConfigurationError`. `fit`
+  now checks the optimizer's configuration before any backend exists, as
+  `train` does (#498).
 - The final batch in Rust: `EvaluationOracle::evaluate_batch_with_shots`
   (`polypus-optimizers`), a provided method that `VqcOracle` and `QmlOracle`
   implement by putting the shots in every task; `TrainFlow::final_shots`,

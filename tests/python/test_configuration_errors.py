@@ -214,6 +214,19 @@ class TestNativeQmlChecksRaiseIt:
                 id="rotosolve",
             ),
             pytest.param(
+                lambda: _fit(initial_point=[0.1]),
+                "invalid initial_point",
+                id="fit-initial-point",
+            ),
+            pytest.param(
+                lambda: _fit(final_shots=0), "final_shots", id="fit-final-shots"
+            ),
+            pytest.param(
+                lambda: _fit(infrastructure="local", exact=True, final_shots=4096),
+                "final_shots does not apply with exact=True",
+                id="fit-final-shots-exact",
+            ),
+            pytest.param(
                 lambda: _infer("predict", exact=True), "exact=True", id="predict-exact"
             ),
             pytest.param(
