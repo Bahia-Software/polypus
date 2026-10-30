@@ -163,6 +163,43 @@ def test_branch_mode_ignores_changelog_and_citation(tmp_path):
     assert errors(root) == []
 
 
+def git_repo(root, tag=None):
+    def git(*args):
+        subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            capture_output=True,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(root)},
+        )
+
+    git("init", "-q")
+    git("add", "-A")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "t")
+    if tag:
+        git("tag", tag)
+    return root
+
+
+def test_branch_refuses_a_release_version_that_is_already_tagged(tmp_path):
+    root = git_repo(tree(tmp_path), tag="v0.8.0")
+    assert any("already tagged" in e for e in errors(root))
+
+
+def test_branch_accepts_a_release_version_before_its_tag(tmp_path):
+    root = git_repo(tree(tmp_path), tag="v0.7.2")
+    assert errors(root) == []
+
+
+def test_release_tag_itself_is_not_refused_as_already_tagged(tmp_path):
+    root = git_repo(tree(tmp_path), tag="v0.8.0")
+    assert errors(root, tag="v0.8.0", publish=True) == []
+
+
+def test_dev_version_with_its_base_tagged_passes(tmp_path):
+    root = tree(tmp_path, version="0.8.1-dev", cff_version="0.8.0")
+    assert errors(git_repo(root, tag="v0.8.0")) == []
+
+
 def run_cli(root, *args, env_extra=None):
     env = {"PATH": "/usr/bin:/bin", **(env_extra or {})}
     return subprocess.run(

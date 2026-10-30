@@ -7,6 +7,9 @@ Always:
   * every internal `[workspace.dependencies]` entry (one with a `path`) pins
     exactly that version, so `cargo set-version --workspace` left none behind.
 
+On a branch, also: a release version `X.Y.Z` is not tagged yet, so code
+merged after a release never builds as that release.
+
 For a release (`--tag vX.Y.Z` and/or `--publish`):
   * the version is `X.Y.Z`, never `-dev`;
   * the tag is `v` + that version;
@@ -23,11 +26,14 @@ On success the version is appended to $GITHUB_OUTPUT as `version=...`.
 import argparse
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 import tomllib
 
+# hygiene.py has its own copies of these patterns and of the CITATION.cff
+# reader: it runs on Python 3.10, which has no tomllib.
 RELEASE = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
 RELEASE_VERSION = re.compile(RELEASE)
 DEV_VERSION = re.compile(RELEASE + "-dev")
@@ -41,6 +47,16 @@ def cff_field(text, key):
     """Root-level scalar of CITATION.cff (plain or quoted, one line)."""
     m = re.search(rf"^{key}:[ \t]*[\"']?([^\"'\s#]+)[\"']?[ \t]*(?:#.*)?$", text, re.M)
     return m.group(1) if m else None
+
+
+def is_tagged(root, tag):
+    """Whether the git repository at `root` has `tag`; False outside one."""
+    out = subprocess.run(
+        ["git", "-C", str(root), "tag", "--list", tag],
+        capture_output=True,
+        text=True,
+    )
+    return out.returncode == 0 and out.stdout.strip() == tag
 
 
 def check(root, tag=None, publish=False):
@@ -75,6 +91,11 @@ def check(root, tag=None, publish=False):
                 f"'{version}' (expected 'v{version}')"
             )
     if tag is None and not publish:
+        if RELEASE_VERSION.fullmatch(version) and is_tagged(root, f"v{version}"):
+            errors.append(
+                f"v{version} is already tagged: move to the next development "
+                "version (docs/RELEASING.md)"
+            )
         return errors
 
     if DEV_VERSION.fullmatch(version):

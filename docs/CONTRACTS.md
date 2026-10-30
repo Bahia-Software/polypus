@@ -1561,8 +1561,9 @@ is the first release action.*
   (`.github/scripts/release_check.py`, tests in
   `.github/scripts/test_release_check.py`), on every tag push and manual run
   with `target=pypi`.
-- Version form and internal pins on every pull request and push to `main`:
-  the same script in branch mode, from `.github/workflows/hygiene.yml`.
+- Version form, internal pins and no already-tagged `X.Y.Z` on every pull
+  request and push to `main`: the same script in branch mode, from
+  `.github/workflows/hygiene.yml`.
 - `Cargo.toml` ↔ `CITATION.cff`: `.github/workflows/hygiene.yml` on every pull
   request and push to `main` (`.github/scripts/hygiene.py`, rule
   `version-mismatch`; tests in `.github/scripts/test_hygiene.py`).

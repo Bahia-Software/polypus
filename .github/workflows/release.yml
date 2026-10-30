@@ -77,6 +77,10 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # release_check.py needs tomllib (Python 3.11+).
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
       - id: version
         name: Version, pins, CHANGELOG.md and CITATION.cff
         env:
@@ -86,7 +90,7 @@ jobs:
           args=()
           [[ -z "$TAG" ]] || args+=(--tag "$TAG")
           [[ "$PUBLISH" != true ]] || args+=(--publish)
-          python3 .github/scripts/release_check.py "${args[@]}"
+          python .github/scripts/release_check.py "${args[@]}"
       - name: ci.yml is green for this commit
         env:
           GH_TOKEN: ${{ github.token }}

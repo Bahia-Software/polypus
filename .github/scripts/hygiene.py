@@ -478,6 +478,7 @@ def notebook_problem(data):
 
 
 VERSION_FORMAT = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,63}")
+# Also in release_check.py, which needs Python 3.11 (tomllib).
 RELEASE_VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 DEV_VERSION = re.compile(RELEASE_VERSION.pattern + "-dev")
 TOML_HEADER = re.compile(r"\s*\[")

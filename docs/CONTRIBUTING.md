@@ -318,8 +318,10 @@ patch version with a `-dev` suffix (`0.8.1-dev` after 0.8.0).
 
 A pull request that breaks the public API of a crate published on crates.io
 also raises the workspace version to the next minor (`0.9.0-dev` while the
-version is `0.x`), with `cargo set-version --workspace`; the `semver` CI job
-(cargo-semver-checks against the last published version) fails otherwise.
+version is `0.x`), with `cargo set-version --workspace` and the backend
+templates' lockfiles refreshed as in [`docs/RELEASING.md`](RELEASING.md#release-steps);
+the `semver` CI job (cargo-semver-checks against the last published version)
+fails otherwise.
 Mark the change **BREAKING** in `CHANGELOG.md`. The release checklist lives
 in [`docs/RELEASING.md`](RELEASING.md).
 

@@ -57,11 +57,6 @@ jobs:
           python -m pytest -p no:cacheprovider -q .github/scripts/test_hygiene.py \
             .github/scripts/test_release_check.py .github/scripts/test_publish_crates.py
 
-      # The release gate's rules that hold on every branch: an `X.Y.Z` or
-      # `X.Y.Z-dev` workspace version and internal pins equal to it.
-      - name: Version and internal pins
-        run: python .github/scripts/release_check.py
-
       - name: Check (pull request, public rules)
         if: github.event_name == 'pull_request'
         env:
@@ -85,3 +80,11 @@ jobs:
           python .github/scripts/hygiene.py \
             --base "$base" --head "$HEAD_SHA" --comparison direct \
             --require-leak-patterns
+
+      # The release gate's rules that hold on every branch: an `X.Y.Z` or
+      # `X.Y.Z-dev` workspace version, internal pins equal to it, and no
+      # `X.Y.Z` that is already tagged. Last, so a failure here never skips
+      # the private patterns of a push to main.
+      - name: Version and internal pins
+        if: ${{ !cancelled() }}
+        run: python .github/scripts/release_check.py

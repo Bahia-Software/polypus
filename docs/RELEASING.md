@@ -48,10 +48,10 @@ next minor (`0.9.0-dev`); the `semver` CI job enforces it
 
 The release gate (`gate` job of [`release.yml`](../.github/workflows/release.yml),
 rules in [`release_check.py`](../.github/scripts/release_check.py)) refuses a
-tag, or a manual run with `target=pypi`, unless:
+tag or a manual run with `target=pypi` unless:
 
-- the tag is `vX.Y.Z` and equals `v` + the workspace version, which has no
-  `-dev` suffix;
+- the workspace version is `X.Y.Z`, with no `-dev` suffix;
+- a tag is `v` + that version;
 - every internal pin in `[workspace.dependencies]` equals that version;
 - `CHANGELOG.md` has a `## [X.Y.Z] - YYYY-MM-DD` section;
 - `CITATION.cff` has the same `version` and `date-released`;
@@ -59,6 +59,9 @@ tag, or a manual run with `target=pypi`, unless:
 
 Run the same check locally with
 `python .github/scripts/release_check.py --tag vX.Y.Z --publish` (Python 3.11+).
+Without arguments it applies the rules for any branch, as `hygiene.yml` does on
+every pull request: an `X.Y.Z` or `X.Y.Z-dev` version, the pins, and no
+`X.Y.Z` that is already tagged.
 
 ## Release steps
 
@@ -95,7 +98,8 @@ Run the same check locally with
    pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ polypus-quantum==X.Y.Z
    ```
    TestPyPI never accepts the same file twice, so a second dry run of the same
-   version skips the files already there.
+   version skips the files already there. Every commit of a `-dev` version
+   builds the same `X.Y.Z.dev0`, so only its first dry run uploads anything.
 4. **crates.io credentials.** If the release adds a crate (`python
    .github/scripts/publish_crates.py --plan` prints `(new crate)`), a
    `CARGO_REGISTRY_TOKEN` secret with the `publish-new` and `publish-update`
@@ -112,7 +116,8 @@ Run the same check locally with
      and mints a version DOI under the existing concept DOI (below) —
      no manual step needed.
 6. **Back to a development version.** Right after the tag, a pull request
-   moves `main` to the next patch with `-dev`:
+   moves `main` to the next patch with `-dev`; until it merges, hygiene fails
+   every pull request, since `main` would build as the tagged release:
    ```bash
    cargo set-version --workspace X.Y.(Z+1)-dev
    for t in examples/*-backend-template; do cargo metadata --format-version 1 --manifest-path "$t/Cargo.toml" > /dev/null; done
