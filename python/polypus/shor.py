@@ -42,7 +42,16 @@ class ShorResult:
     ``counts`` the counts of its run (``None`` when it ran no circuit).
     ``attempts`` is the number of circuits run.
 
-    ``"quantum"`` does not prove that the circuit worked: see :func:`factor`.
+    ``peak_share`` is the share of the shots in ``counts`` within 1 of
+    ``s * 2**counting_qubits / order`` for some ``s`` from 1 to
+    ``order - 1``, with ``counting_qubits`` as :func:`factor` used it
+    (``2 * n.bit_length()`` by default): the peaks of the order, without the
+    one at 0 that every order has. ``uniform_peak_share`` is the share that
+    uniformly random outcomes would put there. Both are ``None`` when
+    ``order`` is.
+
+    ``"quantum"`` does not prove that the circuit worked: see :func:`factor`
+    for how to read the two shares.
     """
 
     n: int
@@ -51,6 +60,8 @@ class ShorResult:
     a: Optional[int]
     order: Optional[int]
     attempts: int
+    peak_share: Optional[float]
+    uniform_peak_share: Optional[float]
     counts: Optional[dict[str, int]]
 
 
@@ -79,9 +90,25 @@ def factor(
     Reading the order tries every outcome, and several multiples of each order
     an outcome suggests, so for the ``n`` a simulator can run it finds the
     order even from counts that carry no signal: ``method="quantum"`` says
-    where the order was read, not that the circuit worked. The evidence that
-    it did is in ``counts``, which a working circuit concentrates near the
-    multiples of ``2**counting_qubits / order``.
+    where the order was read, not that the circuit worked.
+
+    To judge the circuit, compare ``peak_share`` with two levels. An ideal
+    circuit lands on the peaks with probability ``(order - 1) / order`` when
+    ``order`` is a power of two below ``2**counting_qubits``, and at least
+    85% of that otherwise; ``peak_share`` estimates it from the ``shots``
+    outcomes and scatters around it, by about 0.014 for order 4 at 1024
+    shots. Uniformly random outcomes land there with probability
+    ``uniform_peak_share``, a few percent at most with the default
+    ``counting_qubits``. The peak at 0 is left out: every order has it, and
+    it is all that a circuit whose multiplications do nothing measures.
+    Hardware noise is not uniform, though: decay and readout errors favour
+    zeros, which can put several times ``uniform_peak_share`` on the peaks of
+    an even order without any signal, most of all for a power of two. A
+    ``peak_share`` above ``uniform_peak_share`` but far below the ideal level
+    therefore does not show that the circuit worked. With too few counting
+    qubits for the order, ``uniform_peak_share`` comes close to the ideal
+    level, and from ``2 * order >= 2**counting_qubits`` it is at or above
+    it: the counts cannot tell.
 
     ``a`` (between 2 and ``n - 1``) is the base of every attempt when given,
     and ``factor`` stops as soon as it finds its order, even one that does not
@@ -136,10 +163,12 @@ def factor(
         )
 
     if n % 2 == 0:
-        return ShorResult(n, (2, n // 2), "even", None, None, 0, None)
+        return ShorResult(n, (2, n // 2), "even", None, None, 0, None, None, None)
     root = _perfect_power_root(n)
     if root is not None:
-        return ShorResult(n, (root, n // root), "perfect_power", None, None, 0, None)
+        return ShorResult(
+            n, (root, n // root), "perfect_power", None, None, 0, None, None, None
+        )
 
     # The extension is loaded after this module.
     import polypus
@@ -156,7 +185,7 @@ def factor(
         divisor = math.gcd(base, n)
         if divisor > 1:
             shortcut = _ordered(divisor, n // divisor)
-            return ShorResult(n, shortcut, "gcd", base, None, attempt, None)
+            return ShorResult(n, shortcut, "gcd", base, None, attempt, None, None, None)
         if qc is None or a is None:
             # One circuit alive at a time: free the last attempt's first.
             qc = None
@@ -175,10 +204,16 @@ def factor(
             continue
         factors = factors_from_order(base, n, order)
         if factors is not None:
-            return ShorResult(n, factors, "quantum", base, order, attempt + 1, counts)
+            shares = _peak_shares(counts, t, order)
+            return ShorResult(
+                n, factors, "quantum", base, order, attempt + 1, *shares, counts
+            )
         if a is not None:
-            return ShorResult(n, None, None, base, order, attempt + 1, counts)
-    return ShorResult(n, None, None, base, order, max_attempts, counts)
+            shares = _peak_shares(counts, t, order)
+            return ShorResult(n, None, None, base, order, attempt + 1, *shares, counts)
+    # The last attempt's order and counts, never an earlier attempt's shares.
+    shares = _peak_shares(counts, t, order)
+    return ShorResult(n, None, None, base, order, max_attempts, *shares, counts)
 
 
 def order_from_measurement(y: int, t: int, a: int, n: int) -> Optional[int]:
@@ -300,6 +335,49 @@ def _order_from_counts(counts: dict[str, int], t: int, a: int, n: int) -> Option
         if order is not None:
             return order
     return None
+
+
+def _peak_shares(
+    counts: Optional[dict[str, int]], t: int, order: Optional[int]
+) -> tuple[Optional[float], Optional[float]]:
+    """``peak_share`` and ``uniform_peak_share`` (see :class:`ShorResult`)
+    for the ``counts`` of a ``t``-qubit counting register and the ``order``
+    read from them, or ``None`` twice without an order.
+
+    The ``s`` with ``|y - s * 2**t / order| <= 1`` run from
+    ``ceil((y - 1) * order / 2**t)`` to ``floor((y + 1) * order / 2**t)``,
+    so the test is exact in integers. A key that is not an integer from 0 to
+    ``2**t - 1`` is a shot that is never near: a malformed key lowers the
+    share instead of raising. Of the ``2**t`` outcomes,
+    ``2 * order + gcd(order, 2**t) - 3`` are near some ``s`` from 1 to
+    ``order - 1`` while ``2 * order < 2**t`` (the peaks are more than 2
+    apart, and 0, 1 and ``2**t - 1`` are near only ``s = 0`` or
+    ``s = order``), all but 0 while ``order < 2**t <= 2 * order``, and all of
+    them from ``order >= 2**t``.
+    """
+    if counts is None or order is None:
+        return None, None
+    size = 1 << t
+    near = total = 0
+    for bits, count in counts.items():
+        if count <= 0:
+            continue
+        total += count
+        try:
+            y = int(bits, 2)
+        except (TypeError, ValueError):
+            continue
+        lowest = -((1 - y) * order // size)
+        highest = (y + 1) * order // size
+        if 0 <= y < size and max(lowest, 1) <= min(highest, order - 1):
+            near += count
+    if order >= size:
+        uniform = size
+    elif 2 * order >= size:
+        uniform = size - 1
+    else:
+        uniform = 2 * order + math.gcd(order, size) - 3
+    return near / total if total else 0.0, uniform / size
 
 
 def _convergents(numerator: int, denominator: int) -> Iterator[tuple[int, int]]:
