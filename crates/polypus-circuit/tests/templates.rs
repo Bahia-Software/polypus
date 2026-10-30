@@ -1,8 +1,10 @@
 //! Integration tests for polypus-circuit circuit templates.
 
 use polypus_circuit::templates::MAX_QFT_QUBITS;
-use polypus_circuit::templates::{qft, qft_with_options};
-use polypus_circuit::{CircuitError, GateInstruction, GateParam};
+use polypus_circuit::templates::{qft, qft_with_options, shor_order_finding};
+use polypus_circuit::{
+    CircuitError, GateInstruction, GateInstruction as G, GateParam, ParameterizedCircuit,
+};
 use std::f64::consts::PI;
 
 /// Controlled-phase angle used by the QFT between target `j` and control `k`.
@@ -111,4 +113,77 @@ fn qft_beyond_max_qft_qubits_is_an_error() {
     }
     assert!(qft(100_000).is_err());
     assert!(qft(usize::MAX).is_err());
+}
+
+#[test]
+fn shor_order_finding_sizes_match_the_closed_form() {
+    for (a, n, t, qubits, gates) in [
+        (7, 15, None, 18, 8_561),
+        (7, 15, Some(4), 14, 4_273),
+        (2, 21, Some(6), 18, 10_165),
+    ] {
+        let qc = shor_order_finding(a, n, t).unwrap();
+        assert_eq!((qc.num_qubits(), qc.gates().len()), (qubits, gates));
+        assert_eq!((qc.num_params(), qc.num_clbits()), (0, 0));
+    }
+}
+
+#[test]
+fn shor_order_finding_uses_only_the_template_vocabulary() {
+    let qc = shor_order_finding(7, 15, None).unwrap();
+    assert!(qc.gates().iter().all(|g| matches!(
+        g,
+        G::H(_) | G::X(_) | G::P { .. } | G::Cp { .. } | G::Cx(..) | G::Swap(..) | G::Cswap(..)
+    )));
+}
+
+#[test]
+fn shor_order_finding_validates_its_arguments() {
+    for (a, n, t, argument) in [
+        (2, 2, None, "modulus"),
+        (2, (1 << 24) + 1, None, "modulus"),
+        (0, 15, None, "a"),
+        (15, 15, None, "a"),
+        (6, 15, None, "a"),
+        (7, 15, Some(0), "counting_qubits"),
+        (7, 15, Some(9), "counting_qubits"),
+    ] {
+        match shor_order_finding(a, n, t) {
+            Err(CircuitError::InvalidTemplateArgument {
+                template: "shor_order_finding",
+                argument: got,
+                ..
+            }) => assert_eq!(got, argument),
+            other => panic!("({a}, {n}, {t:?}): {other:?}"),
+        }
+    }
+}
+
+#[test]
+#[ignore = "builds 3.7 million gates; run with --release -- --ignored"]
+fn shor_order_finding_builds_the_largest_modulus() {
+    let qc = shor_order_finding(2, 16_777_213, None).unwrap();
+    assert_eq!((qc.num_qubits(), qc.gates().len()), (98, 3_716_641));
+    assert!(matches!(
+        qc.to_qasm3(),
+        Err(CircuitError::ExportLimit {
+            limit: "MAX_SOURCE_BYTES",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn shor_order_finding_round_trips_through_openqasm_3() {
+    let text = shor_order_finding(7, 15, Some(4))
+        .unwrap()
+        .to_qasm3()
+        .unwrap();
+    assert_eq!(
+        ParameterizedCircuit::from_qasm3(&text)
+            .unwrap()
+            .to_qasm3()
+            .unwrap(),
+        text
+    );
 }

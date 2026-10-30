@@ -1107,9 +1107,56 @@ impl Circuit {
 /// ```
 #[pyfunction]
 #[pyo3(signature = (num_qubits, inverse = false, swaps = true))]
-pub fn qft(num_qubits: usize, inverse: bool, swaps: bool) -> PyResult<Circuit> {
-    Ok(Circuit {
-        inner: polypus_circuit::templates::qft_with_options(num_qubits, inverse, swaps)
-            .map_err(to_py_err)?,
-    })
+pub fn qft(py: Python<'_>, num_qubits: usize, inverse: bool, swaps: bool) -> PyResult<Circuit> {
+    let inner = py
+        .detach(|| polypus_circuit::templates::qft_with_options(num_qubits, inverse, swaps))
+        .map_err(to_py_err)?;
+    Ok(Circuit { inner })
+}
+
+/// The order-finding circuit of Shor's algorithm, as a `polypus.Circuit`:
+/// measuring its counting register estimates the order `r` of `a` modulo
+/// `modulus`, the smallest `r > 0` with `a**r % modulus == 1`.
+///
+/// With `n = modulus.bit_length()` and `t = counting_qubits` (`2n` by
+/// default), the qubits are the counting register `0..t`, then `x` (`n`
+/// qubits, set to 1), `b` (`n + 1` qubits) and one ancilla: `t + 2n + 2` in
+/// all. The circuit is Beauregard's: Hadamards on the counting register, a
+/// multiplication of `x` by `a**(2**k) % modulus` controlled by counting qubit
+/// `k`, and the inverse QFT of the counting register. Read as an integer
+/// (qubit 0 is the least-significant bit), the counting register concentrates
+/// on the values closest to `s * 2**t / r` for `s` in `range(r)`.
+///
+/// The circuit has no free parameters and no measurements: measure the
+/// counting register yourself. It is built without the GIL. Moduli go up to 24
+/// bits (98 qubits and 3.7 million gates), the largest whose circuit the
+/// OpenQASM importers read back; with the default counting register `to_qasm3`
+/// exports up to 16 bits, beyond which the text passes 32 MiB. Raises
+/// `ValueError` for a `modulus` below 3 or above 24 bits, an `a` that is not
+/// between 1 and `modulus - 1` or shares a factor with `modulus` (that factor
+/// already divides it), and a `counting_qubits` not between 1 and `2n`.
+///
+/// ```python
+/// import polypus
+/// from polypus.circuits.templates import shor_order_finding
+///
+/// qc = shor_order_finding(7, 15)  # 8 counting qubits, then x, b and the ancilla
+/// for k in range(8):
+///     qc.measure(k, k)
+/// result = polypus.run_quantum_circuit(qc, shots=1024,
+///                                      infrastructure="local", backend="polypus")
+/// counts = result.merged_counts   # peaks at 0, 64, 128 and 192: s * 256 / 4
+/// ```
+#[pyfunction]
+#[pyo3(signature = (a, modulus, counting_qubits = None))]
+pub fn shor_order_finding(
+    py: Python<'_>,
+    a: u64,
+    modulus: u64,
+    counting_qubits: Option<usize>,
+) -> PyResult<Circuit> {
+    let inner = py
+        .detach(|| polypus_circuit::templates::shor_order_finding(a, modulus, counting_qubits))
+        .map_err(to_py_err)?;
+    Ok(Circuit { inner })
 }

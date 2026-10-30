@@ -74,6 +74,56 @@ let mut qc = ParameterizedCircuit::new(3).x(0);
 qc.try_compose(&qft(2)?, &[1, 2])?;
 ```
 
+## Templates
+
+`polypus.circuits.templates` builds ready-made circuits in Rust, without the GIL. They are ordinary `polypus.Circuit`s with no free parameters and no measurements: keep chaining gates onto them, measure them, or export them.
+
+`qft(num_qubits, inverse=False, swaps=True)` is the quantum Fourier transform in Qiskit's convention, with the qubit-reversal swaps unless `swaps=False`; `inverse=True` builds its exact adjoint. It takes up to 2827 qubits, the largest QFT the OpenQASM importers read back.
+
+`shor_order_finding(a, modulus, counting_qubits=None)` is the quantum part of Shor's algorithm: measuring its counting register estimates the order `r` of `a` modulo `modulus`, the smallest `r > 0` with `a**r % modulus == 1`. It is Beauregard's circuit with the counting register kept whole, so it runs on any backend. With `n = modulus.bit_length()` and `t = counting_qubits` (`2n` by default), qubits `0..t` are the counting register, then come `x` (`n` qubits, set to 1), `b` (`n + 1`) and an ancilla. Read as an integer, qubit 0 the least-significant bit, the counting register peaks at the values closest to `s * 2**t / r` for `s` in `range(r)`.
+
+```python
+import polypus
+from polypus.circuits.templates import shor_order_finding
+
+qc = shor_order_finding(7, 15)  # t = 8 counting qubits, 18 qubits in all
+for k in range(8):
+    qc.measure(k, k)
+result = polypus.run_quantum_circuit(
+    qc, shots=1024, infrastructure="local", backend="polypus"
+)
+result.merged_counts  # peaks at 0, 64, 128 and 192: 7 has order 4 modulo 15
+```
+
+`a` must be between 1 and `modulus - 1` and share no factor with `modulus` (a shared factor already divides it), and `counting_qubits` between 1 and `2n`; otherwise `ValueError`. Moduli go up to 24 bits: 98 qubits and 3.7 million gates, the largest circuit the OpenQASM importers read back. The native simulator holds up to 30 qubits, moduli of up to 7 bits with the default counting register. `to_qasm3` exports moduli of up to 16 bits; from 17 bits on, the program text would pass the importer's 32 MiB and it raises `ValueError`.
+
+In Rust the templates are in `polypus_circuit::templates`, and the arithmetic blocks `shor_order_finding` is built from are public in `templates::arithmetic`: Draper's `phase_adder` and Beauregard's `modular_phase_adder`, `controlled_modular_multiplier` and `controlled_modular_multiplication`.
+
+```rust
+use polypus_circuit::templates::{qft_with_options, shor_order_finding};
+
+let order_finding = shor_order_finding(7, 15, None)?; // 18 qubits, 8561 gates
+let inverse_qft = qft_with_options(4, true, true)?;
+```
+
+### Factoring with Shor
+
+`polypus.shor.factor(n, infrastructure=..., shots=1024, a=None, counting_qubits=None, max_attempts=10, seed=None, **run_kwargs)` runs Shor's algorithm end to end and returns a `ShorResult`: the two `factors` (smaller first), the `method` that found them, the base `a`, its `order` and the `counts` of the last run, the share of those counts on the peaks of the order, all but the one at 0 (`peak_share`), and the share that uniformly random outcomes would put there (`uniform_peak_share`).
+
+```python
+from polypus.shor import factor
+
+result = factor(15, a=7, infrastructure="local", backend="polypus", seed=1)
+result.factors, result.method, result.order  # ((3, 5), 'quantum', 4)
+result.peak_share, result.uniform_peak_share  # (0.734375, 0.03515625)
+```
+
+An even `n` (`"even"`), a perfect power (`"perfect_power"`, which Shor's algorithm cannot split) and a base that shares a factor with `n` (`"gcd"`) need no circuit. Otherwise each attempt runs `shor_order_finding(a, n, counting_qubits)` with its counting register measured, through `run_quantum_circuit` with `infrastructure` and the other keywords (`backend`, `options`...), and `"quantum"` factors come from an order read off the outcomes, most frequent first. That post-processing tries every outcome and several multiples of each order it suggests, so for the `n` a simulator can run it finds the order even from counts with no signal: `"quantum"` says where the order was read, not that the circuit worked. Without `a`, each of the `max_attempts` attempts draws a new base; with it, `factor` stops at the first order it reads, even one that does not split `n`. A search that fails returns `factors=None`, while an error of the run propagates. `seed` draws the bases and the seed of every run; without it no run is seeded, as `qmio` requires. `counting_qubits` goes from 1 to `2 * n.bit_length()`, the default; fewer make each run cheaper and its counts less precise. `n` must be a composite below `2**24`. The local simulators hold 30 qubits (`n < 128` with the default counting register), but each qubit more doubles the time and memory of a run: on four cores an attempt takes seconds for `n < 16`, about a minute for `n < 32`, half an hour for `n < 64` and, at 30 qubits, 16 GiB and many hours.
+
+To judge the circuit, compare `peak_share`, the share of the shots within 1 of `s * 2**counting_qubits / order` for some `s` from 1 to `order - 1`, with two levels; both shares are `None` without an `order`. An ideal circuit lands on those peaks with probability `(order - 1) / order` when `order` is a power of two below `2**counting_qubits`, and at least 85% of that otherwise; `peak_share` estimates it from the `shots` outcomes and scatters around it, by about 0.014 for order 4 at 1024 shots. Uniformly random outcomes land there with probability `uniform_peak_share`, a few percent at most with the default `counting_qubits`. The peak at 0 is left out: every order has it, and it is all that a circuit whose multiplications do nothing measures. Hardware noise is not uniform, though: decay and readout errors favour zeros, which can put several times `uniform_peak_share` on the peaks of an even order without any signal, most of all for a power of two. A `peak_share` above `uniform_peak_share` but far below the ideal level therefore does not show that the circuit worked. With too few counting qubits for the order, `uniform_peak_share` comes close to the ideal level, and from `2 * order >= 2**counting_qubits` it is at or above it: the counts cannot tell.
+
+The classical steps are public too: `order_from_measurement(y, t, a, n)` reads the order from one outcome `y` of a `t`-qubit counting register (continued fractions, a bounded number of modular powers), and `factors_from_order(a, n, r)` splits `n` with `gcd(a**(r/2) ± 1, n)`.
+
 ## Drawing
 
 A circuit draws itself, natively and with no plotting library: `print(qc)` shows a text drawing, and a notebook displays an SVG one.
