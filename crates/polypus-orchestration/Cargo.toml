@@ -16,3 +16,6 @@ description = "Orchestration layer for Polypus: the pure, Python-free policy mid
 polypus-infrastructure = { workspace = true }
 polypus-optimizers = { workspace = true }
 log = { workspace = true }
+# The call trace (contract C-12) writes JSON Lines.
+serde = { workspace = true }
+serde_json = { workspace = true }

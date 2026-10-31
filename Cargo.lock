@@ -889,6 +889,8 @@ dependencies = [
  "log",
  "polypus-infrastructure",
  "polypus-optimizers",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
