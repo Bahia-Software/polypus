@@ -1,15 +1,17 @@
-//! The decorators that record a run's planner batches and backend waves in its
-//! call trace.
+//! The decorators that record a run's planner batches, backend waves,
+//! optimizer iterations and QNG metric calls in its call trace.
 //!
 //! Each forwards **every** method of its trait to what it wraps, overriding
 //! even the methods the trait gives a default. A wrapper that kept a default
 //! would run that default instead of the wrapped method, and the traced run
 //! would then make different calls from the untraced run: the default
 //! `run_shots_distributed`, for one, would call the wrapper's `run_circuits`
-//! instead of the wrapped backend's own `run_shots_distributed`.
+//! instead of the wrapped backend's own `run_shots_distributed`, and the
+//! default `variance_diagonal` would call the wrapper's `variance` once per
+//! element instead of the wrapped oracle's own `variance_diagonal` once.
 
 use std::fmt;
-use std::ops::Deref;
+use std::ops::{ControlFlow, Deref};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,8 +21,10 @@ use polypus_infrastructure::{
     InfrastructureError, Planner, PlannerRequirements, QuantumBackend, RunParams,
 };
 use polypus_observable::CostObservable;
+use polypus_optimizers::VarianceOracle;
 
 use super::{BatchOp, CallTracer, TraceEvent, WaveOp};
+use crate::progress::{TrainObserver, TrainProgress};
 
 /// A [`QuantumBackend`] that records each call that runs circuits as a `wave`
 /// line of a call trace.
@@ -406,9 +410,217 @@ impl fmt::Debug for TracingPlanner {
     }
 }
 
+/// A [`TrainObserver`] that records each iteration of a training run as an
+/// `iter` line of a call trace, and hands it on to the run's own observer, if
+/// it has one.
+///
+/// Each call to [`observe`](TrainObserver::observe) records the iteration's
+/// number (`i`), the evaluations spent so far (`evals`) and the best fitness
+/// so far (`best`), with the batches recorded until then, before the run's
+/// observer is called: its `t` is when the optimizer reported the iteration,
+/// however long that observer takes. It then shows the run's observer the same
+/// progress and returns its answer, or [`ControlFlow::Continue`] without one:
+/// whether the run stops is up to the run's observer alone, as it is untraced.
+///
+/// # Example
+///
+/// ```
+/// use std::ops::ControlFlow;
+/// use std::sync::Arc;
+///
+/// use polypus_orchestration::trace::{
+///     CallTracer, RunStatus, TraceFlow, TraceHeader, TracingObserver, DEFAULT_MAX_BYTES,
+/// };
+/// use polypus_orchestration::{TrainObserver, TrainProgress};
+///
+/// let name = format!("polypus-traced-observer-doc-{}.jsonl", std::process::id());
+/// let path = std::env::temp_dir().join(name);
+/// let header = TraceHeader {
+///     flow: TraceFlow::Train,
+///     id: "doc".to_owned(),
+///     polypus: env!("CARGO_PKG_VERSION").to_owned(),
+///     method: Some("spsa"),
+///     dims: Some(2),
+///     backend: "native".to_owned(),
+///     infrastructure: "local".to_owned(),
+///     n_qpus: 1,
+///     shots: 1024,
+///     seed: Some(7),
+/// };
+/// let tracer = CallTracer::create(&path, header, DEFAULT_MAX_BYTES)?;
+/// // The run's own observer: it stops the run once the best fitness passes -0.5.
+/// let stop_when_good = |progress: &TrainProgress<'_>| {
+///     if progress.best_fitness > -0.5 {
+///         ControlFlow::Break(())
+///     } else {
+///         ControlFlow::Continue(())
+///     }
+/// };
+/// let mut observer = TracingObserver::new(Some(Box::new(stop_when_good)), Arc::clone(&tracer));
+/// let best = [0.5, -1.25];
+/// let progress = TrainProgress {
+///     iteration: 1,
+///     best_fitness: -0.25,
+///     best_params: &best,
+///     evaluations: 12,
+/// };
+/// assert_eq!(observer.observe(&progress), ControlFlow::Break(()));
+/// tracer.finish(RunStatus::Ok);
+/// let trace = std::fs::read_to_string(&path)?;
+/// // No batch was recorded before the iteration.
+/// let iter = r#"{"ev":"iter","i":1,"evals":12,"batches":0,"best":-0.25,"t":"#;
+/// assert!(trace.lines().any(|line| line.starts_with(iter)));
+/// std::fs::remove_file(&path)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub struct TracingObserver {
+    /// The run's own observer, if it has one.
+    inner: Option<Box<dyn TrainObserver>>,
+    /// The trace the iterations are recorded in.
+    tracer: Arc<CallTracer>,
+}
+
+impl TracingObserver {
+    /// Records each iteration in `tracer`, then hands it on to `inner`, the
+    /// run's own observer, if it has one.
+    pub fn new(inner: Option<Box<dyn TrainObserver>>, tracer: Arc<CallTracer>) -> Self {
+        Self { inner, tracer }
+    }
+}
+
+impl TrainObserver for TracingObserver {
+    fn observe(&mut self, progress: &TrainProgress<'_>) -> ControlFlow<()> {
+        // Stamped and recorded before the run's observer is called, so that
+        // observer's time is not the iteration's.
+        let t = self.tracer.now_ns();
+        self.tracer.record(TraceEvent::Iter {
+            i: progress.iteration,
+            evals: progress.evaluations,
+            best: progress.best_fitness,
+            t,
+        });
+        match self.inner.as_mut() {
+            Some(inner) => inner.observe(progress),
+            None => ControlFlow::Continue(()),
+        }
+    }
+}
+
+impl fmt::Debug for TracingObserver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TracingObserver")
+            .field("tracer", &self.tracer)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A [`VarianceOracle`] that records each call to the QNG metric as a `metric`
+/// line of a call trace.
+///
+/// It forwards both methods of the trait to the oracle it wraps, with the same
+/// arguments, and returns what that oracle returns. Each call is recorded once
+/// it returns, with the metric elements it asked for (`n`: 1 for
+/// [`variance`](VarianceOracle::variance), `dims` for
+/// [`variance_diagonal`](VarianceOracle::variance_diagonal)), when it started
+/// and how long it took. `variance_diagonal` goes to the wrapped oracle's own
+/// `variance_diagonal`, never to the trait's default loop over `variance`: an
+/// oracle that computes the whole diagonal at once is still called once, and
+/// the call is one line.
+///
+/// # Example
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use polypus_optimizers::VarianceOracle;
+/// use polypus_orchestration::trace::{
+///     CallTracer, RunStatus, TraceFlow, TraceHeader, TracingVariance, DEFAULT_MAX_BYTES,
+/// };
+///
+/// /// A metric whose every diagonal element is 0.25.
+/// struct Flat;
+///
+/// impl VarianceOracle for Flat {
+///     fn variance(&self, _theta: &[f64], _param_index: usize) -> f64 {
+///         0.25
+///     }
+/// }
+///
+/// let name = format!("polypus-traced-variance-doc-{}.jsonl", std::process::id());
+/// let path = std::env::temp_dir().join(name);
+/// let header = TraceHeader {
+///     flow: TraceFlow::Train,
+///     id: "doc".to_owned(),
+///     polypus: env!("CARGO_PKG_VERSION").to_owned(),
+///     method: Some("qng"),
+///     dims: Some(2),
+///     backend: "native".to_owned(),
+///     infrastructure: "local".to_owned(),
+///     n_qpus: 1,
+///     shots: 1024,
+///     seed: Some(7),
+/// };
+/// let tracer = CallTracer::create(&path, header, DEFAULT_MAX_BYTES)?;
+/// let metric = TracingVariance::new(Box::new(Flat), Arc::clone(&tracer));
+/// assert_eq!(metric.variance_diagonal(&[0.1, 0.2], 2), [0.25, 0.25]);
+/// tracer.finish(RunStatus::Ok);
+/// let trace = std::fs::read_to_string(&path)?;
+/// // One call for the whole diagonal: one line, for its two elements.
+/// let metrics: Vec<&str> = trace
+///     .lines()
+///     .filter(|line| line.contains(r#""ev":"metric""#))
+///     .collect();
+/// assert_eq!(metrics.len(), 1);
+/// assert!(metrics[0].starts_with(r#"{"ev":"metric","n":2,"t":"#));
+/// std::fs::remove_file(&path)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub struct TracingVariance {
+    /// The oracle every call goes to.
+    inner: Box<dyn VarianceOracle>,
+    /// The trace the calls are recorded in.
+    tracer: Arc<CallTracer>,
+}
+
+impl TracingVariance {
+    /// Wraps `inner`, recording its calls in `tracer`.
+    pub fn new(inner: Box<dyn VarianceOracle>, tracer: Arc<CallTracer>) -> Self {
+        Self { inner, tracer }
+    }
+
+    /// Makes `call`, a call to the wrapped oracle that asks for `n` metric
+    /// elements, and records it.
+    fn metric<T>(&self, n: usize, call: impl FnOnce() -> T) -> T {
+        let t = self.tracer.now_ns();
+        let result = call();
+        let dt = self.tracer.now_ns().saturating_sub(t);
+        self.tracer.record(TraceEvent::Metric { n, t, dt });
+        result
+    }
+}
+
+impl VarianceOracle for TracingVariance {
+    fn variance(&self, theta: &[f64], param_index: usize) -> f64 {
+        self.metric(1, || self.inner.variance(theta, param_index))
+    }
+
+    fn variance_diagonal(&self, theta: &[f64], dims: usize) -> Vec<f64> {
+        self.metric(dims, || self.inner.variance_diagonal(theta, dims))
+    }
+}
+
+impl fmt::Debug for TracingVariance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TracingVariance")
+            .field("tracer", &self.tracer)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
 
     use polypus_infrastructure::{Interrupt, SequentialPlanner, ShotDistributingPlanner};
@@ -1022,6 +1234,233 @@ mod tests {
                     "{err:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn tracing_observer_forwards_every_call() {
+        let sink = SharedSink::default();
+        let tracer = sink_tracer(&sink, "observer-forwarding");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        let inner = move |p: &TrainProgress<'_>| {
+            record.lock().unwrap().push((
+                p.iteration,
+                p.best_fitness,
+                p.best_params.to_vec(),
+                p.evaluations,
+            ));
+            if p.iteration == 2 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        };
+        let mut traced = TracingObserver::new(Some(Box::new(inner)), Arc::clone(&tracer));
+        let best = [0.5, -1.25];
+        let first = TrainProgress {
+            iteration: 1,
+            best_fitness: -0.75,
+            best_params: &best,
+            evaluations: 12,
+        };
+        let second = TrainProgress {
+            iteration: 2,
+            best_fitness: -0.5,
+            best_params: &best,
+            evaluations: 18,
+        };
+        assert_eq!(traced.observe(&first), ControlFlow::Continue(()));
+        assert_eq!(traced.observe(&second), ControlFlow::Break(()));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [(1, -0.75, best.to_vec(), 12), (2, -0.5, best.to_vec(), 18)]
+        );
+        // The trace reaches the sink once it is closed.
+        tracer.finish(RunStatus::Ok);
+        let iters: Vec<(u64, u64, f64)> = sink
+            .lines()
+            .iter()
+            .filter(|l| l["ev"] == "iter")
+            .map(|l| {
+                (
+                    l["i"].as_u64().unwrap(),
+                    l["evals"].as_u64().unwrap(),
+                    l["best"].as_f64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(iters, [(1, 12, -0.75), (2, 18, -0.5)]);
+
+        // Without an observer of the run's own, the iteration is still
+        // recorded and the run goes on.
+        let alone_sink = SharedSink::default();
+        let alone_tracer = sink_tracer(&alone_sink, "observer-alone");
+        let mut alone = TracingObserver::new(None, Arc::clone(&alone_tracer));
+        assert_eq!(alone.observe(&first), ControlFlow::Continue(()));
+        alone_tracer.finish(RunStatus::Ok);
+        assert_eq!(
+            alone_sink
+                .lines()
+                .iter()
+                .filter(|l| l["ev"] == "iter")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn tracing_variance_forwards_both_methods() {
+        /// The arguments of every call to one method of the spy, in order:
+        /// `theta` and the parameter index or the number of dimensions.
+        type Calls = Arc<Mutex<Vec<(Vec<f64>, usize)>>>;
+
+        /// A variance oracle that counts the calls to each of its methods and
+        /// notes the arguments each call received.
+        struct SpyVariance {
+            variance: Arc<AtomicUsize>,
+            diagonal: Arc<AtomicUsize>,
+            variance_args: Calls,
+            diagonal_args: Calls,
+        }
+
+        impl VarianceOracle for SpyVariance {
+            fn variance(&self, theta: &[f64], param_index: usize) -> f64 {
+                self.variance.fetch_add(1, Ordering::SeqCst);
+                self.variance_args
+                    .lock()
+                    .unwrap()
+                    .push((theta.to_vec(), param_index));
+                7.25
+            }
+
+            fn variance_diagonal(&self, theta: &[f64], dims: usize) -> Vec<f64> {
+                self.diagonal.fetch_add(1, Ordering::SeqCst);
+                self.diagonal_args
+                    .lock()
+                    .unwrap()
+                    .push((theta.to_vec(), dims));
+                (0..dims).map(|a| a as f64 + 0.5).collect()
+            }
+        }
+
+        let (variance, diagonal) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (variance_args, diagonal_args) = (Calls::default(), Calls::default());
+        let sink = SharedSink::default();
+        let tracer = sink_tracer(&sink, "variance-forwarding");
+        let spy = SpyVariance {
+            variance: Arc::clone(&variance),
+            diagonal: Arc::clone(&diagonal),
+            variance_args: Arc::clone(&variance_args),
+            diagonal_args: Arc::clone(&diagonal_args),
+        };
+        let traced = TracingVariance::new(Box::new(spy), Arc::clone(&tracer));
+        assert_eq!(
+            traced.variance_diagonal(&[0.1, 0.2, 0.3], 3),
+            [0.5, 1.5, 2.5]
+        );
+        // One call to the oracle's own `variance_diagonal`, and none to
+        // `variance`, which the trait's default implementation would make.
+        assert_eq!(
+            (
+                variance.load(Ordering::SeqCst),
+                diagonal.load(Ordering::SeqCst)
+            ),
+            (0, 1)
+        );
+        assert_eq!(traced.variance(&[0.1, 0.2, 0.3], 1), 7.25);
+        assert_eq!(
+            (
+                variance.load(Ordering::SeqCst),
+                diagonal.load(Ordering::SeqCst)
+            ),
+            (1, 1)
+        );
+        // Each call reached the oracle with the arguments it was made with: a
+        // wrong index or a cut `theta` changes neither the counts nor what
+        // this oracle returns.
+        assert_eq!(*diagonal_args.lock().unwrap(), [(vec![0.1, 0.2, 0.3], 3)]);
+        assert_eq!(*variance_args.lock().unwrap(), [(vec![0.1, 0.2, 0.3], 1)]);
+        tracer.finish(RunStatus::Ok);
+        let metrics: Vec<u64> = sink
+            .lines()
+            .iter()
+            .filter(|l| l["ev"] == "metric")
+            .map(|l| l["n"].as_u64().unwrap())
+            .collect();
+        assert_eq!(metrics, [3, 1]);
+    }
+
+    #[test]
+    fn iter_is_stamped_before_the_observer_and_metric_spans_the_oracle() {
+        /// A variance oracle that notes, on the trace's clock, when each of
+        /// its methods runs.
+        struct ClockedVariance {
+            tracer: Arc<CallTracer>,
+            ran_at: Arc<Mutex<Vec<u64>>>,
+        }
+
+        impl ClockedVariance {
+            fn note(&self) {
+                self.ran_at.lock().unwrap().push(self.tracer.now_ns());
+            }
+        }
+
+        impl VarianceOracle for ClockedVariance {
+            fn variance(&self, _theta: &[f64], _param_index: usize) -> f64 {
+                self.note();
+                1.0
+            }
+
+            fn variance_diagonal(&self, _theta: &[f64], dims: usize) -> Vec<f64> {
+                self.note();
+                vec![1.0; dims]
+            }
+        }
+
+        let sink = SharedSink::default();
+        let tracer = sink_tracer(&sink, "call-times");
+        let ran_at = Arc::new(Mutex::new(Vec::new()));
+        let (clock, noted) = (Arc::clone(&tracer), Arc::clone(&ran_at));
+        let observer = move |_: &TrainProgress<'_>| {
+            noted.lock().unwrap().push(clock.now_ns());
+            ControlFlow::Continue(())
+        };
+        let mut traced_observer =
+            TracingObserver::new(Some(Box::new(observer)), Arc::clone(&tracer));
+        let oracle = ClockedVariance {
+            tracer: Arc::clone(&tracer),
+            ran_at: Arc::clone(&ran_at),
+        };
+        let traced_oracle = TracingVariance::new(Box::new(oracle), Arc::clone(&tracer));
+        let theta = [0.0, 0.0];
+        let progress = TrainProgress {
+            iteration: 1,
+            best_fitness: 0.0,
+            best_params: &theta,
+            evaluations: 1,
+        };
+        assert_eq!(
+            traced_observer.observe(&progress),
+            ControlFlow::Continue(())
+        );
+        assert_eq!(traced_oracle.variance_diagonal(&theta, 2), [1.0, 1.0]);
+        assert_eq!(traced_oracle.variance(&theta, 0), 1.0);
+        tracer.finish(RunStatus::Ok);
+        let ran_at = ran_at.lock().unwrap().clone();
+        let lines = sink.lines();
+        let events: Vec<&Value> = lines
+            .iter()
+            .filter(|l| l["ev"] == "iter" || l["ev"] == "metric")
+            .collect();
+        assert_eq!((events.len(), ran_at.len()), (3, 3));
+        let field = |l: &Value, f: &str| l[f].as_u64().unwrap();
+        // The iteration is stamped before the run's observer is called.
+        assert!(field(events[0], "t") <= ran_at[0]);
+        // Each metric call spans the wrapped oracle's call.
+        for (metric, &ran) in events[1..].iter().zip(&ran_at[1..]) {
+            let (t, dt) = (field(metric, "t"), field(metric, "dt"));
+            assert!(t <= ran && ran <= t + dt, "{metric} vs {ran}");
         }
     }
 }

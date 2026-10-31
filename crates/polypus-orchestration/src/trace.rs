@@ -26,6 +26,10 @@
 //! [`TracingPlanner`] and [`TracingBackend`] record the `batch` and `wave`
 //! events: each wraps a planner or a backend, forwards every method of its
 //! trait unchanged, and records the calls that run circuits.
+//! [`TracingObserver`] and [`TracingVariance`] record the `iter` and `metric`
+//! events: the first wraps the run's [`TrainObserver`](crate::TrainObserver),
+//! if it has one, and records each iteration the optimizer reports; the second
+//! wraps the QNG metric and records each call to it.
 //!
 //! # Example
 //!
@@ -631,7 +635,7 @@ fn unix_time_ns() -> u64 {
 
 mod decorators;
 
-pub use decorators::{TracingBackend, TracingPlanner};
+pub use decorators::{TracingBackend, TracingObserver, TracingPlanner, TracingVariance};
 
 #[cfg(test)]
 impl CallTracer {
