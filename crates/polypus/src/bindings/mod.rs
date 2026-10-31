@@ -1650,6 +1650,7 @@ pub fn run_quantum_circuit<'py>(
                 RunCircuitFlow {
                     circuits: vec![bound_qc],
                     shots,
+                    trace: None,
                 },
                 &interruptible_token(),
             );
@@ -1943,6 +1944,7 @@ pub fn train<'py>(
         final_shots,
         observer: training_observer(callback, &errors, &effective_id),
         errors: errors.clone(),
+        trace: None,
     };
     // Release the GIL for the whole optimization: parameter binding and native
     // simulation are GIL-free, so holding it would stall every other Python
@@ -2322,6 +2324,7 @@ pub fn qml_train<'py>(
         final_shots,
         observer: training_observer(callback, &errors, &effective_id),
         errors: errors.clone(),
+        trace: None,
     };
     // Release the GIL for the optimization (see `train` and docs/ENGINEERING.md
     // §3): the Qiskit binding + Aer calls re-acquire it, and the run token's
@@ -2470,8 +2473,14 @@ pub fn qml_predict<'py>(
             Infrastructure::create_backend(&config).map_err(InfrastructureError::Backend)?;
         let resources = Resources::new(backend, None, Arc::new(config.run_params()))?;
         let scheduler = Scheduler::ephemeral(resources);
-        let out =
-            scheduler.run_cancellable(RunCircuitFlow { circuits, shots }, &interruptible_token());
+        let out = scheduler.run_cancellable(
+            RunCircuitFlow {
+                circuits,
+                shots,
+                trace: None,
+            },
+            &interruptible_token(),
+        );
         scheduler.close();
         out
     });
