@@ -176,3 +176,36 @@ class TestAskTellTypes:
         assert status == 1, report
         assert "snippet.py:4:" not in report, report
         assert 'snippet.py:5: error: "AskTell" has no attribute "close"' in report
+
+
+class TestTraceType:
+    """`trace` is `str | os.PathLike[str] | None`, keyword-only (contract C-12)."""
+
+    PRELUDE = (
+        "import pathlib\n"
+        "from typing import Any\n"
+        "import polypus\n"
+        "qc: Any = None\n"
+        "f: Any = None\n"
+    )
+    TRAIN = (
+        "polypus.train(qc, polypus.SPSA(), 64, 1, 2, f, 'local', 1, 1, 'x', trace={})\n"
+    )
+
+    def test_paths_type_check(self, tmp_path):
+        source = (
+            self.PRELUDE
+            + self.TRAIN.format("'t.jsonl'")
+            + self.TRAIN.format("pathlib.Path('t.jsonl')")
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+    def test_a_number_does_not_type_check(self, tmp_path):
+        # Proves the check above reads the stubs: an `int` is a TypeError at
+        # run time, so mypy must reject it too, as a value of the wrong type.
+        status, report = _mypy(self.PRELUDE + self.TRAIN.format("1"), tmp_path)
+        assert status != 0 and "trace" in report, report
+        assert 'Argument "trace" to "train" has incompatible type "int"' in report, (
+            report
+        )

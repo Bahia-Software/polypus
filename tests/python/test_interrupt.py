@@ -99,6 +99,7 @@ Manual verification (complementary to these automated tests):
     # the same way.
 """
 
+import json
 import os
 import select
 import signal
@@ -342,6 +343,23 @@ def test_native_training_with_a_callback_responds_to_sigint_promptly():
             "likely holding the GIL or swallowing the pending signal"
         ),
     )
+
+
+def test_trace_on_interrupt(tmp_path):
+    # Contract C-12: Ctrl+C reaches the edge as the KeyboardInterrupt of
+    # `check_signals` inside a backend error, not as a cancelled run
+    # (`InfrastructureError::Cancelled`); the trace still closes "cancelled".
+    path = tmp_path / "interrupted.jsonl"
+    _assert_responds_to_sigint_promptly(
+        _NATIVE_CHILD.replace(_ID_LINE, _ID_LINE + f" trace={str(path)!r},"),
+        failure_hint=(
+            "native training with a call trace — the trace likely holds the "
+            "GIL or the run"
+        ),
+    )
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert lines[0]["ev"] == "run"
+    assert (lines[-1]["ev"], lines[-1]["status"]) == ("end", "cancelled")
 
 
 def test_qml_training_responds_to_sigint_promptly():
