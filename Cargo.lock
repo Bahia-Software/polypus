@@ -887,7 +887,9 @@ name = "polypus-orchestration"
 version = "0.8.0"
 dependencies = [
  "log",
+ "polypus-backend-conformance",
  "polypus-infrastructure",
+ "polypus-observable",
  "polypus-optimizers",
  "serde",
  "serde_json",

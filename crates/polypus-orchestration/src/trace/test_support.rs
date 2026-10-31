@@ -1,11 +1,15 @@
-//! Sinks, a header, run parameters and a tracer shared by the call trace's
-//! unit tests.
+//! Sinks, a header, run parameters, a tracer, a backend and a reducer shared
+//! by the call trace's unit tests.
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use polypus_infrastructure::{OptLevel, RunParams};
+use polypus_infrastructure::{
+    BackendCapabilities, BackendError, BoundCircuit, Counts, OptLevel, QuantumBackend, RunParams,
+};
+use polypus_observable::{CostObservable, ObservableError};
 use serde_json::Value;
 
 use super::{CallTracer, TraceFlow, TraceHeader, DEFAULT_MAX_BYTES};
@@ -193,4 +197,69 @@ pub(crate) fn scratch_dir(tag: &str) -> PathBuf {
     }
     std::fs::create_dir(&dir).expect("create the scratch directory");
     dir
+}
+
+/// A backend with deterministic counts: for each circuit, `"1"` gets
+/// `h % (shots + 1)` of the shots and `"0"` the rest, where `h` is the FNV-1a
+/// hash of the circuit's `Debug` text xor the run's seed (0 without one). It
+/// runs at most `max_concurrency` circuits a wave and distributes shots
+/// through the trait's default `run_shots_distributed`.
+pub(crate) struct HashBackend {
+    pub(crate) max_concurrency: usize,
+}
+
+impl QuantumBackend for HashBackend {
+    fn run_circuits(
+        &self,
+        qcs: &[BoundCircuit],
+        params: &RunParams,
+    ) -> Result<Vec<Counts>, BackendError> {
+        let shots = u64::from(params.shots);
+        let seed = params.seed.unwrap_or(0);
+        Ok(qcs
+            .iter()
+            .map(|qc| {
+                let ones = (fnv1a(format!("{qc:?}").as_bytes()) ^ seed) % (shots + 1);
+                Counts::from([("0".to_owned(), shots - ones), ("1".to_owned(), ones)])
+            })
+            .collect())
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            max_concurrency: self.max_concurrency,
+            supports_shot_distribution: true,
+        }
+    }
+}
+
+/// The 64-bit FNV-1a hash of `bytes`.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// A reducer whose value for each counts map is the share of its shots that
+/// measured `"1"`, and 0 for a map without shots.
+pub(crate) struct KeyOneShare;
+
+impl CostObservable for KeyOneShare {
+    fn expectation_batch(
+        &self,
+        counts: &[HashMap<String, u64>],
+    ) -> Result<Vec<f64>, ObservableError> {
+        Ok(counts
+            .iter()
+            .map(|map| {
+                let total: u64 = map.values().sum();
+                let ones = map.get("1").copied().unwrap_or(0);
+                if total == 0 {
+                    0.0
+                } else {
+                    ones as f64 / total as f64
+                }
+            })
+            .collect())
+    }
 }

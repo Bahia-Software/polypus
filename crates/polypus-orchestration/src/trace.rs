@@ -23,6 +23,10 @@
 //!   A tracer dropped before [`CallTracer::finish`] closes its trace as
 //!   `aborted`.
 //!
+//! [`TracingPlanner`] and [`TracingBackend`] record the `batch` and `wave`
+//! events: each wraps a planner or a backend, forwards every method of its
+//! trait unchanged, and records the calls that run circuits.
+//!
 //! # Example
 //!
 //! ```
@@ -57,6 +61,7 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -245,6 +250,8 @@ pub struct CallTracer {
     t0: Instant,
     /// The size cap: an event that would take the trace past it is not written.
     max_bytes: u64,
+    /// The index the next planner batch gets.
+    next_batch: AtomicU64,
     /// The sink, the counts and the reused line buffer.
     state: Mutex<State>,
 }
@@ -328,6 +335,12 @@ impl CallTracer {
         u64::try_from(self.t0.elapsed().as_nanos()).unwrap_or(u64::MAX)
     }
 
+    /// The index of a new planner batch, its `k`: 0 for the run's first batch,
+    /// then 1, 2 and so on.
+    pub(crate) fn begin_batch(&self) -> u64 {
+        self.next_batch.fetch_add(1, Ordering::Relaxed)
+    }
+
     /// A tracer over `sink` with its header line written and flushed. If that
     /// fails the sink is dropped unwritten, so the tracer records nothing and
     /// closes nothing, and the error comes back with it.
@@ -361,6 +374,7 @@ impl CallTracer {
             id: header.id,
             t0,
             max_bytes,
+            next_batch: AtomicU64::new(0),
             state: Mutex::new(state),
         };
         (tracer, started)
@@ -614,6 +628,10 @@ fn unix_time_ns() -> u64 {
             u64::try_from(since.as_nanos()).unwrap_or(u64::MAX)
         })
 }
+
+mod decorators;
+
+pub use decorators::{TracingBackend, TracingPlanner};
 
 #[cfg(test)]
 impl CallTracer {

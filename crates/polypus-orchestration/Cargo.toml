@@ -19,3 +19,9 @@ log = { workspace = true }
 # The call trace (contract C-12) writes JSON Lines.
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The traced planner forwards `Planner::evaluate`, whose reducer is a `CostObservable`.
+polypus-observable = { workspace = true }
+
+[dev-dependencies]
+# The conformance battery runs against a backend wrapped in the call trace (C-12).
+polypus-backend-conformance = { workspace = true }
