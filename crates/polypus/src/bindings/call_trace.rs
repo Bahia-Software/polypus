@@ -1,5 +1,5 @@
-//! The `trace` argument of `train` (contract C-12): the edge's side of a run's
-//! call trace.
+//! The `trace` argument of `train` and `run_quantum_circuit` (contract C-12):
+//! the edge's side of a run's call trace.
 //!
 //! The trace itself — its schema, how its file is created, written, capped and
 //! closed — is [`polypus_orchestration::trace`], which needs no Python. This
@@ -77,7 +77,7 @@ pub(crate) fn close<T>(py: Python<'_>, tracer: Option<&Arc<CallTracer>>, out: &P
 
 /// Closes the run's trace, if it has one, as [`close`] does for a run that
 /// failed with `err`, and hands `err` back unchanged: the `map_err` of a step
-/// that fails after [`open`] and before the run, such as creating the backend.
+/// that fails after [`open`], such as creating the backend.
 pub(crate) fn close_on_error(
     py: Python<'_>,
     tracer: Option<&Arc<CallTracer>>,

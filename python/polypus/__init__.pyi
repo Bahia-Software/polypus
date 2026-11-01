@@ -602,6 +602,8 @@ def run_quantum_circuit(
     fusion: Optional[bool] = None,
     options: Optional[_Options] = None,
     walltime: Optional[str] = None,
+    *,
+    trace: Optional[Union[str, PathLike[str]]] = None,
 ) -> RunResult: ...
 def statevector(
     qc: Circuit, params: Optional[_FloatVector] = None, fusion: bool = True

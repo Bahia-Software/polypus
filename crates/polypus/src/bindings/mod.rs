@@ -1529,7 +1529,21 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// been received, so a hostile endpoint can make the process allocate as much
 /// memory as it announces. Off CESGA's private network, use a tunnel (see "QMIO
 /// transport threat model" in `docs/backends.md`).
-#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None))]
+///
+/// `trace` (keyword-only, default `None`) writes the run's call trace
+/// (contract C-12) to a new JSON Lines file: a header line, one `batch` line
+/// (`execute_replicas`) and one `wave` line per backend call, with their sizes
+/// and times (each replica's shots too when `n_qpus > 1`) and nothing else (no
+/// circuits or counts), and last an `end` line with how the run ended
+/// (`"ok"`, `"error"` or `"cancelled"`). It is a path, a `str` or an
+/// `os.PathLike[str]`, to a file that does not exist yet, in a directory that
+/// does. If something is already there, a file or a symbolic link, or the
+/// directory does not exist, nothing is created or changed and the run goes on
+/// without a trace, after one warning in the Polypus log (shown only once a
+/// logger is installed with `polypus.init_logger`). A `bytes` path, or a value
+/// that is not a path, raises `TypeError` before anything runs. The trace never
+/// changes the result or the error.
+#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, *, trace=None))]
 pub fn run_quantum_circuit<'py>(
     qc: Bound<'py, PyAny>,
     shots: u32,
@@ -1544,6 +1558,7 @@ pub fn run_quantum_circuit<'py>(
     fusion: Option<bool>,
     options: Option<OptionsArg>,
     walltime: Option<String>,
+    trace: Option<PathBuf>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     // Entry-point trace carrying the full circuit `Debug` repr on every call:
@@ -1624,6 +1639,28 @@ pub fn run_quantum_circuit<'py>(
         "run {id} starting: infrastructure={infrastructure}, backend={backend}, \
          n_qpus={n_qpus}, shots={shots}, seed={effective_seed:?}"
     );
+    // The call trace (contract C-12), if `trace` names a path, as in `train`.
+    // It starts before the backend exists, so its clock counts the backend's
+    // start-up too (on CUNQA, raising the QPUs), and every way out from here
+    // closes it with the status Python sees. Creating it writes the header
+    // line to the file, so the GIL is released; a path that cannot be created
+    // leaves the run untraced.
+    let py = qc.py();
+    let header = TraceHeader {
+        flow: TraceFlow::RunCircuit,
+        id: id.clone(),
+        polypus: python_version(env!("CARGO_PKG_VERSION")),
+        method: None,
+        dims: None,
+        backend: backend.to_owned(),
+        infrastructure: infrastructure.clone(),
+        n_qpus,
+        shots,
+        seed: effective_seed,
+    };
+    let tracer = py.detach(|| call_trace::open(trace, header));
+    // The flow's handle on the trace, moved into the run below.
+    let flow_trace = tracer.clone();
 
     // Release the GIL for the whole run, mirroring `train`: circuit execution is
     // GIL-free on the native backend (and internally reacquires the GIL where
@@ -1653,14 +1690,18 @@ pub fn run_quantum_circuit<'py>(
                 RunCircuitFlow {
                     circuits: vec![bound_qc],
                     shots,
-                    trace: None,
+                    trace: flow_trace,
                 },
                 &interruptible_token(),
             );
             scheduler.close();
             out
         });
-    let counts_vec = counts_result.map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
+    // A failed run, creating its backend included, closes the trace with the
+    // status of the error Python gets.
+    let counts_vec = counts_result
+        .map_err(crate::exceptions::infrastructure_error_to_pyerr)
+        .map_err(|err| call_trace::close_on_error(py, tracer.as_ref(), err))?;
     // Completion counterpart of the start record above. There is no
     // iterations/convergence notion on this path (those are `TrainResult`
     // fields), so this reports only the run and how long it took.
@@ -1669,7 +1710,7 @@ pub fn run_quantum_circuit<'py>(
     // `counts` is a `list[dict]` with one map per replica, and `merged_counts` is
     // their key-by-key sum as a single `dict`. Keys are sorted in both.
     let merged = merge_counts(&counts_vec);
-    Python::attach(|py| {
+    let out = Python::attach(|py| {
         let counts = counts_to_pylist(py, &counts_vec)?.into_any().unbind();
         let merged_counts = counts_to_pydict(py, &merged)?.into_any().unbind();
         Py::new(
@@ -1684,7 +1725,11 @@ pub fn run_quantum_circuit<'py>(
             },
         )
         .map(|result| result.into_any())
-    })
+    });
+    // The outcome returned to Python, the result or a failure to build it,
+    // closes the trace.
+    call_trace::close(py, tracer.as_ref(), &out);
+    out
 }
 
 /// Unified entry point: train a variational quantum circuit with a chosen optimizer.
@@ -2812,6 +2857,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("native run_quantum_circuit succeeds");
         let bound = result.bind(py);
@@ -2882,6 +2928,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("native run succeeds");
             let bound = result.bind(py);
@@ -2930,6 +2977,7 @@ mod tests {
                     None,
                     "polypus",
                     Some(7),
+                    None,
                     None,
                     None,
                     None,
@@ -3009,6 +3057,7 @@ mod tests {
                 None,
                 "aer",
                 Some(3),
+                None,
                 None,
                 None,
                 None,
