@@ -1542,7 +1542,12 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// without a trace, after one warning in the Polypus log (shown only once a
 /// logger is installed with `polypus.init_logger`). A `bytes` path, or a value
 /// that is not a path, raises `TypeError` before anything runs. The trace never
-/// changes the result or the error.
+/// changes the result or the error. Without `trace`,
+/// `POLYPUS_CALL_TRACE=<directory>` writes one trace per run there, named
+/// `run-<pid>-<n>.jsonl` (`<id>-<pid>-<n>.jsonl` for `train`) after the
+/// process id and the number of traces the variable named before in the
+/// process; the directory must exist. `POLYPUS_CALL_TRACE_MAX_MB` caps a
+/// trace, in whole MiB (512 MiB by default).
 #[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, *, trace=None))]
 pub fn run_quantum_circuit<'py>(
     qc: Bound<'py, PyAny>,
@@ -1639,12 +1644,14 @@ pub fn run_quantum_circuit<'py>(
         "run {id} starting: infrastructure={infrastructure}, backend={backend}, \
          n_qpus={n_qpus}, shots={shots}, seed={effective_seed:?}"
     );
-    // The call trace (contract C-12), if `trace` names a path, as in `train`.
-    // It starts before the backend exists, so its clock counts the backend's
-    // start-up too (on CUNQA, raising the QPUs), and every way out from here
-    // closes it with the status Python sees. Creating it writes the header
-    // line to the file, so the GIL is released; a path that cannot be created
-    // leaves the run untraced.
+    // The call trace (contract C-12), if `trace` names a path or
+    // `POLYPUS_CALL_TRACE` a directory (where the file is
+    // `run-<pid>-<n>.jsonl`), as in `train`. It starts before the backend
+    // exists, so its clock counts the backend's start-up too (on CUNQA,
+    // raising the QPUs), and every way out from here closes it with the
+    // status Python sees. Creating it writes the header line to the file, so
+    // the GIL is released; a path that cannot be created leaves the run
+    // untraced.
     let py = qc.py();
     let header = TraceHeader {
         flow: TraceFlow::RunCircuit,
@@ -1658,7 +1665,7 @@ pub fn run_quantum_circuit<'py>(
         shots,
         seed: effective_seed,
     };
-    let tracer = py.detach(|| call_trace::open(trace, header));
+    let tracer = py.detach(|| call_trace::open(trace, None, header));
     // The flow's handle on the trace, moved into the run below.
     let flow_trace = tracer.clone();
 
@@ -1821,7 +1828,12 @@ pub fn run_quantum_circuit<'py>(
 /// one warning in the Polypus log (shown only once a logger is installed with
 /// `polypus.init_logger`). A `bytes` path, or a value that is not a path,
 /// raises `TypeError` before anything runs. The trace never changes the
-/// result or the error.
+/// result or the error. Without `trace`, `POLYPUS_CALL_TRACE=<directory>`
+/// writes one trace per run there, named `<id>-<pid>-<n>.jsonl` after the
+/// run's id (`TrainResult.id`, cut to its first 100 characters and a hash if
+/// longer), the process id and the number of traces the variable named before
+/// in the process; the directory must exist. `POLYPUS_CALL_TRACE_MAX_MB`
+/// caps a trace, in whole MiB (512 MiB by default).
 ///
 /// Interruption: pressing Ctrl+C (or otherwise sending `SIGINT`) stops the
 /// optimization promptly and raises `KeyboardInterrupt` in Python, instead of
@@ -1988,12 +2000,13 @@ pub fn train<'py>(
         shots,
         effective_seed,
     );
-    // The call trace (contract C-12), if `trace` names a path. It starts before
-    // the backend exists, so its clock counts the backend's start-up too (on
-    // CUNQA, raising the QPUs), and every way out from here closes it with the
-    // status Python sees. Creating it writes the header line to the file, so
-    // the GIL is released; a path that cannot be created leaves the run
-    // untraced.
+    // The call trace (contract C-12), if `trace` names a path or
+    // `POLYPUS_CALL_TRACE` a directory (where the file is named after the
+    // effective id). It starts before the backend exists, so its clock counts
+    // the backend's start-up too (on CUNQA, raising the QPUs), and every way
+    // out from here closes it with the status Python sees. Creating it writes
+    // the header line to the file, so the GIL is released; a path that cannot
+    // be created leaves the run untraced.
     let py = method.py();
     let header = TraceHeader {
         flow: TraceFlow::Train,
@@ -2007,7 +2020,7 @@ pub fn train<'py>(
         shots,
         seed: Some(effective_seed),
     };
-    let tracer = py.detach(|| call_trace::open(trace, header));
+    let tracer = py.detach(|| call_trace::open(trace, Some(&effective_id), header));
     let backend = Infrastructure::create_backend(&config)
         .map_err(crate::exceptions::backend_error_to_pyerr)
         .map_err(|err| call_trace::close_on_error(py, tracer.as_ref(), err))?;
