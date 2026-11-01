@@ -2646,16 +2646,20 @@ check with `check_trace` (`tests/python/call_trace.py`).
   run from there closes it (h).
 - **(e) File names from the variable.** Unset or empty, `POLYPUS_CALL_TRACE` is
   off. Otherwise, for a run whose `trace` is `None`, it names the directory
-  where the run writes its trace, in a file of its own: `<id>-<pid>-<n>.jsonl`
-  for `train`, `<id>` being the run's effective id, and `run-<pid>-<n>.jsonl`
-  for `run_quantum_circuit`, where `<pid>` is the process's id and `<n>`
-  counts, from 0, the traces the variable named before in the process. Every
-  character of `<id>` outside `[A-Za-z0-9._-]` becomes `_`, so the name stays
-  inside the directory whatever the id holds, and an id longer than 100
-  characters keeps its first 100, followed by `-` and eight hexadecimal digits
-  of a hash of the whole id (the low 32 bits of the 64-bit FNV-1a of its UTF-8
-  bytes), so two ids that share their first 100 characters still get
-  different names.
+  where the run writes its trace, in a file of its own:
+  `<id>-<pid>-<n>.jsonl`, for `train` and `run_quantum_circuit` alike, where
+  `<id>` is the run's effective id (the `id` of its result and of its
+  header), `<pid>` is the process's id and `<n>` counts, from 0, the traces
+  the variable named before in the process. The effective id ends in a UUID
+  v4, and that is what keeps apart the files of different runs: `<pid>` and
+  `<n>` repeat among the processes that share a directory (in two
+  containers, on two hosts, or once the system hands a pid on), and anyone
+  who can list the processes knows them. Every character of `<id>` outside
+  `[A-Za-z0-9._-]` becomes `_`, so the name stays inside the directory
+  whatever the id holds, and an id longer than 100 characters keeps its first
+  100, followed by `-` and eight hexadecimal digits of a hash of the whole id
+  (the low 32 bits of the 64-bit FNV-1a of its UTF-8 bytes), so two ids that
+  share their first 100 characters still get different names.
 - **(f) Size cap.** `POLYPUS_CALL_TRACE_MAX_MB` caps every trace, in MiB (2^20
   bytes): a whole number, at least 1, in ASCII digits alone, without a sign,
   spaces or a unit, whose size in bytes fits in 64 bits (so below 2^44 MiB);
@@ -2853,6 +2857,8 @@ which validates every whole line against it.
     `test_an_existing_path_or_symlink_is_left_alone_with_one_warning` and
     `test_trace_file_mode_is_0640` (d);
     `test_env_mode_writes_one_file_per_run`,
+    `test_a_file_named_after_the_pid_alone_does_not_stop_the_trace`,
+    `test_runs_with_the_same_pid_and_count_get_different_names`,
     `test_the_trace_argument_wins_over_the_variable`,
     `test_env_mode_creates_no_directory`, `test_an_empty_variable_is_off` and
     `test_trace_id_is_sanitized` (d, e);

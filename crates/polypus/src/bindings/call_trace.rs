@@ -12,7 +12,8 @@
 //!
 //! A run is traced when its `trace` argument names a path or, without one,
 //! when [`CALL_TRACE_ENV`] names a directory: each run then writes its trace
-//! there, in a file of its own named by [`trace_file_name`].
+//! there, in a file of its own named by [`trace_file_name`] after the run's
+//! effective id.
 //! [`CALL_TRACE_MAX_MB_ENV`] caps the size of every trace ([`parse_max_mb`]).
 //!
 //! The trace is never in the run's way: a path that cannot be created leaves
@@ -48,10 +49,15 @@ static NEXT_ENV_TRACE: AtomicU64 = AtomicU64::new(0);
 ///
 /// The path is `explicit`, the run's `trace` argument, if it names one.
 /// Otherwise, if [`CALL_TRACE_ENV`] is set and not empty, it names the
-/// directory and the file is [`trace_file_name`]`(file_id, pid, n)` in it,
-/// with `pid` this process's id and `n` the number of traces the variable
-/// named before in the process, counted from 0. Otherwise there is no trace,
-/// and nothing is logged.
+/// directory and the file is [`trace_file_name`]`(header.id, pid, n)` in it,
+/// with `header.id` the run's effective id, `pid` this process's id and `n`
+/// the number of traces the variable named before in the process, counted
+/// from 0. Otherwise there is no trace, and nothing is logged.
+///
+/// The id is what makes the name the run's own: it ends in a UUID v4, while
+/// `pid` and `n` repeat among the processes that share a directory (in two
+/// containers, on two hosts, or once the system hands a pid on), and anyone
+/// who can list the processes knows them.
 ///
 /// The trace file is created with `header` as its first line, capped at the
 /// size [`CALL_TRACE_MAX_MB_ENV`] sets ([`DEFAULT_MAX_BYTES`] if it is unset
@@ -63,17 +69,13 @@ static NEXT_ENV_TRACE: AtomicU64 = AtomicU64::new(0);
 /// path and the error.
 ///
 /// It writes to the file: call it with the GIL released.
-pub(crate) fn open(
-    explicit: Option<PathBuf>,
-    file_id: Option<&str>,
-    header: TraceHeader,
-) -> Option<Arc<CallTracer>> {
+pub(crate) fn open(explicit: Option<PathBuf>, header: TraceHeader) -> Option<Arc<CallTracer>> {
     let path = match explicit {
         Some(path) => path,
         None => {
             let dir = env::var_os(CALL_TRACE_ENV).filter(|dir| !dir.is_empty())?;
             let n = NEXT_ENV_TRACE.fetch_add(1, Ordering::Relaxed);
-            PathBuf::from(dir).join(trace_file_name(file_id, std::process::id(), n))
+            PathBuf::from(dir).join(trace_file_name(Some(&header.id), std::process::id(), n))
         }
     };
     let id = header.id.clone();

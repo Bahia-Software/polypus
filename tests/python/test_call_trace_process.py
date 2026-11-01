@@ -10,9 +10,11 @@ without a trace; a new trace file gets mode ``0640``; and a run killed with
 ``end`` line.
 
 Without ``trace=``, ``POLYPUS_CALL_TRACE`` names a directory that gets one
-trace per run, ``<id>-<pid>-<n>.jsonl`` (``run-<pid>-<n>.jsonl`` for
-``run_quantum_circuit``), with the id cut to a safe file name; an empty
-variable is off, and a directory that does not exist is never created.
+trace per run, ``<id>-<pid>-<n>.jsonl`` after the run's effective id, for
+``train`` and ``run_quantum_circuit`` alike, with the id cut to a safe file
+name, so the traces of processes that share the directory and a pid stay
+apart; an empty variable is off, and a directory that does not exist is never
+created.
 ``POLYPUS_CALL_TRACE_MAX_MB`` caps every trace, and an invalid value is
 warned about once and ignored.
 """
@@ -162,24 +164,86 @@ def test_env_mode_writes_one_file_per_run(tmp_path):
             """
         first = train(method("spsa"), id="envrun")
         second = train(method("spsa"), id="envrun")
-        polypus.run_quantum_circuit(polypus.Circuit(1).h(0).measure_all(), 10, "local", backend="polypus", seed=1)
-        print(json.dumps({"pid": os.getpid(), "ids": [first.id, second.id]}))
+        third = polypus.run_quantum_circuit(polypus.Circuit(1).h(0).measure_all(), 10, "local", backend="polypus", seed=1)
+        print(json.dumps({"pid": os.getpid(), "ids": [first.id, second.id, third.id]}))
         """,
             tmp_path,
             POLYPUS_CALL_TRACE=str(traces),
         )
     )
     info = json.loads(out.stdout.splitlines()[-1])
-    pid, (first, second) = info["pid"], info["ids"]
-    expected = {
-        f"{first}-{pid}-0.jsonl",
-        f"{second}-{pid}-1.jsonl",
-        f"run-{pid}-2.jsonl",
-    }
-    assert {path.name for path in traces.iterdir()} == expected
-    for path in traces.iterdir():
-        check_trace(read_trace(path))
-    assert read_trace(traces / f"{first}-{pid}-0.jsonl").header["id"] == first
+    pid, ids = info["pid"], info["ids"]
+    # Each file is named after its run's effective id, the one in its header:
+    # `run_quantum_circuit`'s (`run_1_local_<uuid>`) as `train`'s.
+    expected = {f"{run_id}-{pid}-{n}.jsonl": run_id for n, run_id in enumerate(ids)}
+    assert {path.name for path in traces.iterdir()} == set(expected)
+    for name, run_id in expected.items():
+        trace = read_trace(traces / name)
+        check_trace(trace)
+        assert trace.header["id"] == run_id, name
+
+
+def test_a_file_named_after_the_pid_alone_does_not_stop_the_trace(tmp_path):
+    # Processes that write to one directory can share a pid: in two
+    # containers, on two hosts, or once the system hands a finished process's
+    # pid on. A file that one of them left, or that another user put there, at
+    # a name made of nothing but this pid and a count (`run-<pid>-<n>.jsonl`)
+    # leaves the run's own trace alone, since its name holds the run's id.
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    out = _ok(
+        _child(
+            """
+        planted = os.path.join(os.environ["POLYPUS_CALL_TRACE"], f"run-{os.getpid()}-0.jsonl")
+        with open(planted, "x", encoding="utf-8") as file:
+            file.write("planted\\n")
+        result = polypus.run_quantum_circuit(polypus.Circuit(1).h(0).measure_all(), 8, "local", backend="polypus", seed=1)
+        print(json.dumps({"pid": os.getpid(), "id": result.id}))
+        """,
+            tmp_path,
+            POLYPUS_CALL_TRACE=str(traces),
+        )
+    )
+    assert "call trace off" not in out.stdout + out.stderr
+    info = json.loads(out.stdout.splitlines()[-1])
+    pid, run_id = info["pid"], info["id"]
+    planted, own = f"run-{pid}-0.jsonl", f"{run_id}-{pid}-0.jsonl"
+    assert {path.name for path in traces.iterdir()} == {planted, own}
+    assert (traces / planted).read_bytes() == b"planted\n"
+    trace = read_trace(traces / own)
+    check_trace(trace)
+    assert trace.header["id"] == run_id
+
+
+def test_runs_with_the_same_pid_and_count_get_different_names(tmp_path):
+    # Two processes that write to one directory, in two containers or on two
+    # hosts, can have the same pid, and each counts its traces from 0. Here
+    # two processes each run the same circuit with the same seed: with the pid
+    # taken out, their names still differ, as each holds its run's effective
+    # id.
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    runs = []
+    for _ in range(2):
+        before = set(traces.iterdir())
+        out = _ok(
+            _child(
+                """
+            result = polypus.run_quantum_circuit(polypus.Circuit(1).h(0).measure_all(), 8, "local", backend="polypus", seed=1)
+            print(json.dumps({"pid": os.getpid(), "id": result.id}))
+            """,
+                tmp_path,
+                POLYPUS_CALL_TRACE=str(traces),
+            )
+        )
+        info = json.loads(out.stdout.splitlines()[-1])
+        [path] = set(traces.iterdir()) - before
+        suffix = f"-{info['pid']}-0.jsonl"
+        assert path.name.endswith(suffix), path.name
+        runs.append((path.name.removesuffix(suffix), info["id"]))
+    (first, first_id), (second, second_id) = runs
+    assert first != second, f"both names are {first}-<pid>-0.jsonl"
+    assert (first, second) == (first_id, second_id)
 
 
 def test_the_trace_argument_wins_over_the_variable(tmp_path):
