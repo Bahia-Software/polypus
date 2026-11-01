@@ -663,7 +663,7 @@ mod tests {
     use std::io::ErrorKind;
     use std::time::Instant;
 
-    use serde_json::{json, Value};
+    use serde_json::Value;
 
     use super::test_support::{
         header, scratch_dir, sink_tracer, FailingSink, FlakySink, SharedSink,
@@ -759,11 +759,14 @@ mod tests {
                 r#"{"ev":"metric","n":2,"t":22,"dt":1}"#,
             ]
         );
+        // The `end` line as text too, so the order of its fields is pinned.
         let end: Value = serde_json::from_str(&lines[7]).unwrap();
+        let t = end["t"].as_u64().unwrap();
         assert_eq!(
-            end,
-            json!({"ev": "end", "status": "ok", "batches": 1, "waves": 2,
-                               "circuits": 30, "truncated": false, "t": end["t"]})
+            lines[7],
+            format!(
+                r#"{{"ev":"end","status":"ok","batches":1,"waves":2,"circuits":30,"truncated":false,"t":{t}}}"#
+            )
         );
         assert_eq!(
             serde_json::to_string(&TraceFlow::RunCircuit).unwrap(),

@@ -2,18 +2,21 @@
 Helpers for the call trace tests (contract C-12).
 
 Small seeded training runs of every optimizer on the native backend, a
-tolerant reader of a trace file and a structural check of what a closed
-trace holds.
+tolerant reader of a trace file, a structural check of what a closed trace
+holds and a check of each line against the trace's JSON Schema.
 
 ``read_trace`` reads a trace as a killed or crashed run can leave it: only
-the lines a newline ends, up to the first that is not a JSON object.
-``check_trace`` asserts what every closed trace of schema v1 satisfies: the
-``run`` header first and one ``end`` line last, exactly the fields of its
-``ev`` on every line, ``end`` counts that match the lines, ``iter`` lines that
-count the batches before them, and times that never run past ``end``.
+the lines a newline ends, up to the first that is not JSON, and it checks
+each with ``validate`` against the JSON Schema of version 1, which
+``load_schema`` reads from ``docs/CONTRACTS.md``. ``check_trace`` asserts what
+every closed trace of schema v1 satisfies: the ``run`` header first and one
+``end`` line last, exactly the fields of its ``ev`` on every line, ``end``
+counts that match the lines, ``iter`` lines that count the batches before
+them, and times that never run past ``end``.
 """
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -189,21 +192,162 @@ class Trace:
         return [line for line in self.lines if line.get("ev") == ev]
 
 
-def read_trace(path):
+# The document that holds the trace's JSON Schema, in the section of C-12, and
+# the schema's `$id` there.
+_CONTRACTS = Path(__file__).resolve().parents[2] / "docs" / "CONTRACTS.md"
+_SCHEMA_ID = "polypus-call-trace-v1"
+
+# The keywords `validate` checks. A schema with any other is refused rather
+# than checked in part.
+_KEYWORDS = frozenset(
+    {
+        "type",
+        "const",
+        "enum",
+        "required",
+        "properties",
+        "additionalProperties",
+        "items",
+        "minimum",
+    }
+)
+
+# The Python type `json.loads` gives each JSON type, but for "integer" and
+# "number" (see `_is_a`).
+_TYPES = {
+    "object": dict,
+    "array": list,
+    "string": str,
+    "boolean": bool,
+    "null": type(None),
+}
+
+
+def load_schema():
+    """The JSON Schema of the trace, version 1: the first ```json block of
+    ``docs/CONTRACTS.md`` that contains ``"$id": "polypus-call-trace-v1"``."""
+    marker = f'"$id": "{_SCHEMA_ID}"'
+    for block in _CONTRACTS.read_text(encoding="utf-8").split("```json\n")[1:]:
+        code = block.split("```", 1)[0]
+        if marker in code:
+            return json.loads(code)
+    raise AssertionError(f"no json block of {_CONTRACTS.name} contains {marker}")
+
+
+def validate(line, schema):
+    """Raise ``ValueError``, naming the offending key, unless ``line`` is a
+    valid line of ``schema``, the trace's JSON Schema (``load_schema()``).
+
+    The line is checked against the definition of its ``ev`` in the schema's
+    ``$defs``, with the keywords the schema uses: ``type`` (a name or a list
+    of names; an ``integer`` is an ``int`` that is not a ``bool``, and a
+    ``number`` such an ``int`` or a finite ``float``, as JSON has no NaN or
+    infinity), ``const`` and ``enum`` (where ``True`` is not ``1``),
+    ``required``, ``properties``, ``additionalProperties: false``, ``items``
+    and ``minimum``. A schema with any other keyword raises
+    ``NotImplementedError``."""
+    if not isinstance(line, dict):
+        raise ValueError(f"a line is a JSON object, not {line!r}")
+    if "ev" not in line:
+        raise ValueError(f"'ev' is missing from {line!r}")
+    definitions = schema["$defs"]
+    ev = line["ev"]
+    if not isinstance(ev, str) or ev not in definitions:
+        raise ValueError(f"'ev' is {ev!r}, not one of {sorted(definitions)}")
+    _check(line, definitions[ev], f"{ev} line")
+
+
+# `read_trace`'s `validate` flag hides the function of that name inside it.
+_validate_line = validate
+
+
+def _check(value, schema, name):
+    """Raise ``ValueError`` if ``value``, called ``name`` in the message,
+    breaks ``schema``."""
+    unknown = set(schema) - _KEYWORDS
+    if unknown:
+        raise NotImplementedError(f"{name}: schema keywords {sorted(unknown)}")
+    if "type" in schema:
+        kinds = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
+        if not any(_is_a(value, kind) for kind in kinds):
+            raise ValueError(f"{name} is {value!r}, not of type {schema['type']}")
+    if "const" in schema and not _equal(value, schema["const"]):
+        raise ValueError(f"{name} is {value!r}, not {schema['const']!r}")
+    if "enum" in schema and not any(_equal(value, item) for item in schema["enum"]):
+        raise ValueError(f"{name} is {value!r}, not one of {schema['enum']}")
+    if "minimum" in schema and _is_a(value, "number") and value < schema["minimum"]:
+        raise ValueError(f"{name} is {value!r}, below the minimum {schema['minimum']}")
+    if "items" in schema and isinstance(value, list):
+        for index, item in enumerate(value):
+            _check(item, schema["items"], f"{name}[{index}]")
+    if isinstance(value, dict):
+        _check_fields(value, schema, name)
+
+
+def _check_fields(value, schema, name):
+    """The object keywords of ``_check``: ``additionalProperties``,
+    ``required`` and ``properties``."""
+    properties = schema.get("properties", {})
+    if "additionalProperties" in schema:
+        if schema["additionalProperties"] is not False:
+            raise NotImplementedError(f"{name}: additionalProperties other than false")
+        for key in value:
+            if key not in properties:
+                raise ValueError(f"{name}: {key!r} is not one of its fields")
+    for key in schema.get("required", ()):
+        if key not in value:
+            raise ValueError(f"{name}: {key!r} is missing")
+    for key, item in value.items():
+        if key in properties:
+            _check(item, properties[key], f"{name}: {key!r}")
+
+
+def _is_a(value, kind):
+    """Whether ``value``, as ``json.loads`` reads it, has the JSON type
+    ``kind``."""
+    if kind == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if kind == "number":
+        if isinstance(value, float):
+            return math.isfinite(value)
+        return isinstance(value, int) and not isinstance(value, bool)
+    if kind not in _TYPES:
+        raise NotImplementedError(f"the JSON type {kind!r}")
+    return isinstance(value, _TYPES[kind])
+
+
+def _equal(value, expected):
+    """JSON equality, which, unlike Python's ``==``, does not take ``True``
+    for ``1``."""
+    return value == expected and isinstance(value, bool) == isinstance(expected, bool)
+
+
+def read_trace(path, *, validate=True):
     """The trace at ``path``, as far as it can be read.
 
-    Only the lines a newline ends are read, and none after the first that is
-    not a JSON object, so a trace cut in the middle of a line reads up to its
-    last whole line, without an exception. ``complete`` is whether every byte
-    was read and the last line is ``end``."""
+    Only the lines a newline ends are read, and none from the first that is
+    not JSON (or not UTF-8) on, so a trace cut in the middle of a line reads
+    up to its last whole line, without an exception. With ``validate``, every
+    whole line that is JSON is checked against the trace's JSON Schema
+    (``validate``, with ``load_schema()``), and the first that breaks it, one
+    that is not a JSON object included, raises ``ValueError`` with its
+    number. Without ``validate``, the read also stops, without an exception,
+    at the first line that is JSON but not an object. ``complete`` is whether
+    every byte was read and the last line is ``end``."""
+    schema = load_schema() if validate else None
     *whole, tail = Path(path).read_bytes().split(b"\n")
     lines = []
     for raw in whole:
         try:
             line = json.loads(raw)
-        except ValueError:
+        except ValueError:  # not JSON, or not UTF-8 (UnicodeDecodeError)
             break
-        if not isinstance(line, dict):
+        if schema is not None:
+            try:
+                _validate_line(line, schema)
+            except ValueError as err:
+                raise ValueError(f"{path}, line {len(lines) + 1}: {err}") from err
+        elif not isinstance(line, dict):
             break
         lines.append(line)
     complete = (

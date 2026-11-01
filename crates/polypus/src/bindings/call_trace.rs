@@ -328,6 +328,8 @@ mod tests {
     fn max_mb_parses_whole_mebibytes() {
         assert_eq!(parse_max_mb("1"), Some(1 << 20));
         assert_eq!(parse_max_mb("512"), Some(512 << 20));
+        // The largest cap whose size in bytes fits in 64 bits: 2^44 - 1 MiB.
+        assert_eq!(parse_max_mb("17592186044415"), Some(((1 << 44) - 1) << 20));
         for bad in [
             "",
             "0",
@@ -336,6 +338,7 @@ mod tests {
             "abc",
             " 1",
             "1MB",
+            "17592186044416",
             "18446744073709551615",
         ] {
             assert_eq!(parse_max_mb(bad), None, "{bad:?}");

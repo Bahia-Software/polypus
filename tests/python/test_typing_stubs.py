@@ -209,3 +209,16 @@ class TestTraceType:
         for function in ("train", "run_quantum_circuit"):
             message = f'Argument "trace" to "{function}" has incompatible type "int"'
             assert message in report, report
+
+    def test_the_documented_trace_example_type_checks(self, tmp_path):
+        docs = Path(__file__).resolve().parents[2] / "docs" / "guide" / "training.md"
+        example = _python_block(docs.read_text(encoding="utf-8"), 'trace="run1.jsonl"')
+        source = (
+            "import json\n"
+            "from typing import Any\n"
+            "import polypus\n"
+            "qc: Any = None\n"
+            "cost: Any = None\n"
+        ) + example
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report

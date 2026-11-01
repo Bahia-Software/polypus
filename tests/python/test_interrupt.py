@@ -99,7 +99,6 @@ Manual verification (complementary to these automated tests):
     # the same way.
 """
 
-import json
 import os
 import select
 import signal
@@ -108,6 +107,7 @@ import sys
 import time
 
 import pytest
+from call_trace import check_trace, read_trace
 
 pytestmark = pytest.mark.integration
 
@@ -357,9 +357,11 @@ def test_trace_on_interrupt(tmp_path):
             "GIL or the run"
         ),
     )
-    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    assert lines[0]["ev"] == "run"
-    assert (lines[-1]["ev"], lines[-1]["status"]) == ("end", "cancelled")
+    # Read as every trace of the tests is: each line against the schema, then
+    # the whole trace against what a closed trace satisfies.
+    trace = read_trace(path)
+    check_trace(trace)
+    assert trace.end["status"] == "cancelled"
 
 
 def test_qml_training_responds_to_sigint_promptly():

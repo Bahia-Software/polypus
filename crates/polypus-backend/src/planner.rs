@@ -157,6 +157,11 @@ impl PlannerRequirements {
 
 /// Plans *how* a batch of [`CircuitTask`]s runs on a backend. Object-safe
 /// (`&self`, no generics) so it can be held as `Arc<dyn Planner>`.
+///
+/// `TracingPlanner` in `polypus_orchestration::trace` forwards every method of
+/// this trait, so that a traced run makes the same calls as an untraced one: a
+/// method added here must be forwarded there too, with its test, in the same
+/// change (contract C-12(c)).
 pub trait Planner: Send + Sync {
     /// What this planner needs of its backend.
     fn requirements(&self) -> PlannerRequirements;
