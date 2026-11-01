@@ -70,6 +70,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use serde_json::ser::{CompactFormatter, Formatter as _};
 
 /// The default size cap of a trace, 512 MiB: see [`CallTracer::create`].
 pub const DEFAULT_MAX_BYTES: u64 = 512 << 20;
@@ -136,6 +137,18 @@ pub enum BatchOp {
     ExecuteReplicas,
 }
 
+impl BatchOp {
+    /// The method's name as a `batch` line writes it: the serde name, which
+    /// the encoder tests compare it with.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Evaluate => "evaluate",
+            Self::Execute => "execute",
+            Self::ExecuteReplicas => "execute_replicas",
+        }
+    }
+}
+
 /// The backend method a `wave` line records, its `op`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -146,6 +159,17 @@ pub enum WaveOp {
     /// [`QuantumBackend::run_shots_distributed`](polypus_infrastructure::QuantumBackend::run_shots_distributed),
     /// written `"run_shots_distributed"`.
     RunShotsDistributed,
+}
+
+impl WaveOp {
+    /// The method's name as a `wave` line writes it: the serde name, which the
+    /// encoder tests compare it with.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::RunCircuits => "run_circuits",
+            Self::RunShotsDistributed => "run_shots_distributed",
+        }
+    }
 }
 
 /// An event of a run, one line of its trace once
@@ -505,7 +529,7 @@ impl State {
     /// Writes an event's line, or truncates the trace instead if the line
     /// would take it past `max_bytes`.
     fn write_event(&mut self, line: &Line, max_bytes: u64) -> io::Result<()> {
-        self.encode(line)?;
+        self.encode_line(line)?;
         let len = u64::try_from(self.line.len()).unwrap_or(u64::MAX);
         if self.written.saturating_add(len) > max_bytes {
             self.truncated = true;
@@ -528,7 +552,7 @@ impl State {
             truncated: self.truncated,
             t,
         };
-        let closed = self.encode(&end).and_then(|()| self.write_line(true));
+        let closed = self.encode_line(&end).and_then(|()| self.write_line(true));
         self.discard();
         closed
     }
@@ -537,6 +561,15 @@ impl State {
     fn encode<T: Serialize>(&mut self, line: &T) -> io::Result<()> {
         self.line.clear();
         serde_json::to_writer(&mut self.line, line)?;
+        self.line.push(b'\n');
+        Ok(())
+    }
+
+    /// Writes `line` into the reused line buffer, newline included, with
+    /// [`Line::write_json`]: the bytes [`encode`](Self::encode) writes.
+    fn encode_line(&mut self, line: &Line) -> io::Result<()> {
+        self.line.clear();
+        line.write_json(&mut self.line)?;
         self.line.push(b'\n');
         Ok(())
     }
@@ -566,7 +599,8 @@ impl State {
     }
 }
 
-/// A line after the header, as written.
+/// A line after the header, as written by [`Line::write_json`]: the bytes
+/// serde_json writes for it with this derive, which is the reference.
 #[derive(Serialize)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 enum Line {
@@ -611,6 +645,140 @@ enum Line {
         truncated: bool,
         t: u64,
     },
+}
+
+impl Line {
+    /// Appends the line to `out` as JSON: exactly the bytes
+    /// `serde_json::to_writer(out, self)` appends.
+    ///
+    /// The `batch`, `wave`, `iter` and `metric` lines, written on the hot
+    /// path, are encoded by hand rather than through serde's map serializer.
+    /// As serde writes an internally tagged enum, each is `{"ev":"<tag>"`,
+    /// then every field in its declared order as `,"<key>":` and its value,
+    /// then `}`; the keys are fixed bytes, and the numbers and booleans are
+    /// written by serde_json's own [`CompactFormatter`]. A `usize` is written
+    /// as the `u64` serde makes of it, and a `best` that is NaN or infinite
+    /// as `null`, as serde_json writes such a float. The `end` line, written
+    /// once per trace, goes through serde_json. The match has no wildcard arm
+    /// and each event's arm names all its fields, so a new variant or field
+    /// does not compile until it is encoded here or handed to serde_json. The
+    /// tests `event_lines_encode_as_serde_json_does` and
+    /// `event_lines_encode_as_serde_json_does_for_random_values` check that
+    /// both write the same bytes.
+    fn write_json(&self, out: &mut Vec<u8>) -> io::Result<()> {
+        let mut json = CompactFormatter;
+        match self {
+            Self::Batch {
+                k,
+                op,
+                n,
+                shots,
+                t,
+                dt,
+                ok,
+            } => {
+                out.extend_from_slice(br#"{"ev":"batch","k":"#);
+                json.write_u64(out, *k)?;
+                out.extend_from_slice(br#","op":"#);
+                write_name(out, op.name());
+                out.extend_from_slice(br#","n":"#);
+                json.write_u64(out, *n as u64)?;
+                out.extend_from_slice(br#","shots":"#);
+                json.write_u32(out, *shots)?;
+                out.extend_from_slice(br#","t":"#);
+                json.write_u64(out, *t)?;
+                out.extend_from_slice(br#","dt":"#);
+                json.write_u64(out, *dt)?;
+                out.extend_from_slice(br#","ok":"#);
+                json.write_bool(out, *ok)?;
+            }
+            Self::Wave {
+                k,
+                w,
+                op,
+                n,
+                shots,
+                t,
+                dt,
+                ok,
+                replicas,
+            } => {
+                out.extend_from_slice(br#"{"ev":"wave","k":"#);
+                match k {
+                    Some(k) => json.write_u64(out, *k)?,
+                    None => json.write_null(out)?,
+                }
+                out.extend_from_slice(br#","w":"#);
+                json.write_u32(out, *w)?;
+                out.extend_from_slice(br#","op":"#);
+                write_name(out, op.name());
+                out.extend_from_slice(br#","n":"#);
+                json.write_u64(out, *n as u64)?;
+                out.extend_from_slice(br#","shots":"#);
+                json.write_u32(out, *shots)?;
+                out.extend_from_slice(br#","t":"#);
+                json.write_u64(out, *t)?;
+                out.extend_from_slice(br#","dt":"#);
+                json.write_u64(out, *dt)?;
+                out.extend_from_slice(br#","ok":"#);
+                json.write_bool(out, *ok)?;
+                // Left out when `None`, as `skip_serializing_if` does.
+                if let Some(replicas) = replicas {
+                    out.extend_from_slice(br#","replicas":["#);
+                    if let Some((first, rest)) = replicas.split_first() {
+                        json.write_u32(out, *first)?;
+                        for shots in rest {
+                            out.push(b',');
+                            json.write_u32(out, *shots)?;
+                        }
+                    }
+                    out.push(b']');
+                }
+            }
+            Self::Iter {
+                i,
+                evals,
+                batches,
+                best,
+                t,
+            } => {
+                out.extend_from_slice(br#"{"ev":"iter","i":"#);
+                json.write_u64(out, *i as u64)?;
+                out.extend_from_slice(br#","evals":"#);
+                json.write_u64(out, *evals)?;
+                out.extend_from_slice(br#","batches":"#);
+                json.write_u64(out, *batches)?;
+                out.extend_from_slice(br#","best":"#);
+                if best.is_finite() {
+                    json.write_f64(out, *best)?;
+                } else {
+                    json.write_null(out)?;
+                }
+                out.extend_from_slice(br#","t":"#);
+                json.write_u64(out, *t)?;
+            }
+            Self::Metric { n, t, dt } => {
+                out.extend_from_slice(br#"{"ev":"metric","n":"#);
+                json.write_u64(out, *n as u64)?;
+                out.extend_from_slice(br#","t":"#);
+                json.write_u64(out, *t)?;
+                out.extend_from_slice(br#","dt":"#);
+                json.write_u64(out, *dt)?;
+            }
+            // Once per trace: serde_json writes it whole.
+            Self::End { .. } => return serde_json::to_writer(out, self).map_err(io::Error::from),
+        }
+        out.push(b'}');
+        Ok(())
+    }
+}
+
+/// Appends `name`, an op's name, as a JSON string: it holds nothing to
+/// escape, so serde_json writes it between quotes as it is.
+fn write_name(out: &mut Vec<u8>, name: &str) {
+    out.push(b'"');
+    out.extend_from_slice(name.as_bytes());
+    out.push(b'"');
 }
 
 /// The header line: the schema version and event name, the header's fields,
@@ -783,6 +951,224 @@ mod tests {
             statuses,
             [r#""ok""#, r#""error""#, r#""cancelled""#, r#""aborted""#]
         );
+    }
+
+    /// Encodes `line` into `state`'s line buffer and checks that the buffer
+    /// then holds exactly the bytes serde_json writes for it, and a newline.
+    fn assert_encodes_as_serde_json(state: &mut State, line: &Line) {
+        state.encode_line(line).unwrap();
+        let mut serde = serde_json::to_vec(line).unwrap();
+        serde.push(b'\n');
+        assert!(
+            state.line == serde,
+            "encoded\n{}\nserde_json writes\n{}",
+            String::from_utf8_lossy(&state.line),
+            String::from_utf8_lossy(&serde)
+        );
+    }
+
+    #[test]
+    fn event_lines_encode_as_serde_json_does() {
+        // The comparisons below check the encoder's op names against serde's;
+        // these pin serde's names to the ones the trace format documents.
+        assert_eq!(
+            [
+                BatchOp::Evaluate,
+                BatchOp::Execute,
+                BatchOp::ExecuteReplicas
+            ]
+            .map(|op| serde_json::to_string(&op).unwrap()),
+            [r#""evaluate""#, r#""execute""#, r#""execute_replicas""#]
+        );
+        assert_eq!(
+            [WaveOp::RunCircuits, WaveOp::RunShotsDistributed]
+                .map(|op| serde_json::to_string(&op).unwrap()),
+            [r#""run_circuits""#, r#""run_shots_distributed""#]
+        );
+        const U64: [u64; 3] = [0, 1, u64::MAX];
+        const USIZE: [usize; 3] = [0, 1, usize::MAX];
+        const U32: [u32; 3] = [0, 1, u32::MAX];
+        let bests = [
+            0.0,
+            -0.0,
+            0.1,
+            1.0 / 3.0,
+            1e-7,
+            1e15,
+            1e16,
+            1e17,
+            1e21,
+            1e22,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+            f64::MAX,
+            f64::MIN,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let mut lines = Vec::new();
+        // Each field takes the edge values in turn, out of step with the
+        // fields next to it.
+        for (a, b, c) in [(0, 1, 2), (1, 2, 0), (2, 0, 1)] {
+            for ok in [false, true] {
+                for op in [
+                    BatchOp::Evaluate,
+                    BatchOp::Execute,
+                    BatchOp::ExecuteReplicas,
+                ] {
+                    lines.push(Line::Batch {
+                        k: U64[a],
+                        op,
+                        n: USIZE[b],
+                        shots: U32[c],
+                        t: U64[b],
+                        dt: U64[c],
+                        ok,
+                    });
+                }
+                for op in [WaveOp::RunCircuits, WaveOp::RunShotsDistributed] {
+                    for k in [None, Some(U64[a])] {
+                        for replicas in [
+                            None,
+                            Some(vec![]),
+                            Some(vec![U32[a]]),
+                            Some(vec![U32[a], U32[b], U32[c], 4_096]),
+                        ] {
+                            lines.push(Line::Wave {
+                                k,
+                                w: U32[b],
+                                op,
+                                n: USIZE[c],
+                                shots: U32[a],
+                                t: U64[c],
+                                dt: U64[b],
+                                ok,
+                                replicas,
+                            });
+                        }
+                    }
+                }
+            }
+            for best in bests.into_iter().flat_map(|best| [best, -best]) {
+                lines.push(Line::Iter {
+                    i: USIZE[a],
+                    evals: U64[b],
+                    batches: U64[c],
+                    best,
+                    t: U64[a],
+                });
+            }
+            lines.push(Line::Metric {
+                n: USIZE[a],
+                t: U64[b],
+                dt: U64[c],
+            });
+        }
+        // The `end` line is handed to serde_json whole.
+        for (status, truncated) in [(RunStatus::Ok, false), (RunStatus::Aborted, true)] {
+            lines.push(Line::End {
+                status,
+                batches: 1,
+                waves: u64::MAX,
+                circuits: 0,
+                truncated,
+                t: 7,
+            });
+        }
+        let tracer =
+            CallTracer::from_sink(Box::new(io::sink()), header("encode"), DEFAULT_MAX_BYTES);
+        let mut state = tracer.lock();
+        lines
+            .iter()
+            .for_each(|line| assert_encodes_as_serde_json(&mut state, line));
+    }
+
+    #[test]
+    fn event_lines_encode_as_serde_json_does_for_random_values() {
+        /// SplitMix64 from a fixed seed: every run checks the same lines.
+        struct Rng(u64);
+
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                let z = self.0;
+                let z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                let z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                z ^ (z >> 31)
+            }
+
+            /// An integer of any size: a random `u64` shifted right by 0 to
+            /// 63 bits.
+            fn int(&mut self) -> u64 {
+                let shift = self.next() % 64;
+                self.next() >> shift
+            }
+
+            /// A `u32` of any size, as [`int`](Self::int).
+            fn int32(&mut self) -> u32 {
+                let shift = self.next() % 32;
+                (self.next() as u32) >> shift
+            }
+
+            fn coin(&mut self) -> bool {
+                self.next() & 1 == 1
+            }
+        }
+
+        let ops = [
+            BatchOp::Evaluate,
+            BatchOp::Execute,
+            BatchOp::ExecuteReplicas,
+        ];
+        let mut rng = Rng(0x7ace_2024);
+        let tracer =
+            CallTracer::from_sink(Box::new(io::sink()), header("encode"), DEFAULT_MAX_BYTES);
+        let mut state = tracer.lock();
+        for _ in 0..100_000 {
+            let line = match rng.next() % 4 {
+                0 => Line::Batch {
+                    k: rng.int(),
+                    op: ops[(rng.next() % 3) as usize],
+                    n: rng.int() as usize,
+                    shots: rng.int32(),
+                    t: rng.int(),
+                    dt: rng.int(),
+                    ok: rng.coin(),
+                },
+                1 => Line::Wave {
+                    k: rng.coin().then(|| rng.int()),
+                    w: rng.int32(),
+                    op: if rng.coin() {
+                        WaveOp::RunCircuits
+                    } else {
+                        WaveOp::RunShotsDistributed
+                    },
+                    n: rng.int() as usize,
+                    shots: rng.int32(),
+                    t: rng.int(),
+                    dt: rng.int(),
+                    ok: rng.coin(),
+                    replicas: rng.coin().then(|| {
+                        let len = rng.next() % 9;
+                        (0..len).map(|_| rng.int32()).collect()
+                    }),
+                },
+                2 => Line::Iter {
+                    i: rng.int() as usize,
+                    evals: rng.int(),
+                    batches: rng.int(),
+                    best: f64::from_bits(rng.next()),
+                    t: rng.int(),
+                },
+                _ => Line::Metric {
+                    n: rng.int() as usize,
+                    t: rng.int(),
+                    dt: rng.int(),
+                },
+            };
+            assert_encodes_as_serde_json(&mut state, &line);
+        }
     }
 
     #[test]

@@ -2690,7 +2690,11 @@ check with `check_trace` (`tests/python/call_trace.py`).
   run's own planner, the same `Arc`, and add no decorator and no observer.
   With one, each line is serialized into one reused buffer and written through
   a 64 KiB buffer, flushed only after the header and when the trace is closed,
-  behind one mutex per trace, uncontended in practice.
+  behind one mutex per trace, uncontended in practice. The event lines
+  (`batch`, `wave`, `iter`, `metric`) are written by a hand-written encoder that
+  produces exactly the bytes `serde_json` would, which
+  `event_lines_encode_as_serde_json_does` and
+  `event_lines_encode_as_serde_json_does_for_random_values` check.
 
 ### JSON Schema of version 1
 
