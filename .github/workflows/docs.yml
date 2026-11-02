@@ -64,7 +64,7 @@ jobs:
           python-version: "3.11"
       # Hook tests first, so a broken hook fails fast; then the strict site build.
       - name: Install docs dependencies
-        run: pip install -r requirements-docs.txt "pytest>=8.0"
+        run: pip install -r requirements-docs.txt
       - name: Test the docs hooks and scripts
         run: pytest tests/docs
       - name: Build site
@@ -86,6 +86,20 @@ jobs:
         run: |
           cp -r target/doc site/rust
           python scripts/docs/write_legacy_redirects.py site
+      # Gate: nothing confidential may reach the public, permanent site.
+      # The private patterns (same secret and format as hygiene.yml) are only
+      # exposed off pull requests; PR builds run the public rules alone.
+      - name: Scan the built site
+        env:
+          HYGIENE_LEAK_PATTERNS: ${{ github.event_name != 'pull_request' && secrets.HYGIENE_LEAK_PATTERNS || '' }}
+        run: |
+          args=()
+          # Off pull requests an unset secret is an error, as in hygiene.yml.
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            args+=(--require-patterns)
+          fi
+          python scripts/docs/scan_published_site.py site \
+            --patterns-env HYGIENE_LEAK_PATTERNS "${args[@]}"
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site
