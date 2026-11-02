@@ -68,6 +68,12 @@ pub enum PhysicsError {
         z: u32,
         message: String,
     },
+    /// A Pauli string or Pauli sum is malformed (repeated qubit, qubit out of
+    /// range, non-finite coefficient, or unparsable text).
+    InvalidPauliSum {
+        /// Human-readable description of the problem.
+        message: String,
+    },
 }
 
 impl fmt::Display for PhysicsError {
@@ -108,6 +114,9 @@ impl fmt::Display for PhysicsError {
             }
             PhysicsError::EndfDataNotFound { z, message } => {
                 write!(f, "ENDF-6 data not found for Z={z}: {message}")
+            }
+            PhysicsError::InvalidPauliSum { message } => {
+                write!(f, "invalid Pauli sum: {message}")
             }
         }
     }

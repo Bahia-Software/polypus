@@ -5,9 +5,10 @@
 //! task, will compile a [`PauliSum`] into a Trotterized circuit). It contains
 //! no circuit-compilation logic and has no dependency on `polypus-circuit`.
 
+pub mod pauli;
 pub mod photon_polarization;
 
-pub use photon_polarization::{PauliAxis, PauliSum, PauliTerm};
+pub use pauli::{PauliAxis, PauliString, PauliSum, PauliTerm, Phase};
 
 /// Trait for any physical system that can express its quantum Hamiltonian as a
 /// sum of Pauli operators.

@@ -66,7 +66,7 @@
 //! use polypus_physics::hamiltonians::photon_polarization::photon_polarization_hamiltonian;
 //!
 //! // Express H = 1.0·σ_z + 0.1·σ_x  (natural units, ħ=1).
-//! let h = photon_polarization_hamiltonian(1.0, 0.1);
+//! let h = photon_polarization_hamiltonian(1.0, 0.1).unwrap();
 //! // h.to_string() or pass to polypus-circuit's Trotter compiler (future).
 //! assert_eq!(h.coefficient_norm(), 1.1);
 //! ```
