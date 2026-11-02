@@ -43,7 +43,7 @@ Entries were curated from the Conventional Commits history. Releases before
   travels as the JSON of its spec, rebuilt through the checks of `qml.load`
   (#502).
 
-## [0.8.0] - 2026-11-02
+## [0.8.0] - 2026-10-30
 
 ### Upgrading from 0.7
 
