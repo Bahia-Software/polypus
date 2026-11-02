@@ -1,0 +1,73 @@
+site_name: Polypus
+site_description: Quantum circuit execution and variational training, with a Rust core and Python bindings.
+site_url: https://bahia-software.github.io/polypus/
+repo_url: https://github.com/Bahia-Software/polypus
+repo_name: Bahia-Software/polypus
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+exclude_docs: |
+  superpowers/
+  _hooks/
+  adr/0004-phase-table.py
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+      # GitHub-style anchors, so `#c-4--...` links work on GitHub and on the site.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+hooks:
+  - docs/_hooks/repo_files.py
+
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+  links:
+    not_found: warn
+    anchors: warn
+
+extra:
+  version: 0.9.0-dev
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - All pages:
+      - adr/0001-terminal-measurements.md
+      - adr/0002-qml-supervised-labels.md
+      - adr/0004-openqasm3-profile-and-angle-expressions.md
+      - adr/0005-registry-option-values.md
+      - adr/0006-declared-classical-registers.md
+      - adr/0007-native-qml.md
+      - adr/README.md
+      - backends.md
+      - CONTRACTS.md
+      - CONTRIBUTING.md
+      - ENGINEERING.md
+      - guide/circuits.md
+      - guide/memory.md
+      - guide/performance.md
+      - guide/qml.md
+      - guide/README.md
+      - guide/running.md
+      - guide/training.md
+      - RELEASING.md
