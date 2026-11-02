@@ -11,7 +11,7 @@ Entries were curated from the Conventional Commits history. Releases before
 
 ## [Unreleased]
 
-## [0.8.0] - 2026-10-30
+## [0.8.0] - 2026-11-02
 
 ### Upgrading from 0.7
 
