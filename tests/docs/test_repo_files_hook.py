@@ -92,3 +92,28 @@ def test_only_allowlisted_external_files_are_added(tmp_path: Path):
 def test_link_text_with_inline_code_is_rewritten():
     out = rewrite_repo_links("[`b.py`](../../benchmarks/b.py)", "guide/x.md", U)
     assert out == f"[`b.py`]({U}benchmarks/b.py)"
+
+
+def test_allowlist_matches_the_exact_repo_path():
+    from repo_files import _is_allowed
+
+    assert _is_allowed("assets/logo.png")
+    assert not _is_allowed("examples/x/assets/a.png")
+    assert not _is_allowed("docs/assets/a.svg")
+    assert not _is_allowed("assets/sub/a.svg")
+
+
+def test_link_to_an_excluded_docs_file_becomes_github_url():
+    out = rewrite_repo_links(
+        "[t](0004-phase-table.py)",
+        "adr/README.md",
+        U,
+        excluded={"adr/0004-phase-table.py"},
+    )
+    assert out == f"[t]({U}docs/adr/0004-phase-table.py)"
+
+
+def test_link_to_an_included_docs_file_is_untouched_with_excluded_set():
+    text = "[t](0001-terminal-measurements.md)"
+    out = rewrite_repo_links(text, "adr/README.md", U, excluded={"adr/x.py"})
+    assert out == text
