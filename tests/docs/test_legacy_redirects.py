@@ -16,9 +16,10 @@ NAMES = ["polypus", "polypus_circuit"]
 
 def test_writes_one_redirect_per_crate(tmp_path):
     names = read_crate_names()
-    assert len(names) == 14
+    crates = len(list(REPO.glob("crates/*/Cargo.toml")))
+    assert len(names) == crates
     written = write_legacy_redirects(tmp_path, names)
-    assert len(written) == 14
+    assert len(written) == crates
     assert all(p.is_file() for p in written)
 
 

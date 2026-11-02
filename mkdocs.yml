@@ -16,6 +16,7 @@ theme:
   name: material
   custom_dir: docs/overrides
   logo: assets/logo.png
+  favicon: assets/logo.png
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -52,7 +53,6 @@ markdown_extensions:
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
-  - pymdownx.snippets
 
 hooks:
   - docs/_hooks/repo_files.py

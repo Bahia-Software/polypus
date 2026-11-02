@@ -2,8 +2,10 @@
 
 Pages link to sources, benchmarks and the changelog with paths that resolve on
 GitHub (``../../benchmarks/x.py``) but not in the built site. The hook rewrites
-those links to ``blob/main`` URLs, and serves the allowlisted repo assets
-(``assets/*.svg``, ``assets/*.png``) at ``assets/`` in the site.
+those links to ``blob/main`` URLs, as it does for links to ``docs/`` files that
+``exclude_docs`` keeps out of the site. It also serves the allowlisted repo assets
+(``assets/*.svg``, ``assets/*.png``) at ``assets/`` in the site, and swaps the
+``changelog.md`` stub for the repo-root ``CHANGELOG.md``.
 """
 
 from __future__ import annotations
@@ -14,10 +16,10 @@ import re
 from pathlib import Path
 from typing import Callable, Collection, List, Optional
 
-# Repo-relative globs published into the site. Never a glob over the repo root.
 # The page whose body is the repo-root CHANGELOG.md.
 CHANGELOG_PAGE = "changelog.md"
 
+# Repo-relative globs published into the site. Never a glob over the repo root.
 ALLOWED_EXTERNAL_GLOBS = ("assets/*.svg", "assets/*.png")
 
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")

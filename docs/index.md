@@ -32,6 +32,7 @@ A Rust core with Python bindings. Changing the target, a local simulator, CESGA'
     Variational training behind one `train()` call: DE, PSO, CMA-ES, Adam and more. A QAOA cost for MaxCut, evaluated natively:
 
     ```python
+    edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
     cut = polypus.Qubo(
         4,
         linear=[(q, 2.0) for q in range(4)],
