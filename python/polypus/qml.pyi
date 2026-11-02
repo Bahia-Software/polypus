@@ -18,6 +18,7 @@ from typing import (
     overload,
 )
 
+import numpy as np
 import numpy.typing as npt
 from qiskit import QuantumCircuit
 from qiskit_aer.noise import NoiseModel
@@ -46,6 +47,8 @@ __all__ = [
     "TrainedModel",
     "ExactResult",
     "load",
+    "expval",
+    "jacobian",
     "Dataset",
     "PauliTerm",
     "Observable",
@@ -67,6 +70,7 @@ _Pairing = Literal["even_pairs", "odd_pairs", "alternating"]
 _PoolBlock = Literal["basic"]
 _KeepRule = Literal["even_positions", "odd_positions"]
 _Pauli = Literal["x", "y", "z"]
+_Wrt = Literal["params", "inputs", "both"]
 _Decision = Literal["raw", "sign", "threshold", "argmax"]
 _Loss = Literal[
     "squared_error",
@@ -283,6 +287,93 @@ class TrainedModel:
     def circuit(self, x: _FloatVector) -> Circuit: ...
 
 def load(path: Union[str, PathLike[str]]) -> TrainedModel: ...
+
+# ── Loss-free primitives ────────────────────────────────────────────────────
+# Every readout observable's expectation per row: shape (rows, observables).
+def expval(
+    model: Model,
+    x: Union[_DatasetRows, Dataset],
+    params: _FloatVector,
+    *,
+    shots: int = 1024,
+    infrastructure: str = "local",
+    n_qpus: int = 1,
+    nodes: int = 1,
+    cores_per_qpu: int = 2,
+    walltime: Optional[str] = None,
+    options: Optional[dict[str, str]] = None,
+    sim_method: str = "automatic",
+    noise_model: Optional[NoiseModel] = None,
+    backend: Optional[str] = None,
+    # Omitted: drawn and logged, not returned; must be omitted on "qmio".
+    seed: Optional[int] = None,
+    exact: bool = False,
+) -> npt.NDArray[np.float64]: ...
+
+# The expectations' Jacobian: (rows, observables, num_params) for "params",
+# (rows, observables, features) for "inputs", both of them for "both".
+@overload
+def jacobian(
+    model: Model,
+    x: Union[_DatasetRows, Dataset],
+    params: _FloatVector,
+    *,
+    wrt: Literal["params", "inputs"] = "params",
+    shots: int = 1024,
+    infrastructure: str = "local",
+    n_qpus: int = 1,
+    nodes: int = 1,
+    cores_per_qpu: int = 2,
+    walltime: Optional[str] = None,
+    options: Optional[dict[str, str]] = None,
+    sim_method: str = "automatic",
+    noise_model: Optional[NoiseModel] = None,
+    backend: Optional[str] = None,
+    seed: Optional[int] = None,
+    exact: bool = False,
+) -> npt.NDArray[np.float64]: ...
+@overload
+def jacobian(
+    model: Model,
+    x: Union[_DatasetRows, Dataset],
+    params: _FloatVector,
+    *,
+    wrt: Literal["both"],
+    shots: int = 1024,
+    infrastructure: str = "local",
+    n_qpus: int = 1,
+    nodes: int = 1,
+    cores_per_qpu: int = 2,
+    walltime: Optional[str] = None,
+    options: Optional[dict[str, str]] = None,
+    sim_method: str = "automatic",
+    noise_model: Optional[NoiseModel] = None,
+    backend: Optional[str] = None,
+    seed: Optional[int] = None,
+    exact: bool = False,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]: ...
+@overload
+def jacobian(
+    model: Model,
+    x: Union[_DatasetRows, Dataset],
+    params: _FloatVector,
+    *,
+    wrt: _Wrt = "params",
+    shots: int = 1024,
+    infrastructure: str = "local",
+    n_qpus: int = 1,
+    nodes: int = 1,
+    cores_per_qpu: int = 2,
+    walltime: Optional[str] = None,
+    options: Optional[dict[str, str]] = None,
+    sim_method: str = "automatic",
+    noise_model: Optional[NoiseModel] = None,
+    backend: Optional[str] = None,
+    seed: Optional[int] = None,
+    exact: bool = False,
+) -> Union[
+    npt.NDArray[np.float64], tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]
+]: ...
 
 @final
 class ExactResult:

@@ -30,7 +30,8 @@ pub mod vqc_oracle;
 pub use error::EvaluationError;
 pub use py_callback_observable::PyCallbackObservable;
 pub use qml_oracle::{
-    FullDataset, MinibatchConfig, QmlObjective, QmlOracle, QmlOracleFactory, QmlSource,
+    candidate_window_size, window_size, FullDataset, MinibatchConfig, QmlObjective, QmlOracle,
+    QmlOracleFactory, QmlSource,
 };
 pub use supervised::{Label, PyLabelledCost, PySampleCost, SupervisedObjective};
 pub use variance_oracle::PyVarianceOracle;
