@@ -10,18 +10,36 @@ exclude_docs: |
   superpowers/
   _hooks/
   adr/0004-phase-table.py
+  overrides/
 
 theme:
   name: material
+  custom_dir: docs/overrides
+  logo: assets/logo.png
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
   features:
     - content.code.copy
+    - content.tabs.link
     - navigation.sections
+    - navigation.tabs
     - navigation.top
     - search.highlight
+    - search.suggest
 
 markdown_extensions:
   - admonition
   - attr_list
+  - md_in_html
   - tables
   - toc:
       permalink: true
@@ -29,8 +47,12 @@ markdown_extensions:
       slugify: !!python/object/apply:pymdownx.slugs.slugify
         kwds:
           case: lower
+  - pymdownx.details
   - pymdownx.highlight
   - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets
 
 hooks:
   - docs/_hooks/repo_files.py
@@ -51,23 +73,29 @@ plugins:
 
 nav:
   - Home: index.md
-  - All pages:
-      - adr/0001-terminal-measurements.md
-      - adr/0002-qml-supervised-labels.md
-      - adr/0004-openqasm3-profile-and-angle-expressions.md
-      - adr/0005-registry-option-values.md
-      - adr/0006-declared-classical-registers.md
-      - adr/0007-native-qml.md
-      - adr/README.md
-      - backends.md
-      - CONTRACTS.md
-      - CONTRIBUTING.md
-      - ENGINEERING.md
-      - guide/circuits.md
-      - guide/memory.md
-      - guide/performance.md
-      - guide/qml.md
-      - guide/README.md
-      - guide/running.md
-      - guide/training.md
-      - RELEASING.md
+  - Getting started: getting-started.md
+  - User guide:
+      - Overview: guide/README.md
+      - Running circuits: guide/running.md
+      - Variational training: guide/training.md
+      - Quantum machine learning: guide/qml.md
+      - Circuits and interchange: guide/circuits.md
+      - Memory budget: guide/memory.md
+      - Performance: guide/performance.md
+  - Reference:
+      - Rust API: https://bahia-software.github.io/polypus/rust/polypus/
+  - Developers:
+      - Contributing: CONTRIBUTING.md
+      - Writing a backend: backends.md
+      - Contracts: CONTRACTS.md
+      - Engineering rules: ENGINEERING.md
+      - Releasing: RELEASING.md
+      - Architecture decisions:
+          - adr/README.md
+          - adr/0001-terminal-measurements.md
+          - adr/0002-qml-supervised-labels.md
+          - adr/0004-openqasm3-profile-and-angle-expressions.md
+          - adr/0005-registry-option-values.md
+          - adr/0006-declared-classical-registers.md
+          - adr/0007-native-qml.md
+  - Changelog: changelog.md

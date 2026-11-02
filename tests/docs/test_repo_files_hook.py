@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from repo_files import external_files, rewrite_repo_links
+from repo_files import (
+    external_files,
+    rebase_changelog_links,
+    rewrite_repo_links,
+)
 
 U = "https://github.com/Bahia-Software/polypus/blob/main/"
 
@@ -117,3 +121,34 @@ def test_link_to_an_included_docs_file_is_untouched_with_excluded_set():
     text = "[t](0001-terminal-measurements.md)"
     out = rewrite_repo_links(text, "adr/README.md", U, excluded={"adr/x.py"})
     assert out == text
+
+
+def test_changelog_docs_links_are_rebased_onto_docs():
+    out = rebase_changelog_links("[r](docs/guide/running.md#errors)")
+    assert out == "[r](guide/running.md#errors)"
+
+
+def test_changelog_root_links_climb_out_of_docs():
+    assert rebase_changelog_links("[r](README.md)") == "[r](../README.md)"
+    assert rebase_changelog_links("[d](./docs/x.md)") == "[d](x.md)"
+
+
+def test_changelog_external_and_anchor_links_are_untouched():
+    text = "[a](https://x.org/y) [b](#top) [c](mailto:a@b.c)"
+    assert rebase_changelog_links(text) == text
+
+
+def test_changelog_reference_definitions_and_code_are_handled():
+    text = (
+        "[x]: docs/a.md\n[v]: https://x.org\n`[c](docs/a.md)`\n```\n[c](docs/a.md)\n```"
+    )
+    out = rebase_changelog_links(text)
+    assert out.split("\n")[0] == "[x]: a.md"
+    assert out.split("\n")[1] == "[v]: https://x.org"
+    assert out.split("\n")[2:] == text.split("\n")[2:]
+
+
+def test_rebased_changelog_links_then_become_github_urls():
+    rebased = rebase_changelog_links("[r](README.md) [g](docs/guide/running.md)")
+    out = rewrite_repo_links(rebased, "changelog.md", U)
+    assert out == f"[r]({U}README.md) [g](guide/running.md)"
