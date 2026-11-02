@@ -501,6 +501,68 @@ class TestModel:
             make_model(2, ansatz=Ansatz(2).pool("basic"), readout=Readout([Z(1)]))
         assert make_model(2, ansatz=Ansatz(2).pool("basic"), readout=Readout([Z(0)]))
 
+    def test_num_observables_counts_the_readout(self):
+        from polypus.qml import Observable, Readout, Z
+
+        assert make_model(2).num_observables == 1
+        argmax = Readout([Z(0), Z(1), Z(0) @ Z(1)], decision="argmax")
+        assert make_model(2, readout=argmax).num_observables == 3
+        # A weighted sum is one observable, whatever its terms.
+        weighted = Readout([Observable([(0.5, Z(0)), (1.5, Z(0) @ Z(1))])])
+        model = make_model(2, readout=weighted)
+        assert model.num_observables == 1
+        assert model.bind([0.1] * model.num_params).model.num_observables == 1
+
+    def test_pickle_and_deepcopy_rebuild_the_same_model(self):
+        import copy
+        import pickle
+
+        import numpy as np
+        from polypus import qml
+        from polypus.qml import Ansatz, Encoder, Observable, Readout, Z
+
+        model = make_model(
+            2,
+            encoder=Encoder(2).iqp_encoder(),
+            ansatz=Ansatz(2).real_amplitudes(1).angle_encoder("rx"),
+            readout=Readout(
+                [Observable([(0.1 + 0.2, Z(0)), (-1.5, Z(0) @ Z(1))]), Z(1)],
+                decision="argmax",
+            ),
+        )
+        params = np.array([0.3, -1.1, 2.0, 0.7])
+        rows = [[0.4, 1.2], [2.5, -0.3]]
+        expected = qml.expval(model, rows, params, exact=True)
+        for copied in (pickle.loads(pickle.dumps(model)), copy.deepcopy(model)):
+            assert type(copied) is qml.Model and copied is not model
+            assert repr(copied) == repr(model)
+            assert copied.num_observables == model.num_observables
+            # The coefficient 0.1 + 0.2 survives bit for bit.
+            assert np.array_equal(
+                qml.expval(copied, rows, params, exact=True), expected
+            )
+
+    def test_an_edited_pickle_is_a_value_error(self):
+        import pickle
+
+        from polypus.qml import Model, Readout, Z
+
+        model = make_model(1)
+        rebuild, (spec,) = model.__reduce__()
+        assert rebuild == Model._from_spec
+        assert repr(rebuild(spec)) == repr(model)
+        with pytest.raises(ValueError, match="not a valid polypus.qml.Model spec"):
+            Model._from_spec("{")
+        # Valid JSON, but a readout position the model does not have: rejected
+        # by the same check as `Model(...)`, never an inconsistent model.
+        bad = spec.replace('[[0,"Z"]]', '[[5,"Z"]]')
+        assert bad != spec, spec
+        with pytest.raises(ValueError):
+            Model._from_spec(bad)
+        with pytest.raises(ValueError):
+            make_model(1, readout=Readout([Z(5)]))
+        assert pickle.loads(pickle.dumps(model)).num_params == model.num_params
+
 
 @pytest.mark.parametrize(
     "name",

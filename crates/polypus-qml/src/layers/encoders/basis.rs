@@ -4,7 +4,7 @@
 use polypus_circuit::{GateInstruction, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
-use crate::model::{LayerAllocation, LayerContext, LayerOps};
+use crate::model::{InputTrace, LayerAllocation, LayerContext, LayerOps};
 
 /// Computational-basis encoding: a binary sample `x ∈ {0, 1}^n` becomes the
 /// basis state `|x⟩`, one feature per qubit. Feature `x_j` flips the active
@@ -68,12 +68,16 @@ impl LayerOps for BasisEncoder {
         })
     }
 
-    fn emit(
+    fn emit_traced(
         &self,
         qc: &mut ParameterizedCircuit,
         alloc: &LayerAllocation,
         x: &[f64],
+        trace: &mut InputTrace,
     ) -> Result<(), QmlError> {
+        // Binary features select gates rather than angles: there is nothing to
+        // differentiate.
+        trace.opaque("basis");
         // One conditional `X` per feature, on the active qubit at that logical
         // position. If `x` is shorter than the active set, the surplus qubits
         // are left untouched (documented in the type docs).
@@ -229,5 +233,18 @@ mod tests {
                 got: -1.0,
             }
         );
+    }
+
+    #[test]
+    fn trace_names_the_encoder_opaque_and_records_no_gate() {
+        let enc = BasisEncoder;
+        let mut c = ctx(3, 3);
+        let alloc = enc.plan(&mut c).unwrap();
+        let mut qc = ParameterizedCircuit::new(3);
+        let mut trace = InputTrace::default();
+        enc.emit_traced(&mut qc, &alloc, &[1.0, 0.0, 1.0], &mut trace)
+            .unwrap();
+        assert!(trace.gates.is_empty());
+        assert_eq!(trace.opaque, vec!["basis"]);
     }
 }

@@ -238,6 +238,68 @@ c2: ═════════════════════════�
 
 `S†` then `H` rotates `Y` onto `Z`, which is what the measurement reads (`X` needs only the `H`). `model.circuit(x, params)` fixes the trainable angles too, and `trained.circuit(x)` does so with the trained model's own parameters: it is exactly the circuit `trained.run([x])` executes, so `polypus.run_quantum_circuit(trained.circuit(x), shots, "local", backend="polypus", seed=s)` gives the counts of `trained.run([x], shots=shots, seed=s)`. `x` is checked as a row of `fit` is: a feature count the encoders cannot carry or a non-finite value raises `ValueError`.
 
+### Your own training loop: `qml.expval` and `qml.jacobian`
+
+`fit` runs the whole optimization. To write the loop yourself, with a loss of your own or another framework's optimizer, two functions give you the model's raw values and their derivatives, as NumPy arrays (`float64`, one row per row of `x`):
+
+- `qml.expval(model, x, params)` returns the expectation of **every** readout observable, shape `(rows, observables)`, whatever the decision: one column per class for `"argmax"`.
+- `qml.jacobian(model, x, params, wrt="params")` returns their derivatives with respect to the parameters, shape `(rows, observables, num_params)`. `wrt="inputs"` differentiates with respect to the features instead, shape `(rows, observables, features)`, and `wrt="both"` returns the two arrays as a tuple.
+
+Both take `params` as a list or an array of `num_params` values and the execution arguments of `run` (with `exact=True`, the exact values; with shots, estimates). The Jacobian is that of the expectations, not of a loss, so the chain rule is yours. For a squared error:
+
+```python
+params = np.zeros(model.num_params)
+for _ in range(40):
+    values = qml.expval(model, X, params, exact=True)[:, 0]
+    by_params = qml.jacobian(model, X, params, exact=True)[:, 0, :]
+    gradient = 2 * (values - y) @ by_params / len(y)  # d mean((⟨O₀⟩ − y)²) / dθ
+    params = params - 0.3 * gradient
+```
+
+[`examples/qml_expval_jacobian_loop.py`](../../examples/qml_expval_jacobian_loop.py) runs this loop to the end and checks that the loss goes down.
+
+- **Inputs.** The derivative with respect to the features covers angle encoders, re-uploaded ones included, and IQP encoders (for `Rzz(x_i·x_j)` it applies the product rule). Amplitude and basis encoders have no derivative in the data: `wrt="inputs"` or `"both"` with one raises `polypus.ConfigurationError`; `wrt="params"` works with any model.
+- **Cost.** `expval` runs one circuit per row. `jacobian` runs two per shifted gate per row (`+π/2` and `−π/2`): every gate that reads a parameter (a parameter shared by several gates, as in `conv` and `pool`, counts once per gate), every encoder gate that reads the row for `"inputs"`, both for `"both"`. A `real_amplitudes(1)` over 2 qubits has 4 parameters, so 8 circuits per row.
+- **Execution.** A call opens one backend for all its rows (one allocation on CUNQA) and runs them in blocks sized from the cores and the backend, so memory stays bounded however many rows you pass; Ctrl+C stops it between blocks. The result does not depend on the blocks: a call on all the rows equals the calls on pieces of them, put together.
+- **Seeds.** The functions return bare arrays, so the seed drawn when you omit `seed` is only logged: pass `seed=` to repeat a sampled call exactly. On Aer and CUNQA, a seeded call repeats on the same machine and configuration.
+
+### In a PyTorch network: `polypus.torch.QuantumLayer`
+
+`polypus.torch.QuantumLayer(model, ...)` is a `torch.nn.Module` built on those two functions: its forward pass is `qml.expval`, its backward pass `qml.jacobian`, and its trainable parameters (`layer.params`) are the model's. Put it between classical layers and train the whole network with any `torch.optim` optimizer. PyTorch is not a dependency of Polypus; install it with the extra, and import the module explicitly (`import polypus` does not import it):
+
+```bash
+pip install "polypus-quantum[torch]"
+```
+
+```python
+import torch
+from polypus import qml
+from polypus.torch import QuantumLayer
+
+model = qml.Model(
+    qml.Encoder(2).angle_encoder("ry"),
+    qml.Ansatz(2).real_amplitudes(1),
+    qml.Readout([qml.Z(0), qml.Z(1)]),
+)
+quantum = QuantumLayer(model, exact=True)
+net = torch.nn.Sequential(
+    torch.nn.Linear(4, 2),  # four features onto the two qubits' angles
+    quantum,  # (batch, 2) -> (batch, quantum.num_observables)
+    torch.nn.Linear(quantum.num_observables, 1),
+)
+optimizer = torch.optim.Adam(net.parameters(), lr=0.1)
+```
+
+[`examples/qml_torch_hybrid.py`](../../examples/qml_torch_hybrid.py) trains this network on two classes and checks that it learns them.
+
+- **Arguments.** `QuantumLayer(model, *, initial_params=None, seed=None, ...)` takes a `Model` and `qml.expval`'s execution arguments (`shots`, `infrastructure`, `backend`, `exact`, …), which `expval` checks at the first forward pass. Without `initial_params` the parameters start uniform in `[-π, π)`, drawn with PyTorch's generator (`torch.manual_seed` repeats them). `layer.num_params` and `layer.num_observables` (also `model.num_observables`) size the neighbouring layers. For a model trained with `fit` or read with `qml.load`, `polypus.torch.from_trained(trained, ...)` starts from its parameters.
+- **Shapes.** The input is `(batch, features)` and the output `(batch, num_observables)`; a 1-D input is one sample and gives `(num_observables,)`. Each forward pass is one `expval` call with the whole batch, and each backward pass one `jacobian` call, with respect to what needs a gradient: the parameters, the input (which a layer before it needs), or both.
+- **Inputs.** The gradient with respect to the input needs an angle or IQP encoder, as `qml.jacobian` does: with an amplitude or basis encoder, an input that requires a gradient makes the backward pass raise `polypus.ConfigurationError`. Put such a layer first, or detach its input.
+- **dtype and device.** The quantum computation runs in `float64` on the CPU. The output comes back in the dtype and on the device of the input, and each gradient in its tensor's, so a `float32` network needs no `.double()`; the input is rounded at the boundary. The layer's own parameter is `float64` unless you convert the layer. GPU tensors are moved to the CPU and back; CI does not test that path.
+- **Seeds.** With `shots`, `seed=` makes training repeatable: every forward and backward pass gets its own seed, derived from `seed` and the number of the forward pass, so two layers built with the same `seed` and fed the same batches give the same values and gradients at every step. That counter is not saved in the `state_dict`: to replay, build a new layer with the same `seed`. A seeded layer is not safe to call from several threads at once. Without `seed`, each call draws its own.
+- **Cost.** Every forward pass and every backward pass opens and closes a backend: two per training step, so on CUNQA two `qraise` allocations per step. Prefer `exact=True` on the local simulator while you develop.
+- **Limits.** No second derivatives (no `create_graph=True` through the layer), no `torch.compile` and no `torch.vmap`. Save the `state_dict`; `copy.deepcopy(layer)` works too.
+
 ### Data
 
 `qml.Dataset(x, y=None)` checks the rows once (non-empty, equal width, finite) and keeps the labels with them. It splits reproducibly and scales features:

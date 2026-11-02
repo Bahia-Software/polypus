@@ -6,3 +6,10 @@
 # implementation detail: `polypus/__init__.py` re-exports its public API, which
 # `polypus/__init__.pyi` types, so it gets no stub of its own.
 polypus.polypus
+
+# `polypus.torch` cannot be imported without PyTorch, an optional extra, and
+# stubtest then reports the module as failing to import. The entry matches the
+# empty string too, which stubtest takes as "may not manifest on every system":
+# with PyTorch installed (CI's latest leg) it covers nothing and is not reported
+# unused, and every name in the module is still checked.
+(polypus\.torch)?

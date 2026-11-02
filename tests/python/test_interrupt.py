@@ -496,6 +496,51 @@ def test_native_qml_training_with_a_callback_responds_to_sigint_promptly():
     )
 
 
+# `qml.jacobian` (contract C-11): one call runs its rows block after block with
+# the GIL released. The exact path has no planner, so the call itself checks
+# for a pending Ctrl+C between blocks; the sampled path also has the planner's
+# check between waves. 12 qubits with 72 parameters is 144 circuits per row, so
+# the full call lasts far longer than the deadline.
+_JACOBIAN_CHILD = r"""
+import sys, time
+import polypus
+from polypus import qml
+
+model = qml.Model(
+    qml.Encoder(12).angle_encoder("ry"),
+    qml.Ansatz(12).hardware_efficient(2),
+    qml.Readout([qml.Z(0)]),
+)
+params = [0.1 * (i % 5) for i in range(model.num_params)]
+x = [[0.1 * ((i + j) % 7) for j in range(12)] for i in range(5000)]
+
+# Warm up the native path.
+qml.jacobian(model, x[:2], params, exact=EXACT)
+
+print("READY", flush=True)
+start = time.time()
+try:
+    qml.jacobian(model, x, params, wrt="both", exact=EXACT)
+    print("COMPLETED", flush=True)
+except KeyboardInterrupt:
+    print(f"KEYBOARDINTERRUPT {time.time() - start:.3f}", flush=True)
+except BaseException as exc:  # e.g. a PanicException from a swallowed error
+    print(f"OTHER {type(exc).__name__}", flush=True)
+    sys.exit(1)
+"""
+
+
+@pytest.mark.parametrize("exact", [True, False], ids=["exact", "sampled"])
+def test_native_qml_jacobian_responds_to_sigint_promptly(exact):
+    _assert_responds_to_sigint_promptly(
+        _JACOBIAN_CHILD.replace("EXACT", str(exact)),
+        failure_hint=(
+            f"qml.jacobian(exact={exact}) — the block loop is likely not checking "
+            "the interrupt guard between blocks, or the GIL is held around it"
+        ),
+    )
+
+
 # After a minibatched run, the optimizer's `best_fitness` is re-scored on the
 # whole training set (C-5): one full-set evaluation after the loop, the heaviest
 # single step of such a run. It must run with the GIL released, like the rest of

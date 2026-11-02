@@ -40,15 +40,18 @@ const FALLBACK_PARALLELISM: usize = 1;
 /// `population × n_train` product it replaced (15 000 for 300 × 50).
 const MAX_WINDOW_CIRCUITS: usize = 4096;
 
-/// Maximum number of candidates bound into one in-flight window.
+/// How many items of a batch to bind and run in one in-flight window: the
+/// candidates of a [`QmlOracle`] evaluation, or the rows of a
+/// `polypus.qml.expval` / `polypus.qml.jacobian` call, which size their blocks
+/// with this same policy rather than a copy of it.
 ///
 /// `local` is the host's parallelism, `backend` the backend's batch-agnostic
-/// `capabilities().max_concurrency` and `n_train` the circuits bound per
-/// candidate. The rule (issue #272):
+/// `capabilities().max_concurrency` and `circuits_per_item` the circuits bound
+/// per item (per candidate, the training samples). The rule (issue #272):
 ///
 /// ```text
-/// window = min(memory_bound, max(local, backend) × CONCURRENCY_MULTIPLIER)
-/// memory_bound = max(local × CONCURRENCY_MULTIPLIER, MAX_WINDOW_CIRCUITS / n_train)
+/// window = min(memory_bound, max(local, backend) × 2)
+/// memory_bound = max(local × 2, 4096 / circuits_per_item)
 /// ```
 ///
 /// - A backend narrower than the host (QMIO: 1) or as wide keeps the local window:
@@ -58,17 +61,17 @@ const MAX_WINDOW_CIRCUITS: usize = 4096;
 /// - `usize::MAX` means "no backend limit", not "unbounded parallelism": native
 ///   and local report it whenever the batch fits in memory, and their real
 ///   parallelism is the host's. It is therefore treated as `local`.
-/// - The memory bound caps the lift at [`MAX_WINDOW_CIRCUITS`] live circuits, but
-///   never below the #146 local window, so a run without a wide backend is sized
-///   exactly as before.
+/// - The memory bound caps the lift at 4096 live circuits, but never below the
+///   #146 local window, so a run without a wide backend is sized exactly as
+///   before.
 ///
 /// The batch-agnostic `capabilities()` is used because `capabilities_for` needs
 /// the bound tasks, which do not exist until the window is sized.
 ///
-/// Derived, not configured — there is no kwarg or [`ExecutionConfig`] field for
-/// it, so `qml.train`'s public signature is untouched. Never zero, so the
-/// windowing loop is always finite.
-fn window_size(local: usize, backend: usize, n_train: usize) -> usize {
+/// Derived, not configured — there is no kwarg or `ExecutionConfig` field for
+/// it, so no public Python signature carries it. Never zero, so a windowing
+/// loop is always finite.
+pub fn window_size(local: usize, backend: usize, circuits_per_item: usize) -> usize {
     let local = local.max(1);
     let units = if backend == usize::MAX {
         local
@@ -76,7 +79,7 @@ fn window_size(local: usize, backend: usize, n_train: usize) -> usize {
         local.max(backend)
     };
     let local_window = local.saturating_mul(CONCURRENCY_MULTIPLIER);
-    let memory_bound = local_window.max(MAX_WINDOW_CIRCUITS / n_train.max(1));
+    let memory_bound = local_window.max(MAX_WINDOW_CIRCUITS / circuits_per_item.max(1));
     units
         .saturating_mul(CONCURRENCY_MULTIPLIER)
         .min(memory_bound)
@@ -84,12 +87,12 @@ fn window_size(local: usize, backend: usize, n_train: usize) -> usize {
 }
 
 /// [`window_size`] for this host: `local` is
-/// [`std::thread::available_parallelism`].
-fn candidate_window_size(backend: usize, n_train: usize) -> usize {
+/// [`std::thread::available_parallelism`], or 1 when the platform hides it.
+pub fn candidate_window_size(backend: usize, circuits_per_item: usize) -> usize {
     let local = std::thread::available_parallelism()
         .map(NonZeroUsize::get)
         .unwrap_or(FALLBACK_PARALLELISM);
-    window_size(local, backend, n_train)
+    window_size(local, backend, circuits_per_item)
 }
 
 /// How [`QmlOracle`] turns each training circuit's counts into a per-sample value.
@@ -1477,6 +1480,25 @@ class Bound:
             window_size(64, usize::MAX, 1000),
             64 * CONCURRENCY_MULTIPLIER
         );
+    }
+
+    #[test]
+    fn many_circuits_per_item_never_shrink_the_local_window() {
+        // (local, backend, circuits per item) → items: the rows of
+        // `qml.expval`/`qml.jacobian`, whose circuits per row run from 1 to
+        // hundreds, keep 2 × cores whatever the backend's limit or width.
+        for (local, backend, per_item, expected) in [
+            (16, usize::MAX, 1, 32),
+            (16, usize::MAX, 200, 32),
+            (16, 1, 8, 32),
+            (16, 16, 8, 32),
+        ] {
+            assert_eq!(
+                window_size(local, backend, per_item),
+                expected,
+                "local {local}, backend {backend}, {per_item} circuit(s) per item"
+            );
+        }
     }
 
     #[test]

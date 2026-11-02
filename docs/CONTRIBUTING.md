@@ -142,9 +142,15 @@ pinned OpenQASM 3 fixtures (contract C-10). The other legs use the latest
 Qiskit, where those fixture tests skip. The latest-Python leg installs pinned
 Optuna, Nevergrad and pycma and sets `POLYPUS_REQUIRE_EXTERNAL_LIBRARIES=1`,
 so the tests of `polypus.ask_tell` that train through them run there
-(contract C-5); elsewhere they skip unless you install them. Those pins are
-the floors of the pip extras of the same names in `pyproject.toml`, which a
-test checks: bump a pin and its floor together.
+(contract C-5); elsewhere they skip unless you install them. It also
+installs the CPU wheel of PyTorch, pinned, and sets `POLYPUS_REQUIRE_TORCH=1`,
+so the tests of `polypus.torch` (`tests/python/test_torch_quantum_layer.py`
+and the PyTorch cases of `test_typing_stubs.py`) run there (contract C-11);
+the examples job installs the same PyTorch on both its legs, since it runs
+`examples/qml_torch_hybrid.py`, and so does Sonar's coverage job, so that
+`polypus/torch.py` is covered. Those pins are the floors of the pip extras of
+the same names in `pyproject.toml`, which a test checks: bump a pin and its
+floor together.
 
 Every Python leg also sets `POLYPUS_ALLOWED_SKIPS` to the tests it may skip,
 separated by spaces: a file (`test_cunqa_real.py`) or a class or test in it

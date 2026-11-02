@@ -20,7 +20,7 @@ pub use pool::{KeepRule, PoolBlock, PoolLayer};
 use polypus_circuit::ParameterizedCircuit;
 
 use crate::error::{QmlError, ValidationError};
-use crate::model::{LayerAllocation, LayerContext, LayerOps};
+use crate::model::{InputTrace, LayerAllocation, LayerContext, LayerOps};
 
 /// Adjacent, non-overlapping pairs over `n` logical positions:
 /// `(0,1),(2,3),…` — pair `k` is `(2k, 2k+1)` for `k` in `0..n/2`. With `n`
@@ -128,20 +128,21 @@ impl LayerOps for Layer {
         }
     }
 
-    fn emit(
+    fn emit_traced(
         &self,
         qc: &mut ParameterizedCircuit,
         alloc: &LayerAllocation,
         x: &[f64],
+        trace: &mut InputTrace,
     ) -> Result<(), QmlError> {
         match self {
-            Layer::AngleEncoder(l) => l.emit(qc, alloc, x),
-            Layer::AmplitudeEncoder(l) => l.emit(qc, alloc, x),
-            Layer::Iqp(l) => l.emit(qc, alloc, x),
-            Layer::Basis(l) => l.emit(qc, alloc, x),
-            Layer::HardwareEfficient(l) => l.emit(qc, alloc, x),
-            Layer::Conv(l) => l.emit(qc, alloc, x),
-            Layer::Pool(l) => l.emit(qc, alloc, x),
+            Layer::AngleEncoder(l) => l.emit_traced(qc, alloc, x, trace),
+            Layer::AmplitudeEncoder(l) => l.emit_traced(qc, alloc, x, trace),
+            Layer::Iqp(l) => l.emit_traced(qc, alloc, x, trace),
+            Layer::Basis(l) => l.emit_traced(qc, alloc, x, trace),
+            Layer::HardwareEfficient(l) => l.emit_traced(qc, alloc, x, trace),
+            Layer::Conv(l) => l.emit_traced(qc, alloc, x, trace),
+            Layer::Pool(l) => l.emit_traced(qc, alloc, x, trace),
         }
     }
 }
