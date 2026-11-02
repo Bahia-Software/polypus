@@ -102,6 +102,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip maturin pytest coverage==7.16.2
           pip install -r requirements-dev.txt
+      # PyTorch, so that the tests of polypus.torch run here and
+      # polypus/torch.py is covered instead of skipped. The CPU wheel at the
+      # pin of ci.yml (tests/python/test_torch_import.py checks it).
+      - name: Install PyTorch (CPU)
+        run: pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
       # One step, so that show-env's variables (instrumentation flags, where
       # the profiles go) reach the build, the tests and the report. The build
       # goes to cargo-llvm-cov's target directory, where `report` looks.

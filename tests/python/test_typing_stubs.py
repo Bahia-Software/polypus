@@ -18,7 +18,8 @@ import pytest
 # Each stubbed module of the package, with its stub relative to the package dir.
 # The submodules are created by the extension at import time (they are not
 # files), so their stubs are the only on-disk description of them, except
-# `polypus.ask_tell` and `polypus.shor`, pure-Python modules typed inline.
+# `polypus.ask_tell`, `polypus.shor` and `polypus.torch`, pure-Python modules
+# typed inline.
 STUBS = {
     "polypus": "__init__.pyi",
     "polypus.qml": "qml.pyi",
@@ -26,7 +27,12 @@ STUBS = {
     "polypus.circuits.templates": "circuits/templates.pyi",
     "polypus.ask_tell": "ask_tell.py",
     "polypus.shor": "shor.py",
+    "polypus.torch": "torch.py",
 }
+# The library a module needs to be imported: without it, the tests that import
+# the module skip (CI's latest leg installs it; POLYPUS_ALLOWED_SKIPS lists the
+# skips on the others).
+NEEDS = {"polypus.torch": "torch"}
 
 
 def _package_dir():
@@ -67,6 +73,8 @@ class TestStubFilesShipped:
 class TestStubsCoverPublicApi:
     @pytest.mark.parametrize("module_name", sorted(STUBS))
     def test_every_exported_name_has_a_stub(self, module_name):
+        if module_name in NEEDS:
+            pytest.importorskip(NEEDS[module_name])
         module = importlib.import_module(module_name)
         stub = _package_dir() / STUBS[module_name]
         missing = sorted(set(module.__all__) - _stub_names(stub))
@@ -223,3 +231,42 @@ class TestAskTellTypes:
         assert status == 1, report
         assert "snippet.py:4:" not in report, report
         assert 'snippet.py:5: error: "AskTell" has no attribute "close"' in report
+
+
+class TestTorchTypes:
+    """`polypus.torch` is typed inline against PyTorch's own types."""
+
+    _LAYER = (
+        "import torch\n"
+        "from polypus import qml\n"
+        "from polypus.torch import QuantumLayer, from_trained\n"
+        "model = qml.Model(\n"
+        '    qml.Encoder(1).angle_encoder("ry"),\n'
+        "    qml.Ansatz(1).real_amplitudes(1),\n"
+        "    qml.Readout([qml.Z(0)]),\n"
+        ")\n"
+    )
+
+    def test_the_layer_is_a_module_that_returns_a_tensor(self, tmp_path):
+        pytest.importorskip("torch")
+        source = self._LAYER + (
+            "layer: torch.nn.Module = QuantumLayer(model, exact=True, seed=1)\n"
+            "out: torch.Tensor = QuantumLayer(model)(torch.zeros(2, 1))\n"
+            "width: int = QuantumLayer(model).num_observables\n"
+            "net = torch.nn.Sequential(QuantumLayer(model), torch.nn.Linear(width, 1))\n"
+            "trained = from_trained(qml.load('model.json'), shots=64)\n"
+            "QuantumLayer(model, initial_params=torch.zeros(2))\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+    def test_a_model_is_not_a_trained_model(self, tmp_path):
+        # Both are TypeErrors at run time, so mypy must reject them too.
+        pytest.importorskip("torch")
+        source = self._LAYER + (
+            "from_trained(model)\nQuantumLayer(model.bind([0.1, 0.2]))\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 1, report
+        assert "snippet.py:9: error" in report, report
+        assert "snippet.py:10: error" in report, report
