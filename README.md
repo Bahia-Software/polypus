@@ -18,7 +18,7 @@
   <a href="#quickstart">Quickstart</a> |
   <a href="https://github.com/Bahia-Software/polypus/tree/main/docs/guide">User guide</a> |
   <a href="https://github.com/Bahia-Software/polypus-tutorials">Tutorials</a> |
-  <a href="https://bahia-software.github.io/polypus/">API reference</a> |
+  <a href="https://bahia-software.github.io/polypus/">Documentation</a> |
   <a href="https://github.com/Bahia-Software/polypus/blob/main/CHANGELOG.md">Changelog</a> |
   <a href="#citing-polypus">Cite</a>
 </p>
@@ -215,7 +215,7 @@ The [tutorials](https://github.com/Bahia-Software/polypus-tutorials), in English
 | [Memory budget](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/memory.md) | `POLYPUS_MEM_BUDGET`, cgroup detection, `InsufficientMemoryError` |
 | [Performance](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/performance.md) | Batched simulation, GIL-free binding, gate-parallel auto-calibration |
 
-The [API reference](https://bahia-software.github.io/polypus/) is the rustdoc of the workspace crates. The Python API is documented in the [user guide](https://github.com/Bahia-Software/polypus/tree/main/docs/guide) and in the type stubs and docstrings of [`python/polypus/`](https://github.com/Bahia-Software/polypus/tree/main/python/polypus).
+The [documentation site](https://bahia-software.github.io/polypus/) covers the Python API, the guides and the tutorials; the Rust API of every crate is under [`rust/`](https://bahia-software.github.io/polypus/rust/polypus/).
 
 ## Architecture
 

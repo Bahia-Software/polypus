@@ -43,6 +43,12 @@ Entries were curated from the Conventional Commits history. Releases before
   travels as the JSON of its spec, rebuilt through the checks of `qml.load`
   (#502).
 
+### Documentation
+- The documentation site (MkDocs Material) is published at the Pages root,
+  with the rustdoc of every crate under `/rust/`. The old per-crate URLs
+  (`.../polypus/<crate>/`) redirect to `.../polypus/rust/<crate>/`, and the
+  `documentation` link of the `polypus` crate points at its new rustdoc home.
+
 ## [0.8.0] - 2026-10-30
 
 ### Upgrading from 0.7

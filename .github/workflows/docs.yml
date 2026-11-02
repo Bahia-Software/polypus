@@ -1,27 +1,50 @@
 name: Docs
 
-# Build the rustdoc for the workspace crates and publish it to GitHub Pages.
-# Docs are no longer committed under docs/ — they are generated here on every
-# push to main and deployed as a Pages artifact.
+# Build the documentation site (MkDocs) and the rustdoc of the workspace
+# crates, and publish them to GitHub Pages: the site at the root, rustdoc under
+# /rust/. Nothing is committed; the site is generated here and deployed as a
+# Pages artifact. Pull requests run the build only, without deploying.
 on:
   push:
     branches: [main]
     paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
+      - "python/polypus/**"
+      - "tutorials/**"
       - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
+      - "Cargo.*"
+      - "tests/docs/**"
+      - "scripts/docs/**"
+      - "assets/**"
+      - "CHANGELOG.md"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
+      - "python/polypus/**"
+      - "tutorials/**"
+      - "crates/**"
+      - "Cargo.*"
+      - "tests/docs/**"
+      - "scripts/docs/**"
+      - "assets/**"
+      - "CHANGELOG.md"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
-# Least-privilege token plus the OIDC/pages scopes deploy-pages needs.
+# Read-only by default. Only the deploy job gets the OIDC/pages scopes that
+# deploy-pages needs; the build job executes PR code and holds no secret.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
-# Serialize Pages deploys; don't cancel an in-flight publish.
+# Serialize Pages deploys; don't cancel an in-flight publish. Pull request
+# builds get their own group so they can never displace a queued deploy.
 concurrency:
-  group: pages
+  group: pages-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.number) || 'deploy' }}
   cancel-in-progress: false
 
 env:
@@ -29,7 +52,7 @@ env:
 
 jobs:
   build:
-    name: build rustdoc
+    name: build site and rustdoc
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -39,6 +62,13 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
+      # Hook tests first, so a broken hook fails fast; then the strict site build.
+      - name: Install docs dependencies
+        run: pip install -r requirements-docs.txt "pytest>=8.0"
+      - name: Test the docs hooks and scripts
+        run: pytest tests/docs
+      - name: Build site
+        run: mkdocs build --strict -d site
       # The toolchain rust-toolchain.toml pins, with its components.
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
@@ -50,32 +80,25 @@ jobs:
         run: cargo doc --locked --no-deps --workspace
         env:
           RUSTDOCFLAGS: "-D warnings"
-      # Redirect the Pages root to the `polypus` crate; its sidebar lists the
-      # other workspace crates.
-      - name: Write redirect index
+      # rustdoc goes under /rust/; the old per-crate URLs at the root redirect
+      # there.
+      - name: Add rustdoc to the site
         run: |
-          cat > target/doc/index.html <<'EOF'
-          <!DOCTYPE html>
-          <html>
-            <head>
-              <meta http-equiv="refresh" content="0; url=polypus/index.html" />
-              <title>Redirecting to Rust Docs...</title>
-            </head>
-            <body>
-              <p>If you are not redirected automatically, <a href="polypus/index.html">click here</a>.</p>
-            </body>
-          </html>
-          EOF
+          cp -r target/doc site/rust
+          python scripts/docs/write_legacy_redirects.py site
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: target/doc
+          path: site
 
   deploy:
     name: deploy to Pages
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
