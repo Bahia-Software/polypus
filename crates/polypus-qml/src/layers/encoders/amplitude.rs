@@ -21,7 +21,7 @@
 use polypus_circuit::{Fixed, GateInstruction, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
-use crate::model::{LayerAllocation, LayerContext, LayerOps};
+use crate::model::{InputTrace, LayerAllocation, LayerContext, LayerOps};
 
 /// Amplitude encoding via multiplexed `Ry` state preparation (Möttönen).
 ///
@@ -54,12 +54,16 @@ impl LayerOps for AmplitudeEncoder {
         })
     }
 
-    fn emit(
+    fn emit_traced(
         &self,
         qc: &mut ParameterizedCircuit,
         alloc: &LayerAllocation,
         x: &[f64],
+        trace: &mut InputTrace,
     ) -> Result<(), QmlError> {
+        // The angles are a normalized, non-linear function of the whole sample
+        // with no derivative the shift rule can follow.
+        trace.opaque("amplitude");
         let norm: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt();
         if norm == 0.0 {
             return Err(QmlError::ZeroNormSample);
@@ -333,5 +337,18 @@ mod tests {
         let out = walsh_hadamard_transform(&[3.0, 1.0]);
         assert!((out[0] - 2.0).abs() < 1e-12); // (3 + 1)/2
         assert!((out[1] - 1.0).abs() < 1e-12); // (3 - 1)/2
+    }
+
+    #[test]
+    fn trace_names_the_encoder_opaque_and_records_no_gate() {
+        let enc = AmplitudeEncoder;
+        let mut c = ctx(2, 4);
+        let alloc = enc.plan(&mut c).unwrap();
+        let mut qc = ParameterizedCircuit::new(2);
+        let mut trace = InputTrace::default();
+        enc.emit_traced(&mut qc, &alloc, &[0.1, 0.2, 0.3, 0.4], &mut trace)
+            .unwrap();
+        assert!(trace.gates.is_empty());
+        assert_eq!(trace.opaque, vec!["amplitude"]);
     }
 }

@@ -64,7 +64,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           cat > mirror/requirements.txt <<EOF
-          polypus-quantum==${VERSION}
+          polypus-quantum[torch]==${VERSION}
           jupyterlab
           matplotlib
           numpy
@@ -84,6 +84,9 @@ jobs:
           nbformat==5.11.1
           ipykernel==7.4.0
           EOF
+          # The CPU build of PyTorch, which the [torch] extra then accepts, so
+          # the runner does not download the CUDA one for 07d and the demo.
+          pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
           pip install -c "$RUNNER_TEMP/constraints.txt" -r mirror/requirements.txt nbconvert nbclient nbformat ipykernel
           find mirror -name '*.ipynb' -print0 | while IFS= read -r -d '' nb; do
             echo "Executing $nb"

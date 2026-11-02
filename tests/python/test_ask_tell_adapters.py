@@ -154,7 +154,11 @@ def test_the_extras_ask_for_the_versions_ci_tests():
             floor = re.search(r">=\s*([\w.]+)", requirement)
             floors[extra.group(1)] = (name, floor and floor.group(1))
     assert sorted(pins) == ["cma", "nevergrad", "optuna"], pins
-    assert floors == {name: (name, pin) for name, pin in pins.items()}
+    # The `torch` extra is polypus.torch's (test_torch_import.py checks it).
+    assert sorted(floors) == ["cma", "nevergrad", "optuna", "torch"], floors
+    assert {extra: floors[extra] for extra in pins} == {
+        name: (name, pin) for name, pin in pins.items()
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

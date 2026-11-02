@@ -15,12 +15,14 @@
 //!    global `θ` index space by advancing [`LayerContext::param_cursor`], and
 //!    records the [`LayerAllocation`] — the single source of truth for its `θ`
 //!    range and the qubits it works on.
-//! 2. [`emit`](LayerOps::emit) runs during `template_for(x)`. It appends gates
-//!    to the circuit using the allocation recorded in `plan`, never
-//!    recomputing it — so the two passes cannot diverge by construction.
+//! 2. [`emit_traced`](LayerOps::emit_traced) runs during `template_for(x)`. It
+//!    appends gates to the circuit using the allocation recorded in `plan`,
+//!    never recomputing it — so the two passes cannot diverge by construction.
+//!    An encoder also records which gates read `x`, and how, in an
+//!    [`InputTrace`]: side information that changes no gate.
 //!
-//! **Hard rule for every `emit` (design doc §5.3, ENGINEERING §9):** gates are
-//! appended *exclusively* through
+//! **Hard rule for every [`emit_traced`](LayerOps::emit_traced) (design doc
+//! §5.3, ENGINEERING §9):** gates are appended *exclusively* through
 //! [`try_push`](polypus_circuit::ParameterizedCircuit::try_push), propagating
 //! its `Result` with `?` into [`QmlError::Circuit`](crate::QmlError). The
 //! fluent builder methods (`.ry(..)`, `.cx(..)`, …) `panic!` on any
@@ -33,11 +35,12 @@ use std::ops::Range;
 use polypus_circuit::{ConcreteCircuit, GateInstruction, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
+use crate::jacobian::{ExpectationJacobian, JacobianWrt};
 use crate::layers::{
     AmplitudeEncoder, AngleEncoder, BasisEncoder, ConvBlock, ConvLayer, HardwareEfficientAnsatz,
     IqpEncoder, Layer, PoolBlock, PoolLayer, RotationAxis,
 };
-use crate::observables::{Pauli, ResolvedObservable, ResolvedPauliString};
+use crate::observables::{BitstringWeight, Pauli, ResolvedObservable, ResolvedPauliString};
 use crate::readout::{Decision, Readout, ResolvedReadout};
 
 /// The accumulator threaded through a model's layers, in order, during
@@ -60,8 +63,9 @@ pub(crate) struct LayerContext {
     pub(crate) layers_planned: usize,
 }
 
-/// What a layer records in `plan` and consumes in `emit`: the half-open range
-/// of global `θ` indices it owns, and a snapshot of the qubits it operates on.
+/// What a layer records in `plan` and consumes in `emit_traced`: the half-open
+/// range of global `θ` indices it owns, and a snapshot of the qubits it
+/// operates on.
 #[derive(Debug, Clone)]
 pub(crate) struct LayerAllocation {
     /// The layer's slice of the global parameter space, `start..end`. Empty
@@ -80,13 +84,72 @@ pub(crate) trait LayerOps {
     fn plan(&self, ctx: &mut LayerContext) -> Result<LayerAllocation, ValidationError>;
 
     /// Append this layer's gates to `qc` using the recorded `alloc` and the
-    /// sample `x`. Must use only `try_push` (see the module docs).
+    /// sample `x`, and record in `trace` how their angles depend on `x`. Must
+    /// use only `try_push` (see the module docs). A layer that reads `x` must
+    /// record every gate it reads it through, or name itself as
+    /// [`opaque`](InputTrace::opaque): an unrecorded gate would get a zero
+    /// input derivative instead of an error. The trace never changes a gate.
+    fn emit_traced(
+        &self,
+        qc: &mut ParameterizedCircuit,
+        alloc: &LayerAllocation,
+        x: &[f64],
+        trace: &mut InputTrace,
+    ) -> Result<(), QmlError>;
+
+    /// [`emit_traced`](Self::emit_traced) with the trace discarded: what the
+    /// layers' own unit tests call. Production code goes through
+    /// [`CompiledModel::traced_template_for`].
+    #[cfg(test)]
     fn emit(
         &self,
         qc: &mut ParameterizedCircuit,
         alloc: &LayerAllocation,
         x: &[f64],
-    ) -> Result<(), QmlError>;
+    ) -> Result<(), QmlError> {
+        self.emit_traced(qc, alloc, x, &mut InputTrace::default())
+    }
+}
+
+/// How a template's angles depend on its sample `x`, recorded by the encoders
+/// while they emit: what the Jacobian with respect to the inputs differentiates
+/// through (see [`ExpectationJacobian`](crate::ExpectationJacobian)).
+///
+/// Side information only: recording it changes no gate, so a template built with
+/// or without a trace is the same circuit.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct InputTrace {
+    /// The gates whose angle is a differentiable function of `x`, in gate order.
+    pub(crate) gates: Vec<InputGate>,
+    /// The encoders that read `x` through angles with no derivative (amplitude
+    /// and basis encoding), in layer order.
+    pub(crate) opaque: Vec<&'static str>,
+}
+
+/// One gate whose angle reads the sample.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InputGate {
+    /// The gate's position in the template's gate list.
+    pub(crate) position: usize,
+    /// `(f, ∂angle/∂x_f)` for every feature `f` the angle reads, the factors of
+    /// the chain rule: `1` for an angle `x_f`, `x_g` for an angle `x_f·x_g`.
+    pub(crate) features: Vec<(usize, f64)>,
+}
+
+impl InputTrace {
+    /// Record that the next gate pushed onto `qc` has an angle whose partial
+    /// derivatives are `features` (see [`InputGate::features`]).
+    pub(crate) fn next_gate(&mut self, qc: &ParameterizedCircuit, features: Vec<(usize, f64)>) {
+        self.gates.push(InputGate {
+            position: qc.gates().len(),
+            features,
+        });
+    }
+
+    /// Record that `encoder` reads `x` through angles with no derivative.
+    pub(crate) fn opaque(&mut self, encoder: &'static str) {
+        self.opaque.push(encoder);
+    }
 }
 
 /// A quantum model under construction: an ordered list of layers over a fixed
@@ -439,6 +502,17 @@ impl CompiledModel {
     /// Fails with [`QmlError::FeatureCountMismatch`] if `x.len()` differs from
     /// [`num_features`](Self::num_features).
     pub fn template_for(&self, x: &[f64]) -> Result<ParameterizedCircuit, QmlError> {
+        Ok(self.traced_template_for(x)?.0)
+    }
+
+    /// [`template_for`](Self::template_for) together with how its angles
+    /// depend on `x` (crate-internal: consumed by
+    /// [`ExpectationJacobian`](crate::ExpectationJacobian)). The circuit is the
+    /// one `template_for` returns, gate for gate.
+    pub(crate) fn traced_template_for(
+        &self,
+        x: &[f64],
+    ) -> Result<(ParameterizedCircuit, InputTrace), QmlError> {
         if x.len() != self.num_features {
             return Err(QmlError::FeatureCountMismatch {
                 expected: self.num_features,
@@ -447,8 +521,9 @@ impl CompiledModel {
         }
 
         let mut qc = ParameterizedCircuit::new(self.spec.num_qubits);
+        let mut trace = InputTrace::default();
         for (layer, alloc) in self.spec.layers.iter().zip(self.allocations.iter()) {
-            layer.emit(&mut qc, alloc, x)?;
+            layer.emit_traced(&mut qc, alloc, x, &mut trace)?;
         }
         // Rotate each non-`Z` qubit into the computational basis before the
         // terminal measurement (design doc §7.2): `H` measures `X`; `Sdg` then
@@ -468,7 +543,7 @@ impl CompiledModel {
             }
         }
         qc.try_push(GateInstruction::MeasureAll)?;
-        Ok(qc)
+        Ok((qc, trace))
     }
 
     /// Bind trainable parameters `theta` for sample `x`, producing a concrete
@@ -506,6 +581,72 @@ impl CompiledModel {
     ) -> Result<f64, QmlError> {
         self.resolved_readout()
             .predict_from_probabilities(probabilities)
+    }
+
+    /// The number of readout observables: one per class for an `Argmax`
+    /// readout, and the width of
+    /// [`expectations_from_counts`](Self::expectations_from_counts).
+    pub fn num_observables(&self) -> usize {
+        self.resolved_readout.observables().len()
+    }
+
+    /// The expectation `[⟨O₀⟩, …, ⟨O_{k−1}⟩]` of **every** readout observable
+    /// from one sample's `counts`, in declaration order, whatever the
+    /// [`Decision`](crate::Decision): the loss-free values the
+    /// [`ExpectationJacobian`](crate::ExpectationJacobian) differentiates. From
+    /// finite-shot counts each is an unbiased estimate.
+    pub fn expectations_from_counts(
+        &self,
+        counts: &HashMap<String, u64>,
+    ) -> Result<Vec<f64>, QmlError> {
+        self.expectations_from_weighted(counts)
+    }
+
+    /// The exact-mode mirror of
+    /// [`expectations_from_counts`](Self::expectations_from_counts), from one
+    /// sample's exact basis-state `probabilities`.
+    pub fn expectations_from_probabilities(
+        &self,
+        probabilities: &HashMap<String, f64>,
+    ) -> Result<Vec<f64>, QmlError> {
+        self.expectations_from_weighted(probabilities)
+    }
+
+    /// The single implementation behind both readers, generic over the weight
+    /// type via [`BitstringWeight`].
+    pub(crate) fn expectations_from_weighted<W: BitstringWeight>(
+        &self,
+        weights: &HashMap<String, W>,
+    ) -> Result<Vec<f64>, QmlError> {
+        self.resolved_readout
+            .observables()
+            .iter()
+            .map(|observable| W::observable_expectation(observable, weights))
+            .collect()
+    }
+
+    /// The Jacobian of every readout observable's expectation over `samples`
+    /// with respect to `wrt`: see [`ExpectationJacobian`].
+    ///
+    /// Builds one untied template per sample up front, so every check on the
+    /// samples and on the model runs here, before any circuit exists:
+    ///
+    /// - a sample of the wrong width is [`QmlError::FeatureCountMismatch`], and
+    ///   an amplitude or basis encoder rejects its samples as
+    ///   [`template_for`](Self::template_for) does;
+    /// - a model with an instruction the shift rule cannot differentiate is
+    ///   [`QmlError::NoExactGradient`], whatever `wrt`;
+    /// - with `wrt` [`Inputs`](JacobianWrt::Inputs) or
+    ///   [`Both`](JacobianWrt::Both), an amplitude or basis encoder, whose
+    ///   angles have no derivative in `x`, is [`QmlError::NoInputGradient`];
+    /// - samples whose gates read their parameters or features differently are
+    ///   [`QmlError::NoExactGradient`]: one structure serves every sample.
+    pub fn jacobian<S: AsRef<[f64]>>(
+        &self,
+        samples: &[S],
+        wrt: JacobianWrt,
+    ) -> Result<ExpectationJacobian, QmlError> {
+        ExpectationJacobian::new(self, samples, wrt)
     }
 }
 
@@ -1128,6 +1269,95 @@ mod tests {
             model.predict_from_probabilities(&probabilities(&[("01", 1.0)])),
             Ok(-1.0)
         );
+    }
+
+    #[test]
+    fn expectations_read_every_observable_whatever_the_decision() {
+        // An argmax readout over ⟨Z₀⟩ and ⟨Z₁⟩: both are returned, in order,
+        // where `predict` would only return the winning class.
+        let model = compile_with_readout(readout_of(
+            vec![single(0, Pauli::Z), single(1, Pauli::Z)],
+            Decision::Argmax,
+        ))
+        .unwrap();
+        assert_eq!(model.num_observables(), 2);
+        // "01" (little-endian): qubit 0 is 1, qubit 1 is 0.
+        assert_eq!(
+            model.expectations_from_counts(&counts(&[("01", 3), ("00", 1)])),
+            Ok(vec![-0.5, 1.0])
+        );
+        assert_eq!(
+            model.expectations_from_probabilities(&probabilities(&[("01", 0.75), ("00", 0.25)])),
+            Ok(vec![-0.5, 1.0])
+        );
+        assert_eq!(
+            model.expectations_from_counts(&HashMap::new()),
+            Err(QmlError::EmptyCounts)
+        );
+    }
+
+    #[test]
+    fn the_traced_template_is_the_template_and_records_every_encoder() {
+        // Angle encoder, ansatz, an IQP re-upload and another ansatz: the trace
+        // changes no gate, records each encoder at its absolute position, and
+        // nothing for the trainable layers.
+        let compiled = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Rx)
+            .hardware_efficient(1)
+            .iqp_encoder()
+            .hardware_efficient(1)
+            .readout(z0_readout())
+            .compile(2)
+            .unwrap();
+        let x = [0.3, 0.7];
+        let (traced, trace) = compiled.traced_template_for(&x).unwrap();
+        assert_eq!(traced, compiled.template_for(&x).unwrap());
+        // Rx×2 (0, 1), then the default ansatz — Ry and Rz on both qubits, Cx,
+        // and the final Ry/Rz layer: 9 gates (2..11) — then IQP: H×2 (11, 12),
+        // Rz×2 (13, 14), Rzz (15).
+        let recorded: Vec<(usize, Vec<(usize, f64)>)> = trace
+            .gates
+            .iter()
+            .map(|g| (g.position, g.features.clone()))
+            .collect();
+        assert_eq!(
+            recorded,
+            vec![
+                (0, vec![(0, 1.0)]),
+                (1, vec![(1, 1.0)]),
+                (13, vec![(0, 1.0)]),
+                (14, vec![(1, 1.0)]),
+                (15, vec![(0, x[1]), (1, x[0])]),
+            ]
+        );
+        for gate in &trace.gates {
+            assert!(
+                matches!(
+                    traced.gates()[gate.position],
+                    GateInstruction::Rx { .. }
+                        | GateInstruction::Rz { .. }
+                        | GateInstruction::Rzz { .. }
+                ),
+                "position {} is not an encoder rotation",
+                gate.position
+            );
+        }
+        assert!(trace.opaque.is_empty());
+    }
+
+    #[test]
+    fn a_basis_encoder_is_traced_as_opaque_wherever_it_sits() {
+        let compiled = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .basis_encoder()
+            .readout(z0_readout())
+            .compile(2)
+            .unwrap();
+        let (traced, trace) = compiled.traced_template_for(&[1.0, 0.0]).unwrap();
+        assert_eq!(traced, compiled.template_for(&[1.0, 0.0]).unwrap());
+        assert_eq!(trace.gates.len(), 2);
+        assert_eq!(trace.opaque, vec!["basis"]);
     }
 
     fn counts(pairs: &[(&str, u64)]) -> HashMap<String, u64> {

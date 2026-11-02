@@ -39,7 +39,7 @@ Polypus is a quantum computing library with a **Rust core** and **Python binding
 |---|---|
 | **Multi-QPU execution** | Shots and populations are split across `n_qpus`; results come back per QPU and merged. |
 | **Variational training** | Differential Evolution (classic, SHADE or L-SHADE), Particle Swarm, Quantum Natural Gradient, CMA-ES, Adam (or momentum), SPSA and Rotosolve behind one `train()` call, or an ask/tell optimizer from Optuna, Nevergrad, pycma or your own code through `polypus.External`. A run can start from an earlier result (`initial_point`), re-evaluate its best candidates in a final batch (`final_shots`) and report or stop each iteration (`callback`). |
-| **Quantum machine learning** | Your own Qiskit circuits (`qml.train`, `qml.predict`), or native models (`qml.Model`) built from encoders, ansatz layers (QCNN included) and Pauli readouts, with exact gradients, exact simulation, minibatches and save/load. |
+| **Quantum machine learning** | Your own Qiskit circuits (`qml.train`, `qml.predict`), or native models (`qml.Model`) built from encoders, ansatz layers (QCNN included) and Pauli readouts, with exact gradients, exact simulation, minibatches and save/load. `qml.expval` and `qml.jacobian` serve a training loop of your own, and `polypus.torch.QuantumLayer` puts a native model inside a PyTorch network. |
 | **Native cost observables** | QUBO and Ising costs are evaluated in Rust, without a Python call per bitstring. |
 | **Rust circuit engine** | `polypus.Circuit` imports and exports OpenQASM 2 and 3, exports QIR, composes circuits and draws itself as text or SVG, with no plotting library. Parameter binding runs without the GIL, about 3x faster than Qiskit's `assign_parameters`. |
 | **Shor's algorithm** | `polypus.shor.factor` factors an integer end to end on any backend, from the classical shortcuts to Beauregard's order-finding circuit, and reports the share of shots on the order's peaks, to compare with an ideal circuit and with random outcomes. The QFT and the order-finding circuit are templates in `polypus.circuits.templates`, built in Rust. |
@@ -57,6 +57,7 @@ The package imports as `polypus`; pip installs Qiskit 2 and Qiskit Aer 0.17 with
 | To use | Install |
 |---|---|
 | Local simulators (Aer and native) | `pip install polypus-quantum` |
+| A native QML model as a PyTorch layer (`polypus.torch`) | `pip install "polypus-quantum[torch]"` |
 | Optuna, Nevergrad or pycma through `polypus.External` | `pip install "polypus-quantum[optuna]"` (`[nevergrad]`, `[cma]`) |
 | CUNQA | Polypus, plus [CUNQA](https://github.com/CESGA-Quantum-Spain/cunqa) `>=2.4,<4` on the cluster. **CUNQA 2.3 is not supported** (it names the `qraise` argument `cores`, not `cores_per_qpu`) |
 | QMIO | Polypus built from source with the `qmio` feature: `bash install.sh --qmio` |
