@@ -53,7 +53,7 @@
 //! and the cadence adapts to the hook's own measured cost, so even a hook that
 //! turns out to take milliseconds cannot eat the run.
 
-#![deny(clippy::all)]
+#![warn(missing_docs)]
 
 /// 64-bit complex amplitude type used throughout the simulator.
 pub type C64 = num_complex::Complex<f64>;

@@ -71,6 +71,8 @@ pub(crate) fn apply_1q(data: &mut [C64], n: usize, t: usize, m: &[[C64; 2]; 2], 
         (0..half).into_par_iter().for_each(|g| {
             let i0 = (g & low) | ((g & !low) << 1);
             let i1 = i0 | bit;
+            // The `;` after the block makes it a statement, so this `allow` can apply.
+            #[allow(unsafe_code)] // authorised `unsafe` site: docs/ENGINEERING.md §5
             // SAFETY: g ↦ {i0, i1} is injective and the image pairs are pairwise
             // disjoint (every amplitude lies in exactly one pair), so no two
             // iterations alias the same index — no data race. Indices are < 2^n
@@ -82,7 +84,7 @@ pub(crate) fn apply_1q(data: &mut [C64], n: usize, t: usize, m: &[[C64; 2]; 2], 
                 let (na, nb) = combine_1q(m, a, b);
                 *p.add(i0) = na;
                 *p.add(i1) = nb;
-            }
+            };
         });
         return;
     }
@@ -306,6 +308,8 @@ pub(crate) fn apply_controlled_1q(
             // the control-set pair.
             let idx = two_qubit_indices(g, t, c);
             let (i0, i1) = (idx[2], idx[3]);
+            // The `;` after the block makes it a statement, so this `allow` can apply.
+            #[allow(unsafe_code)] // authorised `unsafe` site: docs/ENGINEERING.md §5
             // SAFETY: inserting the two fixed bits maps `[0, 2^(n-2))`
             // injectively onto the indices with bit `c` set and bit `t` clear,
             // so g ↦ i0 is injective and i1 = i0 | (1 << t) is the unique partner
@@ -321,7 +325,7 @@ pub(crate) fn apply_controlled_1q(
                 let (na, nb) = combine_1q(m, a, b);
                 *p.add(i0) = na;
                 *p.add(i1) = nb;
-            }
+            };
         });
         return;
     }
@@ -371,6 +375,8 @@ pub(crate) fn apply_2q(
         let base = data.as_mut_ptr() as usize;
         (0..quarter).into_par_iter().for_each(|g| {
             let idx = two_qubit_indices(g, q0, q1);
+            // The `;` after the block makes it a statement, so this `allow` can apply.
+            #[allow(unsafe_code)] // authorised `unsafe` site: docs/ENGINEERING.md §5
             // SAFETY: across g the index quadruples are pairwise disjoint (each
             // amplitude belongs to exactly one quadruple), so no two iterations
             // alias. All indices are < 2^n = data.len().
@@ -385,7 +391,7 @@ pub(crate) fn apply_2q(
                 for (row, &target) in m.iter().zip(idx.iter()) {
                     *p.add(target) = row[0] * v[0] + row[1] * v[1] + row[2] * v[2] + row[3] * v[3];
                 }
-            }
+            };
         });
         return;
     }

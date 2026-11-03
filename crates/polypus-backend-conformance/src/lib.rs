@@ -60,6 +60,8 @@
 //! report.assert_conformant(); // panics with the full report if any check failed
 //! ```
 
+#![warn(missing_docs)]
+
 use std::sync::Arc;
 use std::time::Duration;
 

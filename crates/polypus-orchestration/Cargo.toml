@@ -16,3 +16,6 @@ description = "Orchestration layer for Polypus: the pure, Python-free policy mid
 polypus-infrastructure = { workspace = true }
 polypus-optimizers = { workspace = true }
 log = { workspace = true }
+
+[lints]
+workspace = true

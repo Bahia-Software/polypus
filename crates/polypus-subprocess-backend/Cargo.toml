@@ -25,3 +25,6 @@ log = { workspace = true }
 # Tests build native circuits (to serialise to QASM2) and drive the shipped planners.
 [dev-dependencies]
 polypus-circuit = { workspace = true }
+
+[lints]
+workspace = true

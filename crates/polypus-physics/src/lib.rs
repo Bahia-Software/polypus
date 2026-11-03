@@ -71,8 +71,6 @@
 //! assert_eq!(h.coefficient_norm(), 1.1);
 //! ```
 
-#![deny(clippy::all)]
-
 pub mod constants;
 pub mod error;
 pub mod hamiltonians;

@@ -74,3 +74,6 @@ uuid = { workspace = true }
 # (crates/polypus/src/bindings/calibration.rs); the actual parallel kernels
 # live in polypus-sim/polypus-infrastructure, which depend on it themselves.
 rayon = { workspace = true }
+
+[lints]
+workspace = true

@@ -25,6 +25,8 @@
 //! See `docs/backends.md` for the "how to write your own backend" guide and the
 //! stability commitment.
 
+#![warn(missing_docs)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;

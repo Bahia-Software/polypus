@@ -46,6 +46,8 @@
 //! [`QuantumBackend::wants_cancel_watcher`], which this backend enables) when the
 //! run's `CancelToken` flips mid-wave.
 
+#![warn(missing_docs)]
+
 pub mod protocol;
 
 use std::error::Error;
@@ -392,6 +394,8 @@ impl Worker {
                 // optimisation. The body itself is safe: it calls `nix`'s audited
                 // `set_pdeathsig` and `getppid` wrappers, not hand-written FFI.
                 //
+                // The `;` after the block makes it a statement, so this `allow` can apply.
+                #[allow(unsafe_code)] // signed-off exception: docs/ENGINEERING.md §5
                 // SAFETY: `pre_exec` runs in the forked child before `exec`. We call
                 // only the async-signal-safe `prctl(2)` and `getppid(2)` via `nix`
                 // (the closure captures just a `Copy` pid); no alloc, no locks, no
@@ -414,7 +418,7 @@ impl Worker {
                         }
                         Ok(())
                     });
-                }
+                };
             }
             #[cfg(not(target_os = "linux"))]
             log::warn!(

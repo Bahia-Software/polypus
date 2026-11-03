@@ -34,3 +34,6 @@ default = []
 serde     = ["dep:serde"]
 csv-export = ["dep:csv", "dep:serde"]
 plotters = ["dep:plotters"]
+
+[lints]
+workspace = true
