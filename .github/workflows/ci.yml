@@ -602,6 +602,10 @@ jobs:
       # 01_first_circuit and the demo's figures), not by the package itself.
       - name: Install notebook execution dependencies
         run: pip install nbconvert ipykernel matplotlib
+      # PyTorch for 07d and the demo's hybrid network (polypus.torch); the
+      # same CPU pin as the layer tests, which test_torch_import.py checks.
+      - name: Install PyTorch (CPU)
+        run: pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
       - name: Register the python3 Jupyter kernel
         run: python -m ipykernel install --user --name python3 --display-name "Python 3"
       - name: Execute every tutorial notebook

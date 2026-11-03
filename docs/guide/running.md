@@ -82,6 +82,10 @@ result = polypus.run_quantum_circuit(
 
 A circuit without measurements is read out on all its qubits by both backends.
 
+## Tracing a circuit run
+
+`run_quantum_circuit` takes the same keyword-only `trace` argument as `train`, a path (`str` or `os.PathLike`) of a new file for the run's call trace (contract C-12), and follows `POLYPUS_CALL_TRACE` and `POLYPUS_CALL_TRACE_MAX_MB` as `train` does, its file in the variable's directory being named after the run's effective id, `RunResult.id`; see [Tracing the calls of a run](training.md#tracing-the-calls-of-a-run). The header line has `"flow": "run_circuit"`, `null` as `method` and `dims`, the run's `id` and its effective `seed` (`null` on `"qmio"`). The run is one `batch` line, with `"op": "execute_replicas"`, `n` equal to 1 and the run's `shots`, written after one `wave` line per call to the backend. With `n_qpus=1` that is one `run_circuits` call with every shot. With `n_qpus > 1` the shots are split into one replica per QPU, run by `run_shots_distributed` calls, and each `wave` line lists in `replicas` the shots of each replica it ran; over all the waves they add up to `shots`.
+
 ## Errors
 
 All Polypus exceptions derive from `polypus.PolypusError`.

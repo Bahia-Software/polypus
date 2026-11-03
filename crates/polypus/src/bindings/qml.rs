@@ -1240,6 +1240,7 @@ impl Model {
             initial_point,
             final_shots,
             observer: training_observer(callback, &errors, &effective_id),
+            trace: None,
         };
         // GIL released for the run, as in `train`; the interrupt token keeps
         // Ctrl+C prompt between waves.
@@ -1561,8 +1562,14 @@ impl TrainedModel {
                 let backend = Infrastructure::create_backend(&config)
                     .map_err(InfrastructureError::Backend)?;
                 let scheduler = scheduler_over(backend, config.run_params())?;
-                let out = scheduler
-                    .run_cancellable(RunCircuitFlow { circuits, shots }, &interruptible_token());
+                let out = scheduler.run_cancellable(
+                    RunCircuitFlow {
+                        circuits,
+                        shots,
+                        trace: None,
+                    },
+                    &interruptible_token(),
+                );
                 scheduler.close();
                 out
             })
@@ -1948,6 +1955,7 @@ impl BlockRunner {
                     RunCircuitFlow {
                         circuits,
                         shots: *shots,
+                        trace: None,
                     },
                     cancel,
                 )

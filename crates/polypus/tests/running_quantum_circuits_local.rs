@@ -126,6 +126,7 @@ fn distributed_replicas(shots: u32, n_qpus: u32, id: &str) -> Vec<HashMap<String
         .run(RunCircuitFlow {
             circuits: vec![native_bell_circuit()],
             shots,
+            trace: None,
         })
         .expect("distribute-by-shots must succeed on the native backend");
     // `RunCircuitFlow` hands back one map per replica, unmerged (issue #211).
@@ -204,6 +205,7 @@ fn distribute_rejects_empty_circuits() {
         .run(RunCircuitFlow {
             circuits: vec![],
             shots: 100,
+            trace: None,
         })
         .expect_err("zero circuits must be a typed error, not a silent no-op");
     assert!(
@@ -237,6 +239,7 @@ fn distribute_rejects_multiple_circuits() {
         .run(RunCircuitFlow {
             circuits: vec![native_bell_circuit(), native_bell_circuit()],
             shots: 100,
+            trace: None,
         })
         .expect_err("more than one circuit must be a typed error, not silently truncated");
     assert!(

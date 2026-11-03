@@ -53,6 +53,11 @@ pub struct TrainProgress<'a> {
 ///
 /// `Send`, so that the [`TrainFlow`](crate::TrainFlow) that carries one can be
 /// moved to the thread that runs it.
+///
+/// [`TracingObserver`](crate::trace::TracingObserver) forwards every method of
+/// this trait, so that a traced run makes the same calls as an untraced one: a
+/// method added here must be forwarded there too, with its test, in the same
+/// change (contract C-12(c)).
 pub trait TrainObserver: Send {
     /// Look at the end of an iteration, and say whether the run goes on.
     fn observe(&mut self, progress: &TrainProgress<'_>) -> ControlFlow<()>;
