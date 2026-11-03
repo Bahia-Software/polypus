@@ -169,13 +169,18 @@ fn molecular_hamiltonian(r: f64) -> Result<FermionHamiltonian, PhysicsError> {
     );
     let c = [[plus, minus], [plus, -minus]];
 
+    let mut ao_one = [[0.0; 2]; 2];
+    for (m, am) in ao.iter().enumerate() {
+        for (n, an) in ao.iter().enumerate() {
+            ao_one[m][n] = kinetic(am, an) + nuclear_attraction(am, an, &nuclei);
+        }
+    }
     let mut one_body = vec![0.0; 4];
     for p in 0..2 {
         for q in 0..2 {
-            for (m, am) in ao.iter().enumerate() {
-                for (n, an) in ao.iter().enumerate() {
-                    one_body[p * 2 + q] +=
-                        c[m][p] * c[n][q] * (kinetic(am, an) + nuclear_attraction(am, an, &nuclei));
+            for m in 0..2 {
+                for n in 0..2 {
+                    one_body[p * 2 + q] += c[m][p] * c[n][q] * ao_one[m][n];
                 }
             }
         }

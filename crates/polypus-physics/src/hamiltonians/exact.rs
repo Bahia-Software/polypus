@@ -336,6 +336,7 @@ mod tests {
     use super::*;
     use crate::hamiltonians::pauli::{PauliAxis, PauliString, PauliTerm};
     use crate::hamiltonians::photon_polarization::photon_polarization_hamiltonian;
+    use crate::test_support::{assert_close, TestRng};
 
     fn sum(num_qubits: usize, terms: &[(f64, &str)]) -> PauliSum {
         PauliSum::new(
@@ -350,13 +351,6 @@ mod tests {
 
     fn rows(m: &DenseMatrix) -> Vec<Vec<f64>> {
         m.as_slice().chunks(m.dim()).map(<[f64]>::to_vec).collect()
-    }
-
-    fn assert_close(a: &[f64], b: &[f64], tol: f64) {
-        assert_eq!(a.len(), b.len(), "{a:?} vs {b:?}");
-        for (x, y) in a.iter().zip(b) {
-            assert!((x - y).abs() <= tol, "{a:?} vs {b:?}");
-        }
     }
 
     #[test]
@@ -520,15 +514,10 @@ mod tests {
 
     /// A deterministic real Pauli sum on `n` qubits: random strings with an
     /// even number of `Y` (an odd one has its last `Y` turned into `X`) and
-    /// coefficients in `[−0.5, 0.5)` (a small LCG, no dependency).
+    /// coefficients in `[−0.5, 0.5)`.
     fn random_real_sum(n: usize, num_terms: usize, seed: u64) -> PauliSum {
-        let mut state = seed;
-        let mut next = move || {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (state >> 11) as f64 / (1u64 << 53) as f64
-        };
+        let mut rng = TestRng::new(seed);
+        let mut next = move || rng.next_f64();
         let mut terms = Vec::with_capacity(num_terms);
         for _ in 0..num_terms {
             let mut ops: Vec<(usize, PauliAxis)> = (0..n)

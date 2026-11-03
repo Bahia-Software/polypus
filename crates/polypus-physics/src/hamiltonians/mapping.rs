@@ -146,14 +146,27 @@ impl FermionOperator {
     /// not Hermitian and has no real Pauli sum.
     pub fn to_qubits(&self, mapping: QubitMapping) -> Result<PauliSum, PhysicsError> {
         let n = self.num_modes();
+        // The 2n distinct ladder operators, built once: ladders[p][0] is a†_p,
+        // ladders[p][1] is a_p.
+        let ladders = (0..n)
+            .map(|p| {
+                Ok([
+                    mapping.ladder(p, Ladder::Create, n)?,
+                    mapping.ladder(p, Ladder::Annihilate, n)?,
+                ])
+            })
+            .collect::<Result<Vec<_>, PhysicsError>>()?;
         let mut accumulated: BTreeMap<PauliString, Complex> = BTreeMap::new();
         for term in self.terms() {
             let mut partial = vec![((term.coefficient, 0.0), PauliString::identity())];
             for &(mode, kind) in &term.ops {
-                let pieces = mapping.ladder(mode, kind, n)?;
+                let pieces = &ladders[mode][match kind {
+                    Ladder::Create => 0,
+                    Ladder::Annihilate => 1,
+                }];
                 let mut next = Vec::with_capacity(partial.len() * pieces.len());
                 for (coefficient, string) in &partial {
-                    for (piece_coefficient, piece) in &pieces {
+                    for (piece_coefficient, piece) in pieces {
                         let (phase, product) = string.mul(piece);
                         let c = complex_mul(
                             complex_mul(*coefficient, *piece_coefficient),

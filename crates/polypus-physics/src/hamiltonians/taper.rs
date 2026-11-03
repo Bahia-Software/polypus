@@ -160,6 +160,7 @@ mod tests {
     use super::*;
     use crate::hamiltonians::exact::DenseMatrix;
     use crate::hamiltonians::mapping::QubitMapping;
+    use crate::test_support::assert_close;
     use crate::test_support::symmetric_integrals;
 
     fn sum(num_qubits: usize, terms: &[(f64, &str)]) -> PauliSum {
@@ -207,13 +208,6 @@ mod tests {
             .unwrap()
             .eigenvalues()
             .unwrap()
-    }
-
-    fn assert_close(a: &[f64], b: &[f64], tol: f64) {
-        assert_eq!(a.len(), b.len(), "{a:?} vs {b:?}");
-        for (x, y) in a.iter().zip(b) {
-            assert!((x - y).abs() <= tol, "{a:?} vs {b:?}");
-        }
     }
 
     #[test]

@@ -23,6 +23,26 @@ use crate::error::PhysicsError;
 /// integrals are symmetrized; beyond it construction fails.
 pub const INTEGRAL_SYMMETRY_TOLERANCE: f64 = 1e-10;
 
+/// The 8 index permutations under which a real-orbital two-electron
+/// integral `(pq|rs)` is invariant: `p↔q`, `r↔s` and `(pq)↔(rs)`.
+pub(crate) fn chemist_permutations(
+    p: usize,
+    q: usize,
+    r: usize,
+    s: usize,
+) -> [(usize, usize, usize, usize); 8] {
+    [
+        (p, q, r, s),
+        (q, p, r, s),
+        (p, q, s, r),
+        (q, p, s, r),
+        (r, s, p, q),
+        (s, r, p, q),
+        (r, s, q, p),
+        (s, r, q, p),
+    ]
+}
+
 /// Kind of a fermionic ladder operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ladder {
@@ -234,19 +254,9 @@ impl FermionHamiltonian {
             for q in 0..k {
                 for r in 0..k {
                     for s in 0..k {
-                        // The 8 index permutations of a real-orbital (pq|rs),
-                        // summed in a canonical (sorted) order so every member
+                        // Summed in a canonical (sorted) order so every member
                         // of the group gets bit-identical averages.
-                        let mut group = [
-                            (p, q, r, s),
-                            (q, p, r, s),
-                            (p, q, s, r),
-                            (q, p, s, r),
-                            (r, s, p, q),
-                            (s, r, p, q),
-                            (r, s, q, p),
-                            (s, r, q, p),
-                        ];
+                        let mut group = chemist_permutations(p, q, r, s);
                         group.sort_unstable();
                         let own = two_body[idx(p, q, r, s)];
                         let mut total = 0.0;
@@ -367,6 +377,7 @@ impl FermionHamiltonian {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{assert_close, symmetric_integral_arrays};
     use Ladder::{Annihilate, Create};
 
     fn op(num_modes: usize, terms: Vec<(f64, Vec<(usize, Ladder)>)>) -> FermionOperator {
@@ -378,43 +389,6 @@ mod tests {
                 .collect(),
         )
         .unwrap()
-    }
-
-    /// Clean two-orbital integrals with all real-orbital symmetries and
-    /// H2-like magnitudes (σ = 0, σ* = 1), with a non-zero h_01 so that the
-    /// off-diagonal one-body path is exercised.
-    fn two_orbital_integrals() -> (Vec<f64>, Vec<f64>) {
-        let one = vec![-1.25, 0.05, 0.05, -0.48];
-        let mut two = vec![0.0; 16];
-        let idx = |p: usize, q: usize, r: usize, s: usize| ((p * 2 + q) * 2 + r) * 2 + s;
-        let mut set = |p, q, r, s, v| {
-            for (a, b, c, d) in [
-                (p, q, r, s),
-                (q, p, r, s),
-                (p, q, s, r),
-                (q, p, s, r),
-                (r, s, p, q),
-                (s, r, p, q),
-                (r, s, q, p),
-                (s, r, q, p),
-            ] {
-                two[idx(a, b, c, d)] = v;
-            }
-        };
-        set(0, 0, 0, 0, 0.6745);
-        set(1, 1, 1, 1, 0.6974);
-        set(0, 0, 1, 1, 0.6635);
-        set(0, 1, 0, 1, 0.1813);
-        set(0, 0, 0, 1, 0.02);
-        set(1, 1, 0, 1, -0.03);
-        (one, two)
-    }
-
-    fn assert_close(a: &[f64], b: &[f64], tol: f64) {
-        assert_eq!(a.len(), b.len(), "{a:?} vs {b:?}");
-        for (x, y) in a.iter().zip(b) {
-            assert!((x - y).abs() <= tol, "{a:?} vs {b:?}");
-        }
     }
 
     #[test]
@@ -497,7 +471,7 @@ mod tests {
     fn closed_shell_and_double_excitation_matrix_elements() {
         // Block order with K = 2: modes 0 = σ↑, 1 = σ*↑, 2 = σ↓, 3 = σ*↓.
         // ⟨σσ|H|σσ⟩ = E_nuc + 2 h_00 + (00|00) and ⟨σ*σ*|H|σσ⟩ = (01|01).
-        let (one, two) = two_orbital_integrals();
+        let (_, one, two) = symmetric_integral_arrays(2, 3);
         let ham = FermionHamiltonian::new(2, 0.7138, one, two).unwrap();
         let m = ham.to_fermion_operator().to_dense_real().unwrap();
         let hf = 0b0101;
@@ -509,7 +483,7 @@ mod tests {
 
     #[test]
     fn hamiltonian_is_hermitian_and_conserves_particles_and_spin() {
-        let (one, two) = two_orbital_integrals();
+        let (_, one, two) = symmetric_integral_arrays(2, 3);
         let ham = FermionHamiltonian::new(2, 0.7138, one, two).unwrap();
         let m = ham.to_fermion_operator().to_dense_real().unwrap();
         assert!(m.is_symmetric());
@@ -526,7 +500,7 @@ mod tests {
 
     #[test]
     fn small_asymmetry_is_symmetrized_exactly() {
-        let (one, two) = two_orbital_integrals();
+        let (_, one, two) = symmetric_integral_arrays(2, 3);
         let clean = FermionHamiltonian::new(2, 0.7, one.clone(), two.clone()).unwrap();
         let mut noisy_one = one;
         let mut noisy_two = two;
@@ -556,7 +530,7 @@ mod tests {
 
     #[test]
     fn broken_symmetry_beyond_tolerance_is_rejected() {
-        let (one, two) = two_orbital_integrals();
+        let (_, one, two) = symmetric_integral_arrays(2, 3);
         let mut bad_one = one.clone();
         bad_one[1] += 1e-9;
         assert!(matches!(

@@ -131,20 +131,31 @@ pub(crate) mod test_support {
         }
     }
 
-    /// Deterministic molecular integrals for `k` spatial orbitals with every
-    /// real-orbital symmetry and magnitudes of order 1 (a small LCG, no
-    /// dependency).
-    pub(crate) fn symmetric_integrals(
-        k: usize,
-        seed: u64,
-    ) -> crate::hamiltonians::FermionHamiltonian {
-        let mut state = seed;
-        let mut next = move || {
-            state = state
+    /// Deterministic pseudo-random numbers in `[0, 1)` for tests (a small
+    /// LCG, no dependency).
+    pub(crate) struct TestRng(u64);
+
+    impl TestRng {
+        pub(crate) fn new(seed: u64) -> Self {
+            TestRng(seed)
+        }
+
+        pub(crate) fn next_f64(&mut self) -> f64 {
+            self.0 = self
+                .0
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            ((state >> 11) as f64) / ((1u64 << 53) as f64) - 0.5
-        };
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    /// Deterministic molecular integrals for `k` spatial orbitals with every
+    /// real-orbital symmetry and magnitudes of order 1, as the raw
+    /// `(nuclear_repulsion, one_body, two_body)` arrays that
+    /// `FermionHamiltonian::new` takes.
+    pub(crate) fn symmetric_integral_arrays(k: usize, seed: u64) -> (f64, Vec<f64>, Vec<f64>) {
+        let mut rng = TestRng::new(seed);
+        let mut next = move || rng.next_f64() - 0.5;
         let mut one = vec![0.0; k * k];
         for p in 0..k {
             for q in p..k {
@@ -163,23 +174,33 @@ pub(crate) mod test_support {
                             continue;
                         }
                         let v = next();
-                        for (a, b, c, d) in [
-                            (p, q, r, s),
-                            (q, p, r, s),
-                            (p, q, s, r),
-                            (q, p, s, r),
-                            (r, s, p, q),
-                            (s, r, p, q),
-                            (r, s, q, p),
-                            (s, r, q, p),
-                        ] {
+                        for (a, b, c, d) in
+                            crate::hamiltonians::fermion::chemist_permutations(p, q, r, s)
+                        {
                             two[idx(a, b, c, d)] = v;
                         }
                     }
                 }
             }
         }
-        crate::hamiltonians::FermionHamiltonian::new(k, next(), one, two)
+        (next(), one, two)
+    }
+
+    /// [`symmetric_integral_arrays`] as a `FermionHamiltonian`.
+    pub(crate) fn symmetric_integrals(
+        k: usize,
+        seed: u64,
+    ) -> crate::hamiltonians::FermionHamiltonian {
+        let (nuclear_repulsion, one, two) = symmetric_integral_arrays(k, seed);
+        crate::hamiltonians::FermionHamiltonian::new(k, nuclear_repulsion, one, two)
             .expect("generated integrals are symmetric and finite")
+    }
+
+    /// Asserts two equally long slices agree element-wise within `tol`.
+    pub(crate) fn assert_close(a: &[f64], b: &[f64], tol: f64) {
+        assert_eq!(a.len(), b.len(), "{a:?} vs {b:?}");
+        for (x, y) in a.iter().zip(b) {
+            assert!((x - y).abs() <= tol, "{a:?} vs {b:?}");
+        }
     }
 }
