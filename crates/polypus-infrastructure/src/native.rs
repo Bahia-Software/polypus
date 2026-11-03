@@ -20,7 +20,7 @@ use polypus_sim::{sample_projected, SimError, Simulator, StatevectorSimulator, M
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Seed for the circuit at global position `index` of a backend seeded with
 /// `base_seed` ([`polypus_backend::stream_seed`], contract C-7).
@@ -51,6 +51,10 @@ pub struct NativeStatevectorBackend {
     transpiler: Box<dyn Transpiler>,
     base_seed: u64,
     counter: AtomicU64,
+    /// Whether this backend has logged that an adjoint gradient fell back to
+    /// the parameter shift ([`adjoint_fits`](Self::adjoint_fits)): it says so
+    /// once, not on every gradient of a long fit.
+    shift_fallback_logged: AtomicBool,
 }
 
 impl NativeStatevectorBackend {
@@ -71,6 +75,7 @@ impl NativeStatevectorBackend {
             transpiler,
             base_seed: seed,
             counter: AtomicU64::new(0),
+            shift_fallback_logged: AtomicBool::new(false),
         }
     }
 
@@ -422,7 +427,177 @@ impl NativeStatevectorBackend {
             .map(|(state, p)| (bitstring(state, width), p))
             .collect())
     }
+
+    /// Whether an adjoint gradient of `num_qubits`-qubit circuits fits in the
+    /// memory budget (issue #503): `Ok(true)` when the two statevectors one run
+    /// holds ([`polypus_sim::ADJOINT_STATEVECTORS`]) fit, `Ok(false)` when one
+    /// fits but not two — the caller then takes the parameter shift, which needs
+    /// one, and this logs that at `info` level the first time it happens on
+    /// this backend (never silently, and not again on every gradient of a long
+    /// fit) — and
+    /// [`BackendError::InsufficientMemory`] when not even one fits, the error
+    /// [`run_circuits_exact`](Self::run_circuits_exact) refuses the same circuits
+    /// with. So the adjoint never refuses a width the exact path runs.
+    ///
+    /// A width above the qubit ceiling is `Ok(true)`, left to the simulator's
+    /// ceiling error as `check_memory` leaves it; a budget with no known limit
+    /// never refuses, as there.
+    pub fn adjoint_fits(&self, num_qubits: usize) -> Result<bool, BackendError> {
+        self.adjoint_fits_against(num_qubits, active_budget())
+    }
+
+    /// [`adjoint_fits`](Self::adjoint_fits) against an explicit `budget`, so the
+    /// decision is testable without touching the process environment.
+    fn adjoint_fits_against(
+        &self,
+        num_qubits: usize,
+        budget: MemBudget,
+    ) -> Result<bool, BackendError> {
+        self.check_memory_against(num_qubits, budget)?;
+        if num_qubits > self.simulator.max_qubits
+            || check_fits(adjoint_width(num_qubits), budget).is_ok()
+        {
+            return Ok(true);
+        }
+        if !self.shift_fallback_logged.swap(true, Ordering::Relaxed) {
+            log::info!(
+                "the exact gradient of a {num_qubits}-qubit circuit falls back to the parameter-shift \
+                 rule: the adjoint gradient needs {} statevectors at once and the memory budget \
+                 holds one",
+                polypus_sim::ADJOINT_STATEVECTORS
+            );
+        }
+        Ok(false)
+    }
+
+    /// Run adjoint differentiations: for each task, the derivatives of
+    /// `⟨ψ|O|ψ⟩` (`O|b⟩ = weight(b)|b⟩`, `|ψ⟩` the final state of its circuit)
+    /// with respect to the angle of each gate at a position of its `wrt`, one
+    /// row per task in submission order. See
+    /// [`StatevectorSimulator::adjoint_gradient`] for what is differentiated.
+    ///
+    /// The exact path's counterpart for gradients, an **inherent** method like
+    /// [`run_circuits_exact`](Self::run_circuits_exact) and not part of
+    /// [`QuantumBackend`]. Differences from it:
+    ///
+    /// - **As written.** The circuits are neither transpiled nor fused: `wrt`
+    ///   holds positions in them. The injected transpiler does not run.
+    /// - **Two statevectors per task.** The budget is counted at
+    ///   [`ADJOINT_STATEVECTORS`](polypus_sim::ADJOINT_STATEVECTORS) per task in
+    ///   flight: a widest task whose two statevectors cannot fit is refused
+    ///   before anything runs ([`BackendError::InsufficientMemory`], for the
+    ///   `(n + 1)`-qubit statevector that takes the memory of two `n`-qubit
+    ///   ones; check [`adjoint_fits`](Self::adjoint_fits) first), and the batch
+    ///   runs in windows of as many tasks as fit at once, the exact path's
+    ///   windowing and gate-parallel threshold. A pure resource bound: the
+    ///   result is the same for every window size.
+    /// - **Cancellable.** `should_cancel` is polled inside every run, on the
+    ///   simulator's throttled cadence; `true` abandons the batch with
+    ///   [`BackendError::Aborted`]. It must be cheap and callable from any
+    ///   thread.
+    pub fn run_adjoint<W>(
+        &self,
+        tasks: &[AdjointTask<'_, W>],
+        should_cancel: Option<&(dyn Fn() -> bool + Sync)>,
+    ) -> Result<Vec<Vec<f64>>, BackendError>
+    where
+        W: Fn(usize) -> f64 + Sync,
+    {
+        let widest = tasks
+            .iter()
+            .map(|task| task.circuit.num_qubits())
+            .max()
+            .unwrap_or(0);
+        if widest <= self.simulator.max_qubits {
+            check_fits(adjoint_width(widest), active_budget()).map_err(|e| {
+                log::error!("native backend refused an adjoint gradient: {e}");
+                BackendError::from(e)
+            })?;
+        }
+        let cap = max_statevector_concurrency(adjoint_width(widest), rayon::current_num_threads());
+        self.run_adjoint_with_cap(tasks, should_cancel, cap)
+    }
+
+    /// [`run_adjoint`](Self::run_adjoint) holding at most `cap` tasks (`2 · cap`
+    /// statevectors) at once: the windowing of
+    /// [`run_exact_with_cap`](Self::run_exact_with_cap).
+    fn run_adjoint_with_cap<W>(
+        &self,
+        tasks: &[AdjointTask<'_, W>],
+        should_cancel: Option<&(dyn Fn() -> bool + Sync)>,
+        cap: usize,
+    ) -> Result<Vec<Vec<f64>>, BackendError>
+    where
+        W: Fn(usize) -> f64 + Sync,
+    {
+        let threads = rayon::current_num_threads();
+        let cap = cap.max(1);
+        let window = if cap >= threads {
+            tasks.len().max(1)
+        } else {
+            cap
+        };
+        let mut out = Vec::with_capacity(tasks.len());
+        for chunk in tasks.chunks(window) {
+            let simulator = StatevectorSimulator {
+                max_qubits: self.simulator.max_qubits,
+                parallel_threshold: self.gate_parallel_threshold(chunk.len(), threads),
+                fusion: self.simulator.fusion,
+            };
+            let block: Vec<Vec<f64>> = chunk
+                .par_iter()
+                .map(|task| {
+                    let mut hook = || should_cancel.is_some_and(|cancel| cancel());
+                    let hook: Option<&mut dyn FnMut() -> bool> = match should_cancel {
+                        Some(_) => Some(&mut hook),
+                        None => None,
+                    };
+                    simulator
+                        .adjoint_gradient(task.circuit, task.wrt, &task.weight, hook)
+                        .map(|gradient| gradient.derivatives)
+                        .map_err(|e| match e {
+                            SimError::Cancelled => BackendError::Aborted(
+                                "the adjoint gradient was cancelled".to_string(),
+                            ),
+                            e => {
+                                log::error!("native adjoint gradient failed: {e}");
+                                BackendError::NativeCircuit(format!(
+                                    "native adjoint gradient failed: {e}"
+                                ))
+                            }
+                        })
+                })
+                .collect::<Result<_, _>>()?;
+            out.extend(block);
+        }
+        Ok(out)
+    }
 }
+
+/// One adjoint differentiation for
+/// [`NativeStatevectorBackend::run_adjoint`]: a circuit, the positions of the
+/// rotations to differentiate, and the diagonal observable as a weight per
+/// basis state (qubit `q` is bit `q`).
+#[derive(Debug, Clone)]
+pub struct AdjointTask<'a, W> {
+    /// The circuit, simulated exactly as written.
+    pub circuit: &'a ConcreteCircuit,
+    /// Positions in `circuit.gates()` of the gates to differentiate.
+    pub wrt: &'a [usize],
+    /// `O|b⟩ = weight(b)|b⟩`; pure and callable from any thread.
+    pub weight: W,
+}
+
+/// The width whose single statevector takes the memory of an adjoint run's two
+/// `num_qubits`-qubit ones: `2 · 16 · 2^n = 16 · 2^(n+1)` bytes. Saturates, as
+/// the budget arithmetic does for absurd widths.
+fn adjoint_width(num_qubits: usize) -> usize {
+    num_qubits.saturating_add(1)
+}
+
+// `adjoint_width` doubles the memory of one statevector by adding a qubit: it is
+// only right while an adjoint run holds exactly two.
+const _: () = assert!(polypus_sim::ADJOINT_STATEVECTORS == 2);
 
 /// What the native backend runs for one [`BoundCircuit`]: the circuit, and the
 /// classical width its OpenQASM program declares (the sum of its `creg`s),
@@ -2026,6 +2201,196 @@ mod tests {
                 assert!(message.contains("measure_all"), "{message}")
             }
             other => panic!("expected UnsupportedCircuit, got {other:?}"),
+        }
+    }
+
+    // ── Adjoint gradients (issue #503) ──────────────────────────────────────
+
+    /// `Z₀` and a circuit whose rotations at positions 1 and 3 are
+    /// differentiated, on `n` qubits.
+    fn adjoint_circuit(n: usize, angle: f64) -> ConcreteCircuit {
+        let mut circuit = ParameterizedCircuit::new(n).h(0).ry(0, angle).cx(0, 1);
+        circuit = circuit.rz(1, 0.3 * angle).rx(0, -angle).measure_all();
+        circuit.assign_parameters(&[]).unwrap()
+    }
+
+    fn z0(b: usize) -> f64 {
+        if b & 1 == 0 {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+
+    /// A capture logger for the fallback's `info` record. `log::set_logger` is
+    /// global to this test binary, so it is installed once and the test looks
+    /// for its own message only; no other test here asserts on logs.
+    struct Capture(std::sync::Mutex<Vec<(log::Level, String)>>);
+
+    impl log::Log for Capture {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            self.0
+                .lock()
+                .expect("the capture lock is never poisoned")
+                .push((record.level(), record.args().to_string()));
+        }
+
+        fn flush(&self) {}
+    }
+
+    static CAPTURE: Capture = Capture(std::sync::Mutex::new(Vec::new()));
+
+    fn captured_fallbacks(num_qubits: usize) -> usize {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            if log::set_logger(&CAPTURE).is_ok() {
+                log::set_max_level(log::LevelFilter::Info);
+            }
+        });
+        let needle = format!("gradient of a {num_qubits}-qubit circuit falls back");
+        CAPTURE
+            .0
+            .lock()
+            .expect("the capture lock is never poisoned")
+            .iter()
+            .filter(|(level, message)| *level == log::Level::Info && message.contains(&needle))
+            .count()
+    }
+
+    // contract test: needs human sign-off
+    /// The adjoint holds two statevectors (M2): with a known budget that holds
+    /// exactly two `n`-qubit statevectors it runs; one byte less and it falls
+    /// back to the parameter shift — logged at `info`, never silently, once per
+    /// backend rather than on every gradient of a long fit — as long as one
+    /// statevector fits; with less than one, the error is the exact path's own
+    /// refusal. Pure: the budgets are explicit.
+    #[test]
+    fn the_adjoint_needs_two_statevectors_and_falls_back_to_the_shift_with_one() {
+        use polypus_backend::BudgetSource;
+        let backend = NativeStatevectorBackend::new(0);
+        let n = 16; // one statevector = 1 MiB
+        let one = 16u64 << n;
+        let budget = |bytes| MemBudget {
+            bytes,
+            source: BudgetSource::Explicit,
+        };
+        captured_fallbacks(n);
+        assert!(backend.adjoint_fits_against(n, budget(2 * one)).unwrap());
+        assert_eq!(captured_fallbacks(n), 0, "no fallback, no record");
+        assert!(!backend
+            .adjoint_fits_against(n, budget(2 * one - 1))
+            .unwrap());
+        assert!(!backend.adjoint_fits_against(n, budget(one)).unwrap());
+        assert_eq!(
+            captured_fallbacks(n),
+            1,
+            "two fallbacks of one backend are logged once, at info"
+        );
+        let fresh = NativeStatevectorBackend::new(0);
+        assert!(!fresh.adjoint_fits_against(n, budget(one)).unwrap());
+        assert_eq!(captured_fallbacks(n), 2, "another backend logs its own");
+        let refused = backend
+            .adjoint_fits_against(n, budget(one - 1))
+            .unwrap_err();
+        assert!(
+            matches!(&refused, BackendError::InsufficientMemory(e)
+                if e.num_qubits == n && e.required_bytes == one),
+            "not even one statevector: the exact path's own error, got {refused:?}"
+        );
+        assert_eq!(
+            refused.to_string(),
+            backend
+                .check_memory_against(n, budget(one - 1))
+                .unwrap_err()
+                .to_string()
+        );
+        // No known limit never refuses; above the ceiling is the simulator's.
+        let fallback = MemBudget {
+            bytes: 1,
+            source: BudgetSource::Fallback,
+        };
+        assert!(backend.adjoint_fits_against(30, fallback).unwrap());
+        assert!(backend
+            .adjoint_fits_against(polypus_sim::MAX_QUBITS + 1, budget(1))
+            .unwrap());
+    }
+
+    /// Each row is the simulator's own adjoint gradient of its task, and the
+    /// window size (how many tasks are in flight) changes nothing.
+    #[test]
+    fn adjoint_rows_are_the_simulators_and_windows_do_not_change_them() {
+        let circuits: Vec<ConcreteCircuit> = (0..5)
+            .map(|i| adjoint_circuit(3, 0.4 + 0.3 * i as f64))
+            .collect();
+        let wrt = [1usize, 3, 4];
+        let tasks: Vec<AdjointTask<'_, _>> = circuits
+            .iter()
+            .map(|circuit| AdjointTask {
+                circuit,
+                wrt: &wrt,
+                weight: z0,
+            })
+            .collect();
+        let backend = NativeStatevectorBackend::new(0);
+        let unbounded = backend
+            .run_adjoint_with_cap(&tasks, None, usize::MAX)
+            .unwrap();
+        for (row, circuit) in unbounded.iter().zip(&circuits) {
+            let direct = StatevectorSimulator::new()
+                .adjoint_gradient(circuit, &wrt, z0, None)
+                .unwrap();
+            assert_eq!(*row, direct.derivatives);
+        }
+        for cap in [1, 2, 3] {
+            assert_eq!(
+                backend.run_adjoint_with_cap(&tasks, None, cap).unwrap(),
+                unbounded,
+                "cap {cap}"
+            );
+        }
+        assert_eq!(backend.run_adjoint(&tasks, None).unwrap(), unbounded);
+        assert!(backend
+            .run_adjoint::<fn(usize) -> f64>(&[], None)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A cancellation is `Aborted` (Ctrl+C at the edge); any other simulator
+    /// error is the native backend's typed one, never a panic.
+    #[test]
+    fn adjoint_errors_are_typed() {
+        // A long circuit, so the throttled hook comes due mid-run.
+        let mut long = ParameterizedCircuit::new(12).ry(0, 0.2);
+        for i in 0..40_000 {
+            long = long.rx(i % 12, 0.001).barrier();
+        }
+        let long = long.assign_parameters(&[]).unwrap();
+        let backend = NativeStatevectorBackend::new(0);
+        let stop = || true;
+        let task = [AdjointTask {
+            circuit: &long,
+            wrt: &[0],
+            weight: z0,
+        }];
+        assert!(matches!(
+            backend.run_adjoint(&task, Some(&stop)),
+            Err(BackendError::Aborted(_))
+        ));
+        let bad = adjoint_circuit(2, 0.1);
+        let not_a_rotation = [AdjointTask {
+            circuit: &bad,
+            wrt: &[0],
+            weight: z0,
+        }];
+        match backend.run_adjoint(&not_a_rotation, None) {
+            Err(BackendError::NativeCircuit(message)) => {
+                assert!(message.contains("not a Pauli rotation"), "{message}")
+            }
+            other => panic!("expected NativeCircuit, got {other:?}"),
         }
     }
 }
