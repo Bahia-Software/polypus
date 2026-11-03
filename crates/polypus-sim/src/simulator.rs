@@ -133,7 +133,7 @@ pub(crate) const MAX_FUSED_DIAGONAL_RUN: usize = 64;
 /// The state a throttle needs only exists when there *is* a hook, so it lives
 /// behind the `Option`: a run without one costs exactly one `Option` test per
 /// gate and nothing else — no clock read, not even at the start.
-struct CancellationCheck<'a>(Option<Throttle<'a>>);
+pub(crate) struct CancellationCheck<'a>(Option<Throttle<'a>>);
 
 /// A hook plus the two nested throttles that decide when to call it: `stride`
 /// gates between clock reads, `interval` between calls.
@@ -156,7 +156,7 @@ struct Throttle<'a> {
 
 impl<'a> CancellationCheck<'a> {
     /// A check for a `num_qubits`-wide run driving `hook`.
-    fn new(hook: Option<&'a mut dyn FnMut() -> bool>, num_qubits: usize) -> Self {
+    pub(crate) fn new(hook: Option<&'a mut dyn FnMut() -> bool>, num_qubits: usize) -> Self {
         CancellationCheck(hook.map(|hook| {
             // `min(16)` keeps the shift in range for any qubit count; the result
             // has already saturated at the `max(1)` floor by then.
@@ -173,7 +173,7 @@ impl<'a> CancellationCheck<'a> {
 
     /// Whether the caller has asked to stop. Called once per gate — all the
     /// throttling lives in [`Throttle::poll`].
-    fn cancelled(&mut self) -> bool {
+    pub(crate) fn cancelled(&mut self) -> bool {
         match &mut self.0 {
             Some(throttle) => throttle.poll(),
             None => false,
