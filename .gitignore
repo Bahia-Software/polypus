@@ -60,3 +60,5 @@ clippy.json
 
 # Documentation site (mkdocs build)
 site/
+# MkDocs privacy plugin download cache
+.cache/

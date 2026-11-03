@@ -15,27 +15,48 @@ exclude_docs: |
 theme:
   name: material
   custom_dir: docs/overrides
-  logo: assets/logo.png
-  favicon: assets/logo.png
+  logo: assets/logo-mark.png
+  favicon: assets/favicon.png
+  # Fonts are fetched at build time by the privacy plugin and served from the
+  # site, so readers' browsers never contact Google Fonts.
+  font:
+    text: Inter
+    code: JetBrains Mono
+  # Brand colours are defined in docs/stylesheets/extra.css.
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-night
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-sunny
         name: Switch to light mode
   features:
+    - announce.dismiss
     - content.code.copy
     - content.tabs.link
+    - navigation.footer
     - navigation.sections
     - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.top
     - search.highlight
     - search.suggest
+    - toc.follow
+
+extra_css:
+  - stylesheets/extra.css
+
+copyright: >-
+  &copy; Bahía Software and the Galicia Supercomputing Center (CESGA) &middot;
+  <a href="https://github.com/Bahia-Software/polypus/blob/main/LICENSE">EUPL-1.2</a>
 
 markdown_extensions:
   - admonition
@@ -49,6 +70,9 @@ markdown_extensions:
         kwds:
           case: lower
   - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - pymdownx.highlight
   - pymdownx.superfences
   - pymdownx.tabbed:
@@ -67,9 +91,21 @@ validation:
 
 extra:
   version: 0.9.0-dev
+  generator: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Bahia-Software/polypus
+      name: Polypus on GitHub
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/polypus-quantum/
+      name: polypus-quantum on PyPI
 
 plugins:
   - search
+  - privacy:
+      # No page uses Mermaid; don't vendor the theme's lazy-loaded copy.
+      assets_exclude:
+        - unpkg.com/mermaid@*
 
 nav:
   - Home: index.md

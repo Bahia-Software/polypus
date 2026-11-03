@@ -1,0 +1,186 @@
+/* Polypus theme on top of Material for MkDocs. Brand cyan comes from the logo
+   (#0099cd); darker shades keep white text and links at WCAG AA (>= 4.5:1). */
+
+:root {
+  --pp-cyan: #0099cd;
+  --pp-cyan-strong: #007ead;
+  --pp-cyan-deep: #00668c;
+  --pp-tint: #e6f5fb;
+  --pp-radius: 0.5rem;
+}
+
+[data-md-color-primary="custom"] {
+  --md-primary-fg-color: var(--pp-cyan-strong);
+  --md-primary-fg-color--light: var(--pp-cyan);
+  --md-primary-fg-color--dark: var(--pp-cyan-deep);
+}
+
+[data-md-color-accent="custom"] {
+  --md-accent-fg-color: var(--pp-cyan);
+  --md-accent-fg-color--transparent: rgba(0, 153, 205, 0.1);
+}
+
+[data-md-color-scheme="default"] {
+  --md-typeset-a-color: #0077a3;
+}
+
+[data-md-color-scheme="slate"][data-md-color-primary="custom"] {
+  --md-primary-fg-color: #006b94;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: #14181f;
+  --md-code-bg-color: #1b2029;
+  --md-typeset-a-color: #4fc3f7;
+  --md-accent-fg-color: #4fc3f7;
+  --pp-tint: #10303d;
+}
+
+/* Reading rhythm */
+.md-typeset {
+  font-size: 0.82rem;
+  line-height: 1.7;
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  color: var(--md-default-fg-color);
+  letter-spacing: -0.015em;
+}
+
+.md-typeset h1 {
+  font-weight: 700;
+}
+
+.md-typeset h2 {
+  font-weight: 650;
+  margin-top: 2.2em;
+}
+
+.md-typeset h3 {
+  font-weight: 600;
+}
+
+/* Code blocks and inline code */
+.md-typeset pre > code {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: var(--pp-radius);
+}
+
+.md-typeset code {
+  border-radius: 0.25rem;
+}
+
+/* Tables: identifiers stay on one line, rows are easier to follow */
+.md-typeset table:not([class]) {
+  border-radius: var(--pp-radius);
+  font-size: 0.74rem;
+}
+
+.md-typeset table:not([class]) th {
+  background: var(--pp-tint);
+  font-weight: 600;
+}
+
+.md-typeset table:not([class]) tbody tr:nth-child(even) {
+  background: var(--md-default-fg-color--lightest);
+}
+
+.md-typeset table:not([class]) td:first-child code {
+  white-space: nowrap;
+  word-break: normal;
+}
+
+/* Admonitions and cards */
+.md-typeset .admonition,
+.md-typeset details {
+  border-radius: var(--pp-radius);
+}
+
+.md-typeset .grid.cards > ul > li,
+.md-typeset .grid > .card {
+  border-radius: 0.75rem;
+  transition: border-color 125ms, box-shadow 125ms;
+}
+
+.md-typeset .grid.cards > ul > li:hover,
+.md-typeset .grid > .card:hover {
+  border-color: var(--pp-cyan);
+}
+
+.md-typeset .grid.cards .lg {
+  color: var(--pp-cyan);
+}
+
+/* Landing feature cards: two per row, so four cards never leave an orphan */
+.md-typeset .pp-cards.grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+}
+
+/* Buttons */
+.md-typeset .md-button {
+  border-radius: var(--pp-radius);
+  font-weight: 600;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .md-button:not(.md-button--primary) {
+  color: var(--md-typeset-a-color);
+  border-color: currentColor;
+}
+
+/* Announcement bar: tinted, readable link */
+.md-banner {
+  background: var(--pp-tint);
+  color: var(--md-default-fg-color);
+}
+
+.md-banner a {
+  color: var(--md-typeset-a-color);
+  text-decoration: underline;
+}
+
+/* Landing page hero */
+.pp-hero {
+  text-align: center;
+  margin: 1.5rem auto 2.5rem;
+  max-width: 42rem;
+}
+
+.md-typeset .pp-hero h1 {
+  font-size: 2.2rem;
+  line-height: 1.2;
+  margin: 0 0 0.6em;
+}
+
+.pp-hero__mark {
+  width: 5rem;
+  height: 5rem;
+}
+
+.md-typeset .pp-hero__lead {
+  font-size: 1rem;
+  color: var(--md-default-fg-color--light);
+  margin-bottom: 1.4em;
+}
+
+.md-typeset .pp-hero .highlight {
+  max-width: 22rem;
+  margin: 0 auto 1.4em;
+  text-align: left;
+}
+
+.md-typeset .pp-hero .md-button {
+  margin: 0.2rem 0.3rem;
+}
+
+.pp-figure {
+  margin: 0 auto 2.5rem;
+  text-align: center;
+}
+
+@media screen and (max-width: 44.9375em) {
+  .md-typeset .pp-hero h1 {
+    font-size: 1.6rem;
+  }
+}
