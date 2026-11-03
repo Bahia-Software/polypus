@@ -7,10 +7,16 @@
 //! [`compile`](crate::QuantumModel::compile) produces once, with logical qubit
 //! positions already mapped to physical indices.
 //!
-//! Why a bespoke type and not `polypus-physics`' `PauliSum`: that crate's
-//! `PauliTerm` is a single Pauli on a single qubit and cannot express a
-//! multi-qubit string such as `Z₀Z₁` (parity — the most common QCNN
-//! observable). See design doc §7.1 / D4.
+//! Why a bespoke type and not `polypus-physics`' `PauliSum`: when this module
+//! was written, that crate's `PauliTerm` was a single Pauli on a single qubit
+//! and could not express a multi-qubit string such as `Z₀Z₁` (parity — the
+//! most common QCNN observable); see design doc §7.1 / D4. `PauliSum` now
+//! holds multi-qubit strings (issue #529), but the types still differ in what
+//! they address: a [`PauliString`] here names **logical positions** over the
+//! model's surviving qubits and is resolved to physical indices by `compile`,
+//! as part of the model's readout, while `PauliSum` is an operator on physical
+//! qubits with no notion of a model. Sharing one representation is left to the
+//! Pauli-sum measurement work (issue #530).
 //!
 //! ## Positions
 //!

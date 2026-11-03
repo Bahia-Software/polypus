@@ -1,6 +1,7 @@
 //! # polypus-physics
 //!
-//! Pure-Rust particle-physics simulation layer for Polypus.
+//! Pure-Rust physics layer for Polypus: classical Monte Carlo particle
+//! transport, and quantum Hamiltonians, including molecular ones (H₂, STO-3G).
 //! No Python, no PyO3, no external physics framework.
 //!
 //! ## Layers
@@ -11,8 +12,8 @@
 //! | [`medium`] | Material properties |
 //! | [`interactions`] | Cross-sections and kinematic sampling |
 //! | [`monte_carlo`] | Classical MC transport engine |
-//! | [`hamiltonians`] | Quantum Hamiltonians as `PauliSum` (data only) |
-//! | [`chemistry`] | Molecular integrals (STO-3G) for electronic Hamiltonians |
+//! | [`hamiltonians`] | Quantum Hamiltonians as Pauli sums: fermionic operators, qubit mappings, tapering, exact diagonalization |
+//! | [`chemistry`] | Molecular integrals (STO-3G) and molecules (H₂) built on [`hamiltonians`] |
 //!
 //! ## ENDF-6 photon data
 //!
@@ -61,16 +62,27 @@
 //! println!("Mean deposit: {:.4} MeV", result.mean_deposit_mev);
 //! ```
 //!
-//! ## Hamiltonian bridge (data contract for future VQE/QPE)
+//! ## Quantum Hamiltonians
+//!
+//! Every Hamiltonian is a [`hamiltonians::PauliSum`] with real coefficients
+//! over multi-qubit Pauli strings, the input that VQE, QPE or Trotter
+//! compilation will consume. A molecule goes from integrals to qubits in
+//! [`chemistry`]; small sums can be diagonalized exactly as a reference.
 //!
 //! ```
-//! use polypus_physics::hamiltonians::photon_polarization::photon_polarization_hamiltonian;
+//! use polypus_physics::chemistry::{H2Encoding, H2Molecule};
+//! use polypus_physics::hamiltonians::PhysicsHamiltonian;
 //!
-//! // Express H = 1.0·σ_z + 0.1·σ_x  (natural units, ħ=1).
-//! let h = photon_polarization_hamiltonian(1.0, 0.1).unwrap();
-//! // h.to_string() or pass to polypus-circuit's Trotter compiler (future).
-//! assert_eq!(h.coefficient_norm(), 1.1);
+//! // H₂ at its equilibrium bond length, reduced to 2 qubits.
+//! let h = H2Molecule::new(0.7414, H2Encoding::ParityTapered)
+//!     .unwrap()
+//!     .to_pauli_sum();
+//! println!("{h}"); // -0.3399… I, +0.1812… X0 X1, +0.3939… Z0, …
+//! assert!((h.ground_energy().unwrap() + 1.137270).abs() < 1e-5);
 //! ```
+//!
+//! The single-photon polarization Hamiltonian `ω σ_z + Ω σ_x` is in
+//! [`hamiltonians::photon_polarization`].
 
 #![deny(clippy::all)]
 
