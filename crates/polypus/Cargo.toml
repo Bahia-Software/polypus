@@ -11,7 +11,7 @@ description = "Rust-core quantum variational optimization framework with a Pytho
 # PyPI is the `polypus-quantum` distribution (which imports as `polypus`), so a
 # reader arriving from either side can find the other — see the Homepage/README.
 homepage = "https://github.com/Bahia-Software/polypus"
-documentation = "https://bahia-software.github.io/polypus/"
+documentation = "https://bahia-software.github.io/polypus/rust/polypus/"
 keywords = ["quantum", "simulator", "qaoa", "optimization", "pyo3"]
 categories = ["science", "simulation"]
 

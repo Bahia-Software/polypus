@@ -181,6 +181,17 @@ with the scripts in `benchmarks/` (`run_benchmarks.py`,
 `bench_native_vs_qiskit.py`, `bench_batching.py`) and include the numbers in
 the PR description.
 
+## Building the docs
+
+```bash
+pip install -r requirements-docs.txt
+mkdocs serve
+```
+
+`mkdocs build --strict` is the check CI runs: any broken link or page missing
+from the nav fails it. The hook in `docs/_hooks/repo_files.py` turns links to
+files outside `docs/` into GitHub URLs; its tests run with `pytest tests/docs`.
+
 ## Repository hygiene
 
 `.github/workflows/hygiene.yml` runs `.github/scripts/hygiene.py` (standard
