@@ -47,11 +47,17 @@ pub struct DenseMatrix {
 }
 
 impl DenseMatrix {
-    fn zeros(dim: usize) -> Self {
+    pub(crate) fn zeros(dim: usize) -> Self {
         Self {
             dim,
             data: vec![0.0; dim * dim],
         }
+    }
+
+    /// Adds `value` to entry `(row, col)`. Callers guarantee the indices are
+    /// in range.
+    pub(crate) fn add_to(&mut self, row: usize, col: usize, value: f64) {
+        self.data[row * self.dim + col] += value;
     }
 
     /// Number of rows (and columns).
@@ -167,7 +173,7 @@ impl PauliSum {
                 } else {
                     -y_sign
                 };
-                m.data[(b ^ x_mask) * dim + b] += sign * term.coefficient;
+                m.add_to(b ^ x_mask, b, sign * term.coefficient);
             }
         }
         Ok(m)

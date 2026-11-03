@@ -81,6 +81,18 @@ pub enum PhysicsError {
         /// Human-readable description of the problem.
         message: String,
     },
+    /// A fermionic operator is malformed (mode out of range or non-finite
+    /// coefficient).
+    InvalidFermionOperator {
+        /// Human-readable description of the problem.
+        message: String,
+    },
+    /// Molecular integrals are malformed (wrong size, non-finite values, or
+    /// symmetries broken beyond the tolerance).
+    InvalidIntegrals {
+        /// Human-readable description of the problem.
+        message: String,
+    },
 }
 
 impl fmt::Display for PhysicsError {
@@ -127,6 +139,12 @@ impl fmt::Display for PhysicsError {
             }
             PhysicsError::UnsupportedOperation { message } => {
                 write!(f, "unsupported operation: {message}")
+            }
+            PhysicsError::InvalidFermionOperator { message } => {
+                write!(f, "invalid fermion operator: {message}")
+            }
+            PhysicsError::InvalidIntegrals { message } => {
+                write!(f, "invalid molecular integrals: {message}")
             }
         }
     }

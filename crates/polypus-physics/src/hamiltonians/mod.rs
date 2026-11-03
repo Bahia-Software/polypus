@@ -6,10 +6,14 @@
 //! no circuit-compilation logic and has no dependency on `polypus-circuit`.
 
 pub mod exact;
+pub mod fermion;
 pub mod pauli;
 pub mod photon_polarization;
 
 pub use exact::{DenseMatrix, MAX_DENSE_QUBITS};
+pub use fermion::{
+    FermionHamiltonian, FermionOperator, FermionTerm, Ladder, INTEGRAL_SYMMETRY_TOLERANCE,
+};
 pub use pauli::{PauliAxis, PauliString, PauliSum, PauliTerm, Phase};
 
 /// Trait for any physical system that can express its quantum Hamiltonian as a
