@@ -12,6 +12,7 @@
 //! | [`interactions`] | Cross-sections and kinematic sampling |
 //! | [`monte_carlo`] | Classical MC transport engine |
 //! | [`hamiltonians`] | Quantum Hamiltonians as `PauliSum` (data only) |
+//! | [`chemistry`] | Molecular integrals (STO-3G) for electronic Hamiltonians |
 //!
 //! ## ENDF-6 photon data
 //!
@@ -73,6 +74,7 @@
 
 #![deny(clippy::all)]
 
+pub mod chemistry;
 pub mod constants;
 pub mod error;
 pub mod hamiltonians;
