@@ -26,9 +26,8 @@ const STO3G_1S_COEFFICIENTS: [f64; 3] = [0.154_328_97, 0.535_328_14, 0.444_634_5
 /// (truncation error `< t³/42`), avoiding the `0/0` of the erf form.
 const BOYS_SERIES_LIMIT: f64 = 1e-8;
 
-/// A contracted s-type Gaussian orbital centred at `center` (bohr):
-/// `φ(r) = Σ_k c_k exp(−α_k |r − center|²)`, with each `c_k` already
-/// including the primitive's normalization `(2α_k/π)^{3/4}`.
+/// A normalized contracted s-type Gaussian orbital centred at `center`
+/// (bohr): `φ(r) = Σ_k c_k exp(−α_k |r − center|²)`, with `⟨φ|φ⟩ = 1`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContractedGaussian {
     center: [f64; 3],
@@ -37,13 +36,18 @@ pub struct ContractedGaussian {
 }
 
 impl ContractedGaussian {
-    /// Builds an orbital from `(exponent, contraction coefficient)` pairs; each
-    /// coefficient is multiplied by its primitive's normalization.
+    /// Builds an orbital from `(exponent, contraction coefficient)` pairs.
+    ///
+    /// Each coefficient is multiplied by its primitive's normalization
+    /// `(2α_k/π)^{3/4}`, and then the whole contraction is divided by its norm,
+    /// as PySCF and Psi4 do. Published contraction coefficients are rounded
+    /// (STO-3G to 8 decimals, leaving `⟨φ|φ⟩ = 1 − 9e-9`), and the molecular
+    /// orbitals built on top assume `⟨φ|φ⟩ = 1` exactly.
     ///
     /// # Errors
     /// [`PhysicsError::InvalidIntegrals`] if there are no primitives, an
-    /// exponent is not finite and positive, or a coefficient or coordinate is
-    /// not finite.
+    /// exponent is not finite and positive, a coefficient or coordinate is
+    /// not finite, or the contraction has zero norm.
     pub fn new(center: [f64; 3], primitives: &[(f64, f64)]) -> Result<Self, PhysicsError> {
         let invalid = |message: String| PhysicsError::InvalidIntegrals { message };
         if primitives.is_empty() {
@@ -68,10 +72,21 @@ impl ContractedGaussian {
             }
             normalized.push((alpha, d * (2.0 * alpha / PI).powf(0.75)));
         }
-        Ok(Self {
+        let mut orbital = Self {
             center,
             primitives: normalized,
-        })
+        };
+        let norm_sq = overlap(&orbital, &orbital);
+        if !(norm_sq.is_finite() && norm_sq > 0.0) {
+            return Err(invalid(format!(
+                "contraction has no usable norm: <φ|φ> = {norm_sq}"
+            )));
+        }
+        let scale = norm_sq.sqrt().recip();
+        for (_, c) in &mut orbital.primitives {
+            *c *= scale;
+        }
+        Ok(orbital)
     }
 
     /// The STO-3G hydrogen 1s orbital centred at `center` (bohr).
@@ -277,10 +292,13 @@ mod tests {
     }
 
     #[test]
-    fn sto3g_orbital_is_normalized_to_contraction_accuracy() {
-        // STO-3G coefficients are given to 8 decimals; S_aa = 1 − 9e-9.
+    fn contracted_orbitals_are_normalized() {
+        // The published STO-3G coefficients alone give 1 − 9e-9; the
+        // contraction is renormalized to 1.
         let (a, _, _) = szabo_h2();
-        assert!((overlap(&a, &a) - 1.0).abs() < 1e-7);
+        assert!((overlap(&a, &a) - 1.0).abs() < 1e-15);
+        let custom = ContractedGaussian::new([1.0, -2.0, 0.5], &[(0.8, 3.0), (0.1, -0.4)]).unwrap();
+        assert!((overlap(&custom, &custom) - 1.0).abs() < 1e-15);
     }
 
     #[test]
@@ -304,8 +322,7 @@ mod tests {
 
     #[test]
     fn far_apart_orbitals_behave_as_point_charges() {
-        // At R = 50 bohr: no overlap, (aa|bb) → 1/R and V → −Z/R, each
-        // times the orbital's norm (1 − 9e-9).
+        // At R = 50 bohr: no overlap, (aa|bb) → 1/R and V → −Z/R.
         let r = 50.0;
         let a = ContractedGaussian::sto3g_hydrogen_1s([0.0; 3]).unwrap();
         let b = ContractedGaussian::sto3g_hydrogen_1s([0.0, 0.0, r]).unwrap();
@@ -314,8 +331,8 @@ mod tests {
             charge: 2.0,
         };
         assert!(overlap(&a, &b) < 1e-90);
-        assert!((electron_repulsion(&a, &a, &b, &b) * r - 1.0).abs() < 1e-7);
-        assert!((nuclear_attraction(&a, &a, &[far]) * r + 2.0).abs() < 1e-7);
+        assert!((electron_repulsion(&a, &a, &b, &b) * r - 1.0).abs() < 1e-13);
+        assert!((nuclear_attraction(&a, &a, &[far]) * r + 2.0).abs() < 1e-13);
     }
 
     #[test]
@@ -327,6 +344,7 @@ mod tests {
             ContractedGaussian::new([0.0; 3], &[(f64::INFINITY, 1.0)]),
             ContractedGaussian::new([0.0; 3], &[(1.0, f64::NAN)]),
             ContractedGaussian::new([f64::NAN, 0.0, 0.0], &[(1.0, 1.0)]),
+            ContractedGaussian::new([0.0; 3], &[(1.0, 0.0), (2.0, 0.0)]),
         ];
         for r in bad {
             assert!(matches!(r, Err(PhysicsError::InvalidIntegrals { .. })));

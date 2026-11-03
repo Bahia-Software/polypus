@@ -13,8 +13,10 @@
 //! assert!((overlap(&a, &b) - 0.6593).abs() < 5e-5);
 //! ```
 
+pub mod h2;
 pub mod sto3g;
 
+pub use h2::{H2Encoding, H2Molecule, H2_ROUNDING_TOLERANCE};
 pub use sto3g::{
     electron_repulsion, kinetic, nuclear_attraction, overlap, ContractedGaussian, Nucleus,
 };
