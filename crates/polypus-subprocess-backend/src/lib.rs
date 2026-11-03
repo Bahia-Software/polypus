@@ -5,8 +5,8 @@
 //! [`protocol`]. This is the productionised form of the Fase-2 subprocess-bridge
 //! spike, and the mechanism by which a `pip install polypus` user reaches a
 //! third-party Python backend **without embedding the interpreter** — this crate is
-//! pyo3-free (verified in CI with `cargo tree`); the interpreter lives entirely in
-//! the child process.
+//! pyo3-free (enforced in CI by `cargo deny`, `deny.toml` `bans`); the interpreter
+//! lives entirely in the child process.
 //!
 //! It registers itself under the name `"subprocess"` (see [`register`]), so the
 //! Polypus factory can build it by name from configuration alone. A Python user

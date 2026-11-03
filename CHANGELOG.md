@@ -43,6 +43,15 @@ Entries were curated from the Conventional Commits history. Releases before
   travels as the JSON of its spec, rebuilt through the checks of `qml.load`
   (#502).
 
+### Changed
+- For contributors: every workspace crate inherits a `[workspace.lints]` table
+  from the root `Cargo.toml` that denies `unsafe_code` and
+  `clippy::undocumented_unsafe_blocks`, so the four `unsafe` sites
+  `docs/ENGINEERING.md` §5 authorises are the only ones that compile, each with
+  its own block-scoped `allow`. `missing_docs` is on in the crates that are
+  already fully documented, and `cargo deny` keeps `pyo3` out of the pure
+  crates (#408).
+
 ## [0.8.0] - 2026-10-30
 
 ### Upgrading from 0.7

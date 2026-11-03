@@ -78,6 +78,20 @@ boundary stays out-of-process and explicit; see
   (`polypus::exceptions::evaluation_error_to_pyerr`).
 - Only the `polypus` crate may contain `#[pyclass]` / `#[pymethods]` /
   `#[pyfunction]`, own the exception hierarchy, and convert errors to `PyErr`.
+- **Enforcement.** The `pyo3` limits above are checked by `cargo deny check`
+  (the `cargo-deny` CI job) through the `bans` section of `deny.toml`.
+  `pyo3-ffi`, which links libpython, may be a direct dependency only of `pyo3`.
+  `pyo3` may be a direct dependency only of `polypus`, `polypus-infrastructure`,
+  `polypus-evaluation` and `numpy`, which keeps it out of
+  `polypus-orchestration`'s `Cargo.toml` too. The crates that link it may be
+  depended on only by the crates above them in the graph: `numpy` only by
+  `polypus`; `polypus-infrastructure`, `polypus-orchestration` and
+  `polypus-evaluation` only by the crates that build on them; and `polypus`,
+  the PyO3 edge, by no crate at all. Those entries cover every crate that links
+  Python (`pyo3-ffi`, `pyo3`, its direct dependents and the chain that leads to
+  them), so a pure crate fails CI both when it names `pyo3` and when it depends
+  on any crate that links it.
+  Moving a boundary means updating `deny.toml` in the same change.
 - The optimizers are decoupled from circuits and Python via the
   `EvaluationOracle` / `VarianceOracle` traits (contract C-5). A new optimizer
   is implemented against those oracles; it must **not** call Python or know
@@ -384,6 +398,18 @@ boundary stays out-of-process and explicit; see
   for out-of-band cancellation — goes through `nix`'s safe wrappers with no
   `unsafe`. Do not add a second `unsafe` block to this crate without the same
   sign-off.
+- **Enforcement.** The root `Cargo.toml` denies `unsafe_code` and
+  `clippy::undocumented_unsafe_blocks` for every crate (`[workspace.lints]`).
+  Each authorised site (the three blocks in `kernels.rs` and the `pre_exec`
+  above) carries its own block-scoped `#[allow(unsafe_code)]`, so the
+  repository has exactly four of them, and any other `unsafe`, even a fourth
+  one in `kernels.rs`, fails to compile. A new site still needs the benchmark,
+  the `// SAFETY:` comment and the sign-off above. Its `allow` goes on that one
+  block, never on a module or a crate.
+  The order is fixed: `#[allow(unsafe_code)]`, then the `// SAFETY:` comment,
+  then the block. With the attribute between the comment and the block,
+  `undocumented_unsafe_blocks` no longer sees the comment and reports the block
+  as undocumented.
 - Let the compiler prove `Send`/`Sync`; never force them with `unsafe impl`.
 
 ## 6. Feature hygiene
@@ -652,7 +678,8 @@ the rustdoc with `-D warnings`, so broken intra-doc links fail the build.
 **Dependencies.** Pin shared external dependencies once in
 `[workspace.dependencies]` and reuse them. Adding a dependency is a
 maintainer decision: propose it explicitly in the PR description, never slip
-it into an unrelated diff. `cargo deny check` gates licenses and advisories.
+it into an unrelated diff. `cargo deny check` gates licenses, advisories and
+the §2 `pyo3` bans.
 
 ## 10. Pre-PR checklist
 
