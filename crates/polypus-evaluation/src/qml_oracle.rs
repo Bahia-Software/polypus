@@ -2,9 +2,10 @@ use crate::{
     assign_parameters_qiskit, CostObservable, EvaluationError, EvaluationOracle, Label,
     OracleErrorSlot, SupervisedObjective,
 };
+use polypus_circuit::ConcreteCircuit;
 use polypus_infrastructure::{
-    BoundCircuit, CancelToken, CircuitTask, Counts, InfrastructureError, NativeStatevectorBackend,
-    Planner, QiskitCircuit, QuantumBackend, RunParams,
+    AdjointTask, BackendError, BoundCircuit, CancelToken, CircuitTask, Counts, InfrastructureError,
+    NativeStatevectorBackend, Planner, QiskitCircuit, QuantumBackend, RunParams,
 };
 use polypus_optimizers::GradientOracle;
 use polypus_orchestration::{OracleFactory, Oracles, Resources};
@@ -753,31 +754,112 @@ impl QmlOracle {
             None => Samples::All,
         };
         let problem = subset(problem, samples)?;
-        let bound: Vec<BoundCircuit> = problem
-            .gradient_circuits(theta)?
-            .into_iter()
-            .map(BoundCircuit::Native)
-            .collect();
-        // The base circuits lead the batch, one per sample, exactly as
-        // `bind_batch` returns them.
-        let n = problem.num_circuits();
-        Ok(match exact {
+        match exact {
             Some(native) => {
-                let probabilities = self.run_exact(native, &bound)?;
-                (
-                    problem.fitness_from_probabilities(&probabilities[..n])?,
-                    problem.gradient_from_probabilities(&probabilities)?,
-                )
+                // A cancellation or a Ctrl+C first, as before the memory check
+                // existed: a cancelled run reports the cancellation, not a
+                // budget it would never have run against.
+                if self.cancel.is_cancelled() {
+                    return Err(InfrastructureError::Cancelled.into());
+                }
+                self.cancel.poll_interrupt()?;
+                // Two statevectors per run, or the shift rule's one (M2).
+                let base = problem.bind_batch(theta)?;
+                let width = base
+                    .iter()
+                    .map(ConcreteCircuit::num_qubits)
+                    .max()
+                    .unwrap_or(0);
+                if native.adjoint_fits(width)? {
+                    self.exact_adjoint_gradient(native, &problem, theta, base)
+                } else {
+                    self.exact_shift_gradient(native, &problem, theta)
+                }
             }
             None => {
+                let bound = native_circuits(problem.gradient_circuits(theta)?);
                 let counts = self.run_sampled(&bound, self.config.shots, &self.config)?;
-                (
+                // The base circuits lead the batch, one per sample, exactly as
+                // `bind_batch` returns them.
+                let n = problem.num_circuits();
+                Ok((
                     problem.fitness_from_counts(&counts[..n])?,
                     problem.gradient_from_counts(&counts)?,
-                )
+                ))
             }
-        })
+        }
     }
+
+    /// The exact gradient by adjoint differentiation (issue #503): `θ`'s
+    /// circuits `base` run exactly, as [`evaluate_batch`](EvaluationOracle::evaluate_batch)
+    /// runs them, give the fitness (so the value is, bit for bit, the one it
+    /// returns for `θ`, C-11 (f)) and the loss's chain-rule weights; then one
+    /// adjoint run per sample gives `∂fitness/∂θ`. The checks for a
+    /// cancellation or a Ctrl+C come before each of the two batches, as the
+    /// planner makes them between waves, and a cancellation also stops an
+    /// adjoint run in flight.
+    fn exact_adjoint_gradient(
+        &self,
+        native: &NativeStatevectorBackend,
+        problem: &QmlProblem,
+        theta: &[f64],
+        base: Vec<ConcreteCircuit>,
+    ) -> Result<(f64, Vec<f64>), EvaluationError> {
+        let probabilities = self.run_exact(native, &native_circuits(base))?;
+        let value = problem.fitness_from_probabilities(&probabilities)?;
+        let runs = problem.adjoint_runs(theta, &probabilities)?;
+        if self.cancel.is_cancelled() {
+            return Err(InfrastructureError::Cancelled.into());
+        }
+        self.cancel.poll_interrupt()?;
+        let tasks: Vec<AdjointTask<'_, _>> = runs
+            .iter()
+            .map(|run| AdjointTask {
+                circuit: &run.circuit,
+                wrt: &run.wrt,
+                weight: move |b: usize| run.observable.weight(b),
+            })
+            .collect();
+        let token = &self.cancel;
+        let cancelled = move || token.is_cancelled();
+        let derivatives = match native.run_adjoint(&tasks, Some(&cancelled)) {
+            Err(BackendError::Aborted(_)) if token.is_cancelled() => {
+                return Err(InfrastructureError::Cancelled.into())
+            }
+            result => result?,
+        };
+        if derivatives.len() != runs.len() {
+            return Err(EvaluationError::WrongLength {
+                expected: runs.len(),
+                got: derivatives.len(),
+            });
+        }
+        Ok((value, problem.gradient_from_adjoint(&derivatives)?))
+    }
+
+    /// The exact parameter-shift gradient: every circuit of
+    /// [`gradient_circuits`](QmlProblem::gradient_circuits) run exactly in one
+    /// batch, the fitness read from the base circuits that lead it. What exact
+    /// mode runs when the adjoint's two statevectors do not fit (M2).
+    fn exact_shift_gradient(
+        &self,
+        native: &NativeStatevectorBackend,
+        problem: &QmlProblem,
+        theta: &[f64],
+    ) -> Result<(f64, Vec<f64>), EvaluationError> {
+        let bound = native_circuits(problem.gradient_circuits(theta)?);
+        let probabilities = self.run_exact(native, &bound)?;
+        let n = problem.num_circuits();
+        Ok((
+            problem.fitness_from_probabilities(&probabilities[..n])?,
+            problem.gradient_from_probabilities(&probabilities)?,
+        ))
+    }
+}
+
+/// Wrap native circuits for a backend.
+fn native_circuits(circuits: Vec<ConcreteCircuit>) -> Vec<BoundCircuit> {
+    circuits.into_iter().map(BoundCircuit::Native).collect()
 }
 
 /// `problem` restricted to `samples`: shared as is for every sample, or a
@@ -1673,6 +1755,40 @@ class Bound:
         circuits.into_iter().map(BoundCircuit::Native).collect()
     }
 
+    /// The exact gradient by adjoint differentiation at `theta`, computed apart
+    /// from the oracle: `θ`'s exact probabilities, the problem's adjoint runs,
+    /// a fresh native backend's derivatives, the problem's reader (#503).
+    fn adjoint_gradient(problem: &QmlProblem, theta: &[f64]) -> Vec<f64> {
+        let base = exact_probabilities(problem.bind_batch(theta).unwrap());
+        let runs = problem.adjoint_runs(theta, &base).unwrap();
+        let tasks: Vec<AdjointTask<'_, _>> = runs
+            .iter()
+            .map(|run| AdjointTask {
+                circuit: &run.circuit,
+                wrt: &run.wrt,
+                weight: move |b: usize| run.observable.weight(b),
+            })
+            .collect();
+        let derivatives = NativeStatevectorBackend::new(0)
+            .run_adjoint(&tasks, None)
+            .unwrap();
+        problem.gradient_from_adjoint(&derivatives).unwrap()
+    }
+
+    /// The exact parameter-shift gradient at `theta`, computed apart.
+    fn shift_gradient(problem: &QmlProblem, theta: &[f64]) -> Vec<f64> {
+        let probabilities = exact_probabilities(problem.gradient_circuits(theta).unwrap());
+        problem.gradient_from_probabilities(&probabilities).unwrap()
+    }
+
+    /// The two exact gradients agree to rounding: both are exact (C-11 (e)).
+    fn assert_close_to_the_shift(gradient: &[f64], shift: &[f64]) {
+        assert_eq!(gradient.len(), shift.len());
+        for (k, (g, s)) in gradient.iter().zip(shift).enumerate() {
+            assert!((g - s).abs() < 1e-9, "∂/∂θ_{k}: {g} vs the shift's {s}");
+        }
+    }
+
     /// Exact probabilities straight from a fresh native backend.
     fn exact_probabilities(
         circuits: Vec<polypus_circuit::ConcreteCircuit>,
@@ -1778,13 +1894,12 @@ class Bound:
                 problem.fitness_from_probabilities(&probabilities).unwrap()
             );
         }
+        // contract test: needs human sign-off (#503: the reference is the
+        // adjoint gradient, still bit for bit, and it is the shift's to 1e-9)
         let theta = &candidates[1];
         let gradient = oracle.gradient_batch(theta, problem.num_params());
-        let probabilities = exact_probabilities(problem.gradient_circuits(theta).unwrap());
-        assert_eq!(
-            gradient,
-            problem.gradient_from_probabilities(&probabilities).unwrap()
-        );
+        assert_eq!(gradient, adjoint_gradient(&problem, theta));
+        assert_close_to_the_shift(&gradient, &shift_gradient(&problem, theta));
         assert!(!oracle.errors.failed());
     }
 
@@ -1948,13 +2063,134 @@ class Bound:
                 assert_eq!(*f, sub.fitness_from_probabilities(&probabilities).unwrap());
             }
         }
+        // contract test: needs human sign-off (#503: the reference is the
+        // adjoint gradient, still bit for bit, and it is the shift's to 1e-9)
         let theta = &candidates[0];
         let gradient = oracle.gradient_batch(theta, problem.num_params());
         let sub = problem.subset(&minibatch_indices(6, 9, 2, 2)).unwrap();
-        let probabilities = exact_probabilities(sub.gradient_circuits(theta).unwrap());
+        assert_eq!(gradient, adjoint_gradient(&sub, theta));
+        assert_close_to_the_shift(&gradient, &shift_gradient(&sub, theta));
+    }
+
+    // contract test: needs human sign-off
+    /// M2: when the adjoint's two statevectors do not fit, exact mode takes the
+    /// parameter shift, whose single statevector does. Both give `θ`'s value bit
+    /// for bit (the same exact probabilities of the same base circuits) and the
+    /// same gradient to rounding. The fit decision itself is the backend's
+    /// (`the_adjoint_needs_two_statevectors_and_falls_back_to_the_shift_with_one`).
+    #[test]
+    fn the_shift_fallback_gives_the_adjoint_value_and_gradient() {
+        let problem = native_problem(4);
+        let theta = &native_candidates(&problem, 1)[0];
+        let oracle = native_oracle(&problem, true, None, 0);
+        let QmlSource::Native {
+            exact: Some(native),
+            ..
+        } = &oracle.source
+        else {
+            panic!("an exact native oracle");
+        };
+        let base = problem.bind_batch(theta).unwrap();
+        let (adjoint_value, adjoint) = oracle
+            .exact_adjoint_gradient(native, &problem, theta, base)
+            .unwrap();
+        let (shift_value, shift) = oracle
+            .exact_shift_gradient(native, &problem, theta)
+            .unwrap();
+        assert_eq!(adjoint_value, shift_value);
+        assert_close_to_the_shift(&adjoint, &shift);
+        // And the oracle, whose budget holds two here, takes the adjoint.
         assert_eq!(
-            gradient,
-            sub.gradient_from_probabilities(&probabilities).unwrap()
+            oracle.value_and_gradient(theta, problem.num_params()),
+            Some((adjoint_value, adjoint))
+        );
+    }
+
+    /// A cancellation stops the exact gradient as one between the planner's
+    /// waves does: the cooperative cancel's `KeyboardInterrupt` (the only
+    /// `EvaluationError::Python` this path can return), before any circuit
+    /// runs. The exception is not formatted: that needs an initialized
+    /// interpreter, which depends on which test of this binary ran first.
+    #[test]
+    fn a_cancelled_exact_gradient_stops_before_running() {
+        let problem = native_problem(4);
+        let theta = &native_candidates(&problem, 1)[0];
+        let oracle = native_oracle(&problem, true, None, 0);
+        oracle.cancel.cancel();
+        assert!(matches!(
+            oracle.try_gradient(theta),
+            Err(EvaluationError::Python(_))
+        ));
+    }
+
+    /// An interrupt guard that, on its `at`-th poll, cancels the very token it
+    /// guards and lets the poll through: a cancellation that arrives right
+    /// after a check, deterministically, with no timer.
+    struct CancelAt {
+        at: usize,
+        polls: std::sync::atomic::AtomicUsize,
+        token: std::sync::OnceLock<CancelToken>,
+    }
+
+    impl polypus_infrastructure::Interrupt for CancelAt {
+        fn poll(&self) -> Result<(), BackendError> {
+            let poll = self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if poll == self.at {
+                if let Some(token) = self.token.get() {
+                    token.cancel();
+                }
+            }
+            Ok(())
+        }
+    }
+
+    // contract test: needs human sign-off
+    /// A cancellation that arrives while the adjoint runs stops it in flight
+    /// and is reported as the cooperative cancellation. The guard cancels the
+    /// token on its third poll — the check right before the adjoint batch (the
+    /// first two are the one before the memory check and the one before `θ`'s
+    /// exact run) — and lets it through, so the batch starts already cancelled
+    /// and only the simulator's hook, polled inside each run, can stop it. The
+    /// runs are long: uninterrupted, this gradient (16 qubits, a 3-layer
+    /// ansatz, 4 rows) took 1.47 s in a debug `cargo test` on a 16-CPU node,
+    /// about 60 times the hook's first checkpoint (25 ms), so the hook comes due
+    /// long before the runs end; a gradient that completed would be `Ok`. The
+    /// exception is not formatted (see the test above).
+    #[test]
+    fn a_cancellation_stops_the_adjoint_in_flight() {
+        let z0 =
+            Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())]).unwrap();
+        let model = QuantumModel::new(16)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(3)
+            .readout(Readout::new(vec![z0], Decision::Raw).unwrap())
+            .compile(16)
+            .unwrap();
+        let rows: Vec<Vec<f64>> = (0..4)
+            .map(|i| (0..16).map(|j| 0.1 * ((i + j) % 7) as f64).collect())
+            .collect();
+        let data = Dataset::from_rows(&rows, &[0.5, -0.4, 0.5, -0.4]).unwrap();
+        let problem = Arc::new(QmlProblem::new(model, data, Loss::SquaredError).unwrap());
+        let theta = native_candidates(&problem, 1).remove(0);
+
+        let guard = Arc::new(CancelAt {
+            at: 3,
+            polls: std::sync::atomic::AtomicUsize::new(0),
+            token: std::sync::OnceLock::new(),
+        });
+        let token = CancelToken::with_interrupt(guard.clone());
+        assert!(guard.token.set(token.clone()).is_ok());
+        let mut oracle = native_oracle(&problem, true, None, 0);
+        oracle.cancel = token;
+
+        assert!(matches!(
+            oracle.try_gradient(&theta),
+            Err(EvaluationError::Python(_))
+        ));
+        assert_eq!(
+            guard.polls.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "cancelled at the check before the adjoint, not before"
         );
     }
 
