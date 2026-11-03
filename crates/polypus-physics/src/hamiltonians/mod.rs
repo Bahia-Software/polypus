@@ -10,6 +10,7 @@ pub mod fermion;
 pub mod mapping;
 pub mod pauli;
 pub mod photon_polarization;
+pub mod taper;
 
 pub use exact::{DenseMatrix, MAX_DENSE_QUBITS};
 pub use fermion::{
@@ -17,6 +18,7 @@ pub use fermion::{
 };
 pub use mapping::{QubitMapping, HERMITICITY_TOLERANCE};
 pub use pauli::{PauliAxis, PauliString, PauliSum, PauliTerm, Phase};
+pub use taper::parity_reduction_qubits;
 
 /// Trait for any physical system that can express its quantum Hamiltonian as a
 /// sum of Pauli operators.

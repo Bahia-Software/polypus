@@ -168,54 +168,8 @@ mod tests {
     use super::*;
     use crate::hamiltonians::exact::DenseMatrix;
     use crate::hamiltonians::fermion::{FermionHamiltonian, FermionTerm};
+    use crate::test_support::symmetric_integrals as integrals;
     use Ladder::{Annihilate, Create};
-
-    /// Deterministic integrals for `k` orbitals with every real-orbital
-    /// symmetry, magnitudes of order 1 (a small LCG, no dependency).
-    fn integrals(k: usize, seed: u64) -> FermionHamiltonian {
-        let mut state = seed;
-        let mut next = move || {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            ((state >> 11) as f64) / ((1u64 << 53) as f64) - 0.5
-        };
-        let mut one = vec![0.0; k * k];
-        for p in 0..k {
-            for q in p..k {
-                let v = next();
-                one[p * k + q] = v;
-                one[q * k + p] = v;
-            }
-        }
-        let idx = |p: usize, q: usize, r: usize, s: usize| ((p * k + q) * k + r) * k + s;
-        let mut two = vec![f64::NAN; k * k * k * k];
-        for p in 0..k {
-            for q in 0..k {
-                for r in 0..k {
-                    for s in 0..k {
-                        if !two[idx(p, q, r, s)].is_nan() {
-                            continue;
-                        }
-                        let v = next();
-                        for (a, b, c, d) in [
-                            (p, q, r, s),
-                            (q, p, r, s),
-                            (p, q, s, r),
-                            (q, p, s, r),
-                            (r, s, p, q),
-                            (s, r, p, q),
-                            (r, s, q, p),
-                            (s, r, q, p),
-                        ] {
-                            two[idx(a, b, c, d)] = v;
-                        }
-                    }
-                }
-            }
-        }
-        FermionHamiltonian::new(k, next(), one, two).unwrap()
-    }
 
     fn max_abs_diff(a: &DenseMatrix, b: &DenseMatrix) -> f64 {
         a.as_slice()
