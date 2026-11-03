@@ -9,8 +9,8 @@
 
 use std::sync::{Mutex, Once};
 
-/// Records every `WARN` and `ERROR` line it receives.
-struct Capture(Mutex<Vec<String>>);
+/// Records every `WARN` and `ERROR` line it receives, with its level.
+struct Capture(Mutex<Vec<(log::Level, String)>>);
 
 impl log::Log for Capture {
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
@@ -19,7 +19,7 @@ impl log::Log for Capture {
 
     fn log(&self, record: &log::Record<'_>) {
         if self.enabled(record.metadata()) {
-            let line = record.args().to_string();
+            let line = (record.level(), record.args().to_string());
             self.0.lock().unwrap_or_else(|p| p.into_inner()).push(line);
         }
     }
@@ -45,6 +45,18 @@ pub(crate) fn capture_logs() {
 ///
 /// If [`capture_logs`] has not run yet: the lines would have been lost.
 pub(crate) fn logged_for(run_id: &str) -> Vec<String> {
+    logged_with_levels_for(run_id)
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect()
+}
+
+/// The lines logged so far for `run_id`, each with its level.
+///
+/// # Panics
+///
+/// If [`capture_logs`] has not run yet: the lines would have been lost.
+pub(crate) fn logged_with_levels_for(run_id: &str) -> Vec<(log::Level, String)> {
     assert!(
         INSTALL.is_completed(),
         "call test_log::capture_logs() at the start of the test, before anything logs"
@@ -55,7 +67,7 @@ pub(crate) fn logged_for(run_id: &str) -> Vec<String> {
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .iter()
-        .filter(|line| line.starts_with(&prefix))
+        .filter(|(_, line)| line.starts_with(&prefix))
         .cloned()
         .collect()
 }
