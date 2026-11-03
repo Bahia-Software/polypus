@@ -7,6 +7,7 @@
 
 pub mod exact;
 pub mod fermion;
+pub mod mapping;
 pub mod pauli;
 pub mod photon_polarization;
 
@@ -14,6 +15,7 @@ pub use exact::{DenseMatrix, MAX_DENSE_QUBITS};
 pub use fermion::{
     FermionHamiltonian, FermionOperator, FermionTerm, Ladder, INTEGRAL_SYMMETRY_TOLERANCE,
 };
+pub use mapping::{QubitMapping, HERMITICITY_TOLERANCE};
 pub use pauli::{PauliAxis, PauliString, PauliSum, PauliTerm, Phase};
 
 /// Trait for any physical system that can express its quantum Hamiltonian as a
