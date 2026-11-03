@@ -23,6 +23,7 @@
 
 use std::collections::HashMap;
 
+use crate::adjoint::DiagonalObservable;
 use crate::error::{QmlError, ValidationError};
 
 /// A single-qubit Pauli operator. All three bases are measurable: `compile`
@@ -172,6 +173,18 @@ impl ResolvedObservable {
     /// Wrap already-resolved weighted terms.
     pub(crate) fn new(terms: Vec<(f64, ResolvedPauliString)>) -> Self {
         ResolvedObservable { terms }
+    }
+
+    /// The diagonal operator this observable is on the measured state (each
+    /// string a parity of its physical qubits), for the adjoint gradient. See
+    /// [`DiagonalObservable::from_terms`] for the one error.
+    pub(crate) fn diagonal(&self) -> Result<DiagonalObservable, QmlError> {
+        let qubits: Vec<(f64, Vec<usize>)> = self
+            .terms
+            .iter()
+            .map(|(coeff, string)| (*coeff, string.0.iter().map(|&(q, _)| q).collect()))
+            .collect();
+        DiagonalObservable::from_terms(qubits.iter().map(|(c, q)| (*c, q.as_slice())))
     }
 
     /// Estimate `⟨O⟩ = Σ_k c_k · ⟨P_k⟩` from measurement `counts`.

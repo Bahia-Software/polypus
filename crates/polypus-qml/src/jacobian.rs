@@ -30,10 +30,11 @@ use std::collections::HashMap;
 
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 
+use crate::adjoint::{check_rows, AdjointRun};
 use crate::error::QmlError;
 use crate::model::{CompiledModel, InputTrace};
 use crate::observables::BitstringWeight;
-use crate::problem::{untie_traced, Slot};
+use crate::problem::{untie_traced, Slot, UntiedTemplate};
 
 /// What an [`ExpectationJacobian`] differentiates with respect to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +86,8 @@ pub struct ExpectationJacobian {
 struct UntiedSample {
     template: ParameterizedCircuit,
     slots: Vec<Slot>,
+    /// `positions[j]`: where slot `j`'s gate sits in `template`.
+    positions: Vec<usize>,
 }
 
 /// A slot without its sample-dependent values: what must agree across samples.
@@ -137,7 +140,11 @@ impl ExpectationJacobian {
                     return Err(QmlError::NoInputGradient { encoder });
                 }
             }
-            let (template, slots) = untie_traced(&template, &trace.gates)?;
+            let UntiedTemplate {
+                template,
+                slots,
+                positions,
+            } = untie_traced(&template, &trace.gates)?;
             let shape: Vec<SlotShape> = slots.iter().map(SlotShape::of).collect();
             match &structure {
                 Some(first) if *first != shape => {
@@ -151,7 +158,11 @@ impl ExpectationJacobian {
                 Some(_) => {}
                 None => structure = Some(shape),
             }
-            untied.push(UntiedSample { template, slots });
+            untied.push(UntiedSample {
+                template,
+                slots,
+                positions,
+            });
         }
         let shifted = structure
             .unwrap_or_default()
@@ -262,6 +273,16 @@ impl ExpectationJacobian {
     ) -> Result<Jacobian, QmlError> {
         self.all().jacobian_from_probabilities(probabilities)
     }
+
+    /// [`all`](Self::all)`().adjoint_runs(theta)`.
+    pub fn adjoint_runs(&self, theta: &[f64]) -> Result<Vec<AdjointRun>, QmlError> {
+        self.all().adjoint_runs(theta)
+    }
+
+    /// [`all`](Self::all)`().jacobian_from_adjoint(derivatives)`.
+    pub fn jacobian_from_adjoint(&self, derivatives: &[Vec<f64>]) -> Result<Jacobian, QmlError> {
+        self.all().jacobian_from_adjoint(derivatives)
+    }
 }
 
 /// Consecutive samples of an [`ExpectationJacobian`], from
@@ -354,11 +375,7 @@ impl JacobianBlock<'_> {
             return Err(mismatch);
         }
         let jacobian = self.jacobian;
-        let (n, k) = (self.samples.len(), jacobian.num_observables());
-        let (num_params, num_features) = (jacobian.num_params(), jacobian.num_features());
-        let wrt = jacobian.wrt;
-        let mut params = wrt.params().then(|| vec![0.0; n * k * num_params]);
-        let mut inputs = wrt.inputs().then(|| vec![0.0; n * k * num_features]);
+        let mut out = self.zero_jacobian();
         let per_sample = jacobian.circuits_per_sample();
         for (s, sample) in self.samples.iter().enumerate() {
             let results = weights
@@ -370,30 +387,111 @@ impl JacobianBlock<'_> {
                 for (o, (plus, minus)) in plus.iter().zip(&minus).enumerate() {
                     // The shift rule: the derivative of `⟨O_o⟩` with respect
                     // to this one gate's angle.
-                    let derivative = (plus - minus) / 2.0;
-                    match (&sample.slots[slot], &mut params, &mut inputs) {
-                        (Slot::Param(p), Some(params), _) => {
-                            params[(s * k + o) * num_params + p] += derivative;
-                        }
-                        (Slot::Input { features, .. }, _, Some(inputs)) => {
-                            for &(f, factor) in features {
-                                inputs[(s * k + o) * num_features + f] += factor * derivative;
-                            }
-                        }
-                        // Only the slots `wrt` asks for are shifted.
-                        _ => {}
-                    }
+                    out.add(s, o, &sample.slots[slot], (plus - minus) / 2.0);
                 }
             }
         }
-        Ok(Jacobian {
+        Ok(out)
+    }
+
+    /// The Jacobian of the block's samples, all zero, with the parts `wrt`
+    /// asks for.
+    fn zero_jacobian(&self) -> Jacobian {
+        let jacobian = self.jacobian;
+        let (n, k) = (self.samples.len(), jacobian.num_observables());
+        let (num_params, num_features) = (jacobian.num_params(), jacobian.num_features());
+        Jacobian {
             num_samples: n,
             num_observables: k,
             num_params,
             num_features,
-            params,
-            inputs,
-        })
+            params: jacobian.wrt.params().then(|| vec![0.0; n * k * num_params]),
+            inputs: jacobian
+                .wrt
+                .inputs()
+                .then(|| vec![0.0; n * k * num_features]),
+        }
+    }
+
+    /// The number of adjoint runs of the block:
+    /// `num_samples() · num_observables()`.
+    pub fn num_adjoint_runs(&self) -> usize {
+        self.samples.len() * self.jacobian.num_observables()
+    }
+
+    /// The block's [adjoint runs](crate::AdjointRun) at `theta`: for each
+    /// sample in order, one per readout observable in order, each
+    /// differentiating the gates the shift rule of [`circuits`](Self::circuits)
+    /// would move, in gate order. The exact-mode alternative to the shifted
+    /// circuits, for a caller that holds the statevector; read the results with
+    /// [`jacobian_from_adjoint`](Self::jacobian_from_adjoint). A `theta` of the
+    /// wrong length is
+    /// [`QmlError::Circuit`]`(`[`CircuitError::WrongNumberOfParams`]`)`.
+    pub fn adjoint_runs(&self, theta: &[f64]) -> Result<Vec<AdjointRun>, QmlError> {
+        let num_params = self.jacobian.num_params();
+        if theta.len() != num_params {
+            return Err(QmlError::Circuit(CircuitError::WrongNumberOfParams {
+                expected: num_params,
+                got: theta.len(),
+            }));
+        }
+        let observables = self
+            .jacobian
+            .model
+            .resolved_readout()
+            .observables()
+            .iter()
+            .map(|observable| observable.diagonal())
+            .collect::<Result<Vec<_>, QmlError>>()?;
+        let mut runs = Vec::with_capacity(self.num_adjoint_runs());
+        for sample in self.samples {
+            let values: Vec<f64> = sample
+                .slots
+                .iter()
+                .map(|slot| match slot {
+                    Slot::Param(k) => theta[*k],
+                    Slot::Input { angle, .. } => *angle,
+                })
+                .collect();
+            let circuit = sample.template.assign_parameters(&values)?;
+            let wrt: Vec<usize> = self
+                .jacobian
+                .shifted
+                .iter()
+                .map(|&slot| sample.positions[slot])
+                .collect();
+            for observable in &observables {
+                runs.push(AdjointRun {
+                    circuit: circuit.clone(),
+                    wrt: wrt.clone(),
+                    observable: observable.clone(),
+                });
+            }
+        }
+        Ok(runs)
+    }
+
+    /// The block's [`Jacobian`] from the derivatives of the runs of
+    /// [`adjoint_runs`](Self::adjoint_runs): one row per run, in order, one
+    /// derivative per shifted gate. Each derivative goes where the shift rule's
+    /// would ([`jacobian_from_probabilities`](Self::jacobian_from_probabilities)):
+    /// to the parameter its gate reads, or to each feature it reads times that
+    /// feature's chain-rule factor. The wrong number of rows, or a row of the
+    /// wrong length, is [`QmlError::CountsLengthMismatch`].
+    pub fn jacobian_from_adjoint(&self, derivatives: &[Vec<f64>]) -> Result<Jacobian, QmlError> {
+        let jacobian = self.jacobian;
+        let k = jacobian.num_observables();
+        check_rows(derivatives, self.num_adjoint_runs(), jacobian.shifted.len())?;
+        let mut out = self.zero_jacobian();
+        for (s, sample) in self.samples.iter().enumerate() {
+            for o in 0..k {
+                let row = &derivatives[s * k + o];
+                for (&derivative, &slot) in row.iter().zip(&jacobian.shifted) {
+                    out.add(s, o, &sample.slots[slot], derivative);
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -418,6 +516,26 @@ pub struct Jacobian {
 }
 
 impl Jacobian {
+    /// Add the derivative of `⟨O_o⟩(x_s)` with respect to one gate's angle
+    /// where it belongs: to the parameter the gate reads, or to each feature
+    /// it reads times that feature's chain-rule factor. A slot of a part this
+    /// Jacobian does not hold is skipped (only the slots `wrt` asks for are
+    /// differentiated).
+    fn add(&mut self, s: usize, o: usize, slot: &Slot, derivative: f64) {
+        let k = self.num_observables;
+        match (slot, &mut self.params, &mut self.inputs) {
+            (Slot::Param(p), Some(params), _) => {
+                params[(s * k + o) * self.num_params + p] += derivative;
+            }
+            (Slot::Input { features, .. }, _, Some(inputs)) => {
+                for &(f, factor) in features {
+                    inputs[(s * k + o) * self.num_features + f] += factor * derivative;
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// The number of samples: both parts' first axis.
     pub fn num_samples(&self) -> usize {
         self.num_samples
