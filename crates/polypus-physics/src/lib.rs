@@ -1,6 +1,7 @@
 //! # polypus-physics
 //!
-//! Pure-Rust particle-physics simulation layer for Polypus.
+//! Pure-Rust physics layer for Polypus: classical Monte Carlo particle
+//! transport, and quantum Hamiltonians, including molecular ones (H₂, STO-3G).
 //! No Python, no PyO3, no external physics framework.
 //!
 //! ## Layers
@@ -11,7 +12,8 @@
 //! | [`medium`] | Material properties |
 //! | [`interactions`] | Cross-sections and kinematic sampling |
 //! | [`monte_carlo`] | Classical MC transport engine |
-//! | [`hamiltonians`] | Quantum Hamiltonians as `PauliSum` (data only) |
+//! | [`hamiltonians`] | Quantum Hamiltonians as Pauli sums: fermionic operators, qubit mappings, tapering, exact diagonalization |
+//! | [`chemistry`] | Molecular integrals (STO-3G) and molecules (H₂) built on [`hamiltonians`] |
 //!
 //! ## ENDF-6 photon data
 //!
@@ -60,19 +62,31 @@
 //! println!("Mean deposit: {:.4} MeV", result.mean_deposit_mev);
 //! ```
 //!
-//! ## Hamiltonian bridge (data contract for future VQE/QPE)
+//! ## Quantum Hamiltonians
+//!
+//! Every Hamiltonian is a [`hamiltonians::PauliSum`] with real coefficients
+//! over multi-qubit Pauli strings, the input that VQE, QPE or Trotter
+//! compilation will consume. A molecule goes from integrals to qubits in
+//! [`chemistry`]; small sums can be diagonalized exactly as a reference.
 //!
 //! ```
-//! use polypus_physics::hamiltonians::photon_polarization::photon_polarization_hamiltonian;
+//! use polypus_physics::chemistry::{H2Encoding, H2Molecule};
+//! use polypus_physics::hamiltonians::PhysicsHamiltonian;
 //!
-//! // Express H = 1.0·σ_z + 0.1·σ_x  (natural units, ħ=1).
-//! let h = photon_polarization_hamiltonian(1.0, 0.1);
-//! // h.to_string() or pass to polypus-circuit's Trotter compiler (future).
-//! assert_eq!(h.coefficient_norm(), 1.1);
+//! // H₂ at its equilibrium bond length, reduced to 2 qubits.
+//! let h = H2Molecule::new(0.7414, H2Encoding::ParityTapered)
+//!     .unwrap()
+//!     .to_pauli_sum();
+//! println!("{h}"); // -0.3399… I, +0.1812… X0 X1, +0.3939… Z0, …
+//! assert!((h.ground_energy().unwrap() + 1.137270).abs() < 1e-5);
 //! ```
+//!
+//! The single-photon polarization Hamiltonian `ω σ_z + Ω σ_x` is in
+//! [`hamiltonians::photon_polarization`].
 
 #![deny(clippy::all)]
 
+pub mod chemistry;
 pub mod constants;
 pub mod error;
 pub mod hamiltonians;
@@ -114,6 +128,79 @@ pub(crate) mod test_support {
             if let Err(e) = std::fs::remove_dir_all(&self.0) {
                 eprintln!("could not remove {}: {e}", self.0.display());
             }
+        }
+    }
+
+    /// Deterministic pseudo-random numbers in `[0, 1)` for tests (a small
+    /// LCG, no dependency).
+    pub(crate) struct TestRng(u64);
+
+    impl TestRng {
+        pub(crate) fn new(seed: u64) -> Self {
+            TestRng(seed)
+        }
+
+        pub(crate) fn next_f64(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    /// Deterministic molecular integrals for `k` spatial orbitals with every
+    /// real-orbital symmetry and magnitudes of order 1, as the raw
+    /// `(nuclear_repulsion, one_body, two_body)` arrays that
+    /// `FermionHamiltonian::new` takes.
+    pub(crate) fn symmetric_integral_arrays(k: usize, seed: u64) -> (f64, Vec<f64>, Vec<f64>) {
+        let mut rng = TestRng::new(seed);
+        let mut next = move || rng.next_f64() - 0.5;
+        let mut one = vec![0.0; k * k];
+        for p in 0..k {
+            for q in p..k {
+                let v = next();
+                one[p * k + q] = v;
+                one[q * k + p] = v;
+            }
+        }
+        let idx = |p: usize, q: usize, r: usize, s: usize| ((p * k + q) * k + r) * k + s;
+        let mut two = vec![f64::NAN; k * k * k * k];
+        for p in 0..k {
+            for q in 0..k {
+                for r in 0..k {
+                    for s in 0..k {
+                        if !two[idx(p, q, r, s)].is_nan() {
+                            continue;
+                        }
+                        let v = next();
+                        for (a, b, c, d) in
+                            crate::hamiltonians::fermion::chemist_permutations(p, q, r, s)
+                        {
+                            two[idx(a, b, c, d)] = v;
+                        }
+                    }
+                }
+            }
+        }
+        (next(), one, two)
+    }
+
+    /// [`symmetric_integral_arrays`] as a `FermionHamiltonian`.
+    pub(crate) fn symmetric_integrals(
+        k: usize,
+        seed: u64,
+    ) -> crate::hamiltonians::FermionHamiltonian {
+        let (nuclear_repulsion, one, two) = symmetric_integral_arrays(k, seed);
+        crate::hamiltonians::FermionHamiltonian::new(k, nuclear_repulsion, one, two)
+            .expect("generated integrals are symmetric and finite")
+    }
+
+    /// Asserts two equally long slices agree element-wise within `tol`.
+    pub(crate) fn assert_close(a: &[f64], b: &[f64], tol: f64) {
+        assert_eq!(a.len(), b.len(), "{a:?} vs {b:?}");
+        for (x, y) in a.iter().zip(b) {
+            assert!((x - y).abs() <= tol, "{a:?} vs {b:?}");
         }
     }
 }
