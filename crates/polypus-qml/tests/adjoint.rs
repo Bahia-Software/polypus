@@ -191,7 +191,6 @@ fn scalar_models(readout: Readout) -> Vec<(QuantumModel, usize, &'static str)> {
     ]
 }
 
-// contract test: needs human sign-off
 /// Acceptance criterion 3, scalar losses: every model shape, every scalar
 /// loss and decision, `Z` strings, the `X`/`Y` bases and a weighted
 /// observable.
@@ -238,7 +237,6 @@ fn the_adjoint_gradient_is_the_shift_gradient_for_every_scalar_loss() {
     }
 }
 
-// contract test: needs human sign-off
 /// The categorical loss: one adjoint run per sample covers every class, with
 /// the per-class chain-rule weights folded into its observable.
 #[test]
@@ -259,7 +257,6 @@ fn the_adjoint_gradient_is_the_shift_gradient_for_the_categorical_loss() {
     }
 }
 
-// contract test: needs human sign-off
 /// Convolution and pooling share each parameter across qubit pairs: the
 /// adjoint gives one derivative per gate, and the parameter's is their sum.
 /// Summing only the first occurrence would miss the other pairs' gates, and
@@ -293,7 +290,6 @@ fn parameters_shared_by_convolution_and_pooling_sum_every_gate() {
     assert_gradient_matches(&qcnn, "re-uploading after pooling");
 }
 
-// contract test: needs human sign-off
 /// A minibatch is a subset problem: its adjoint gradient is its shift
 /// gradient, and different from the full problem's.
 #[test]
@@ -394,7 +390,6 @@ fn readouts() -> Vec<Readout> {
     ]
 }
 
-// contract test: needs human sign-off
 /// The parameter Jacobian, every model shape and readout.
 #[test]
 fn the_adjoint_parameter_jacobian_is_the_shift_jacobian() {
@@ -406,7 +401,6 @@ fn the_adjoint_parameter_jacobian_is_the_shift_jacobian() {
     }
 }
 
-// contract test: needs human sign-off
 /// The input Jacobian, and both at once, for the angle and IQP encoders —
 /// re-uploaded, and in every IQP entanglement, whose `Rzz(x_i·x_j)` gates
 /// carry a chain-rule factor towards each of their two features.

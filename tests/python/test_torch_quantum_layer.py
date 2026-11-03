@@ -14,8 +14,6 @@ inside ``torch.nn.Sequential`` with several ``torch.optim`` optimizers, and
 Needs PyTorch: skipped without it, except under ``POLYPUS_REQUIRE_TORCH=1``,
 where it fails instead (CI installs a pinned CPU torch on its latest Python and
 sets it). What needs no torch is in ``test_torch_import.py``.
-
-Contract test: draft pending human sign-off.
 """
 
 import copy

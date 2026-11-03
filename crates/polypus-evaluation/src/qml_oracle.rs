@@ -1894,8 +1894,8 @@ class Bound:
                 problem.fitness_from_probabilities(&probabilities).unwrap()
             );
         }
-        // contract test: needs human sign-off (#503: the reference is the
-        // adjoint gradient, still bit for bit, and it is the shift's to 1e-9)
+        // #503: the reference is the adjoint gradient, still bit for bit, and
+        // it is the shift's to 1e-9.
         let theta = &candidates[1];
         let gradient = oracle.gradient_batch(theta, problem.num_params());
         assert_eq!(gradient, adjoint_gradient(&problem, theta));
@@ -2063,8 +2063,8 @@ class Bound:
                 assert_eq!(*f, sub.fitness_from_probabilities(&probabilities).unwrap());
             }
         }
-        // contract test: needs human sign-off (#503: the reference is the
-        // adjoint gradient, still bit for bit, and it is the shift's to 1e-9)
+        // #503: the reference is the adjoint gradient, still bit for bit, and
+        // it is the shift's to 1e-9.
         let theta = &candidates[0];
         let gradient = oracle.gradient_batch(theta, problem.num_params());
         let sub = problem.subset(&minibatch_indices(6, 9, 2, 2)).unwrap();
@@ -2072,7 +2072,6 @@ class Bound:
         assert_close_to_the_shift(&gradient, &shift_gradient(&sub, theta));
     }
 
-    // contract test: needs human sign-off
     /// M2: when the adjoint's two statevectors do not fit, exact mode takes the
     /// parameter shift, whose single statevector does. Both give `θ`'s value bit
     /// for bit (the same exact probabilities of the same base circuits) and the
@@ -2144,7 +2143,6 @@ class Bound:
         }
     }
 
-    // contract test: needs human sign-off
     /// A cancellation that arrives while the adjoint runs stops it in flight
     /// and is reported as the cooperative cancellation. The guard cancels the
     /// token on its third poll — the check right before the adjoint batch (the

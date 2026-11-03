@@ -11,8 +11,6 @@ each case runs in a child process twice — with a budget that holds two
 statevectors, and with one that holds one — and the two exact results must
 agree to rounding. That the second really took the shift rule is read off its
 ``info`` record.
-
-Contract test: draft pending human sign-off.
 """
 
 import json

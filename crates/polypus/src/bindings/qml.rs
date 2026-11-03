@@ -3003,9 +3003,9 @@ mod tests {
                     .run_circuits_exact(&circuits, &run_params(0, 1))
                     .unwrap();
                 let shift = alone.jacobian_from_probabilities(&probabilities).unwrap();
-                // contract test: needs human sign-off (#503: the exact
-                // Jacobian is the adjoint one; the row alone is still the
-                // reference bit for bit, and it is the shift's to 1e-9)
+                // #503: the exact Jacobian is the adjoint one; the row alone
+                // is still the reference bit for bit, and it is the shift's to
+                // 1e-9.
                 let got = &run.by_params[i * per_row..(i + 1) * per_row];
                 assert_eq!(
                     Some(got),
@@ -3328,7 +3328,6 @@ mod tests {
         }
     }
 
-    // contract test: needs human sign-off
     /// `qml.jacobian(exact=True)` takes the adjoint (#503): with both parts,
     /// the Jacobian is the parameter shift's to rounding, and the block size
     /// changes nothing, bit for bit.

@@ -224,7 +224,6 @@ fn random_circuit(n: usize, layers: usize, kinds: &[u64], seed: u64) -> Concrete
     ConcreteCircuit::try_new(n, gates).expect("a valid circuit")
 }
 
-// contract test: needs human sign-off
 /// Acceptance criterion 1: each of the five rotations, alone among fixed gates,
 /// matches the shift rule and central differences.
 #[test]
@@ -239,7 +238,6 @@ fn each_rotation_matches_the_shift_rule_and_finite_differences() {
     }
 }
 
-// contract test: needs human sign-off
 #[test]
 fn mixed_rotations_on_a_wider_circuit_match_the_references() {
     let n = 6;
@@ -274,7 +272,6 @@ fn a_pauli_z_product_observable_matches_the_references() {
     assert_eq!(from_function, adjoint(&circuit, &wrt, &weights));
 }
 
-// contract test: needs human sign-off
 /// One angle read by three gates (as a convolution reuses its parameters): the
 /// derivative of the shared angle is the sum of the three gates' derivatives,
 /// and each of those is its own gate's shift derivative.
@@ -404,7 +401,6 @@ fn every_kind_circuit() -> (ConcreteCircuit, Vec<usize>) {
     (circuit, wrt)
 }
 
-// contract test: needs human sign-off
 /// Acceptance criterion 2: the sweep back steps through the inverse of every
 /// instruction kind, and the gradient of a circuit holding all of them is the
 /// shift rule's. The kind list must be complete, so a gate added to
@@ -504,7 +500,6 @@ fn neither_fusion_nor_a_terminal_measure_all_changes_the_result() {
     assert_eq!(adjoint(&unmeasured, &wrt, &weights), fused);
 }
 
-// contract test: needs human sign-off
 /// Acceptance criterion 4: the parallel kernels and reductions give the same
 /// bits as the sequential ones, for any number of threads.
 #[cfg(feature = "parallel")]

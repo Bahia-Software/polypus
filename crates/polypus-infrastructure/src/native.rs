@@ -2261,7 +2261,6 @@ mod tests {
             .count()
     }
 
-    // contract test: needs human sign-off
     /// The adjoint holds two statevectors (M2): with a known budget that holds
     /// exactly two `n`-qubit statevectors it runs; one byte less and it falls
     /// back to the parameter shift — logged at `info`, never silently, once per
