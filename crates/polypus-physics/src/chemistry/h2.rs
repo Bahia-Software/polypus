@@ -96,7 +96,7 @@ impl H2Molecule {
                 .to_qubits(QubitMapping::Parity)?
                 .taper(&parity_reduction_qubits(2, 1, 1)?)?,
         }
-        .chop(H2_ROUNDING_TOLERANCE);
+        .chop(H2_ROUNDING_TOLERANCE)?;
         Ok(Self {
             bond_length_bohr: r,
             encoding,
@@ -392,6 +392,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Closed-shell Hartree–Fock energy `2 h_σσ + (σσ|σσ) + E_nuc`.
+    fn hartree_fock_energy(h2: &H2Molecule) -> f64 {
+        let f = h2.fermion_hamiltonian();
+        2.0 * f.one_body(0, 0) + f.two_body(0, 0, 0, 0) + f.nuclear_repulsion()
+    }
+
+    #[test]
+    fn hartree_fock_energies_match_the_pyscf_reference() {
+        // Pins the σ/σ* integrals themselves, not only the FCI eigenvalue.
+        let rows = reference_rows("fci_energies.csv");
+        assert_eq!(rows.len(), 7, "bond lengths in the reference");
+        for row in rows {
+            let r: f64 = row[0].parse().unwrap();
+            let hf: f64 = row[1].parse().unwrap();
+            let h2 = H2Molecule::new(r, H2Encoding::JordanWigner).unwrap();
+            let e = hartree_fock_energy(&h2);
+            assert!((e - hf).abs() <= 1e-8, "R = {r} Å: {e} vs {hf}");
+            // The same energy is the qubit Hamiltonian's diagonal at the
+            // Hartree–Fock state |0101⟩ (σ↑ and σ↓ occupied, block order).
+            let diagonal = h2
+                .to_pauli_sum()
+                .to_dense_real()
+                .unwrap()
+                .get(0b0101, 0b0101)
+                .unwrap();
+            assert!((diagonal - e).abs() <= 1e-12, "R = {r} Å");
+        }
+    }
+
+    #[test]
+    fn hartree_fock_matches_szabo_ostlund_at_1_4_bohr() {
+        // Szabo & Ostlund ch. 3: E₀ = −1.8310 (electronic), −1.1167 (total).
+        let h2 = H2Molecule::new(1.4 * BOHR_RADIUS_ANGSTROM, H2Encoding::JordanWigner).unwrap();
+        let total = hartree_fock_energy(&h2);
+        let electronic = total - h2.fermion_hamiltonian().nuclear_repulsion();
+        assert!((total + 1.1167).abs() <= 5e-5, "{total}");
+        assert!((electronic + 1.8310).abs() <= 5e-5, "{electronic}");
     }
 
     #[test]

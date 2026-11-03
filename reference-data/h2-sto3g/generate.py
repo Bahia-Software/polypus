@@ -29,8 +29,10 @@ from openfermion import (
 from openfermionpyscf import run_pyscf
 
 BOND_LENGTHS_ANGSTROM = ["0.3", "0.5", "0.7414", "1.0", "1.5", "2.0", "2.5"]
-# Terms below this are rounding noise; physical H2 terms are above 1e-4.
-DROP_BELOW = 1e-12
+# Terms with |c| <= this are rounding noise; physical H2 terms are above 1e-4.
+# Same value and rule as H2_ROUNDING_TOLERANCE in chemistry/h2.rs, so both
+# sides keep exactly the same Pauli strings.
+DROP_AT_OR_BELOW = 1e-14
 # A Hermitian operator has real Pauli coefficients up to rounding.
 MAX_IMAGINARY = 1e-12
 
@@ -66,7 +68,7 @@ def main():
                     raise ValueError(
                         f"R={r}: {pauli_text(term)} has imaginary part {c.imag}"
                     )
-                if abs(c.real) >= DROP_BELOW:
+                if abs(c.real) > DROP_AT_OR_BELOW:
                     jw_rows.append((r, pauli_text(term), repr(float(c.real))))
 
     with open(HERE / "jw_coefficients.csv", "w", newline="") as f:

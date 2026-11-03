@@ -334,7 +334,7 @@ fn tridiagonal_ql(d: &mut [f64], e: &mut [f64]) -> Result<(), PhysicsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hamiltonians::pauli::{PauliString, PauliTerm};
+    use crate::hamiltonians::pauli::{PauliAxis, PauliString, PauliTerm};
     use crate::hamiltonians::photon_polarization::photon_polarization_hamiltonian;
 
     fn sum(num_qubits: usize, terms: &[(f64, &str)]) -> PauliSum {
@@ -516,6 +516,120 @@ mod tests {
             h.to_dense_real(),
             Err(PhysicsError::UnsupportedOperation { .. })
         ));
+    }
+
+    /// A deterministic real Pauli sum on `n` qubits: random strings with an
+    /// even number of `Y` (an odd one has its last `Y` turned into `X`) and
+    /// coefficients in `[−0.5, 0.5)` (a small LCG, no dependency).
+    fn random_real_sum(n: usize, num_terms: usize, seed: u64) -> PauliSum {
+        let mut state = seed;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut terms = Vec::with_capacity(num_terms);
+        for _ in 0..num_terms {
+            let mut ops: Vec<(usize, PauliAxis)> = (0..n)
+                .filter_map(|q| match (next() * 4.0) as u32 {
+                    0 => None,
+                    1 => Some((q, PauliAxis::X)),
+                    2 => Some((q, PauliAxis::Y)),
+                    _ => Some((q, PauliAxis::Z)),
+                })
+                .collect();
+            if ops.iter().filter(|(_, a)| *a == PauliAxis::Y).count() % 2 == 1 {
+                if let Some(op) = ops.iter_mut().rev().find(|(_, a)| *a == PauliAxis::Y) {
+                    op.1 = PauliAxis::X;
+                }
+            }
+            terms.push(PauliTerm::new(next() - 0.5, PauliString::new(ops).unwrap()));
+        }
+        PauliSum::new(n, terms).unwrap()
+    }
+
+    #[test]
+    fn zero_sum_has_an_all_zero_spectrum() {
+        // Every row is zero: exercises the `scale == 0` branch of the
+        // Householder reduction and an already-diagonal QL input.
+        let h = PauliSum::new(3, Vec::new()).unwrap();
+        assert_eq!(h.eigenvalues().unwrap(), [0.0; 8]);
+    }
+
+    #[test]
+    fn block_diagonal_sums_have_degenerate_spectra() {
+        // Z0 on 5 qubits: ±1, each 16 times.
+        let mut expected = vec![-1.0; 16];
+        expected.extend([1.0; 16]);
+        assert_close(
+            &sum(5, &[(1.0, "Z0")]).eigenvalues().unwrap(),
+            &expected,
+            1e-14,
+        );
+        // X0 + 0.5 Z2 on 3 qubits: commuting terms on different qubits give
+        // ±1 ± 0.5, each twice.
+        let ev = sum(3, &[(1.0, "X0"), (0.5, "Z2")]).eigenvalues().unwrap();
+        assert_close(&ev, &[-1.5, -1.5, -0.5, -0.5, 0.5, 0.5, 1.5, 1.5], 1e-14);
+    }
+
+    #[test]
+    fn third_moment_matches_the_pauli_algebra() {
+        // Σλ³ = Tr(H³) = 2ⁿ Σ_{ijk} c_i c_j c_k · [P_i P_j P_k ∝ I]: an
+        // independent check of the spectrum beyond its first two moments.
+        let n = 6;
+        let h = random_real_sum(n, 30, 7);
+        let mut trace = 0.0;
+        for a in h.terms() {
+            for b in h.terms() {
+                let (phase_ab, ab) = a.string.mul(&b.string);
+                for c in h.terms() {
+                    let (phase_abc, abc) = ab.mul(&c.string);
+                    if abc.is_identity() {
+                        let (re, _) = (phase_ab * phase_abc).to_complex();
+                        trace += a.coefficient * b.coefficient * c.coefficient * re;
+                    }
+                }
+            }
+        }
+        trace *= (1u64 << n) as f64;
+        let cubes: f64 = h.eigenvalues().unwrap().iter().map(|x| x.powi(3)).sum();
+        assert!(
+            (cubes - trace).abs() <= 1e-10 * trace.abs().max(1.0),
+            "{cubes} vs {trace}"
+        );
+    }
+
+    #[test]
+    fn spectrum_is_invariant_under_relabelling_qubits() {
+        // Permuting qubits reorders the basis completely, so the solver sees a
+        // different dense matrix with the same eigenvalues.
+        let n = 8;
+        let h = random_real_sum(n, 40, 11);
+        let permutation = [3, 7, 0, 5, 1, 6, 2, 4];
+        let relabelled = PauliSum::new(
+            n,
+            h.terms()
+                .iter()
+                .map(|t| {
+                    PauliTerm::new(
+                        t.coefficient,
+                        PauliString::new(t.string.ops().iter().map(|&(q, a)| (permutation[q], a)))
+                            .unwrap(),
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert_ne!(
+            h.to_dense_real().unwrap(),
+            relabelled.to_dense_real().unwrap()
+        );
+        assert_close(
+            &h.eigenvalues().unwrap(),
+            &relabelled.eigenvalues().unwrap(),
+            1e-10,
+        );
     }
 
     #[test]

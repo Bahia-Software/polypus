@@ -52,11 +52,33 @@ impl QubitMapping {
     /// use polypus_physics::hamiltonians::QubitMapping;
     ///
     /// // H2 Hartree–Fock state (modes 0 and 2 occupied), block order.
-    /// assert_eq!(QubitMapping::JordanWigner.encode_occupation(0b0101, 4), 0b0101);
-    /// assert_eq!(QubitMapping::Parity.encode_occupation(0b0101, 4), 0b0011);
+    /// assert_eq!(QubitMapping::JordanWigner.encode_occupation(0b0101, 4).unwrap(), 0b0101);
+    /// assert_eq!(QubitMapping::Parity.encode_occupation(0b0101, 4).unwrap(), 0b0011);
     /// ```
-    pub fn encode_occupation(self, occupation: usize, num_modes: usize) -> usize {
-        match self {
+    ///
+    /// # Errors
+    /// [`PhysicsError::UnsupportedOperation`] if `num_modes` exceeds the bits
+    /// of a `usize` (a basis index cannot hold the state), or if
+    /// `occupation` has a bit set at a mode `≥ num_modes`.
+    pub fn encode_occupation(
+        self,
+        occupation: usize,
+        num_modes: usize,
+    ) -> Result<usize, PhysicsError> {
+        let bits = usize::BITS as usize;
+        if num_modes > bits {
+            return Err(PhysicsError::UnsupportedOperation {
+                message: format!("{num_modes} modes do not fit in a {bits}-bit basis index"),
+            });
+        }
+        if num_modes < bits && occupation >> num_modes != 0 {
+            return Err(PhysicsError::UnsupportedOperation {
+                message: format!(
+                    "occupation {occupation:#b} has modes beyond the {num_modes} available"
+                ),
+            });
+        }
+        Ok(match self {
             QubitMapping::JordanWigner => occupation,
             QubitMapping::Parity => {
                 let mut parity = 0;
@@ -67,7 +89,7 @@ impl QubitMapping {
                 }
                 encoded
             }
-        }
+        })
     }
 
     /// The two `(coefficient, string)` pieces of the ladder operator on mode
@@ -159,7 +181,7 @@ impl FermionOperator {
             }
             terms.push(PauliTerm::new(re, string));
         }
-        Ok(PauliSum::new(n, terms)?.simplified())
+        PauliSum::new(n, terms)?.simplified()
     }
 }
 
@@ -216,7 +238,7 @@ mod tests {
                 .unwrap()
                 .to_dense_real()
                 .unwrap();
-            let enc = |b| QubitMapping::Parity.encode_occupation(b, n);
+            let enc = |b| QubitMapping::Parity.encode_occupation(b, n).unwrap();
             for r in 0..(1 << n) {
                 for c in 0..(1 << n) {
                     let d = parity.get(enc(r), enc(c)).unwrap() - jw.get(r, c).unwrap();
@@ -273,6 +295,55 @@ mod tests {
     }
 
     #[test]
+    fn pairing_terms_map_correctly_in_both_encodings() {
+        // Hermitian but not number-conserving: a†a† + aa products exercise the
+        // mappings' phases beyond the a†a pairs of molecular Hamiltonians.
+        let op = FermionOperator::new(
+            4,
+            vec![
+                FermionTerm::new(1.0, vec![(0, Create), (2, Create)]),
+                FermionTerm::new(1.0, vec![(2, Annihilate), (0, Annihilate)]),
+                FermionTerm::new(0.7, vec![(1, Create), (3, Create)]),
+                FermionTerm::new(0.7, vec![(3, Annihilate), (1, Annihilate)]),
+                FermionTerm::new(
+                    -0.4,
+                    vec![(0, Create), (1, Create), (3, Create), (2, Create)],
+                ),
+                FermionTerm::new(
+                    -0.4,
+                    vec![
+                        (2, Annihilate),
+                        (3, Annihilate),
+                        (1, Annihilate),
+                        (0, Annihilate),
+                    ],
+                ),
+                FermionTerm::new(0.25, vec![(3, Create), (3, Annihilate)]),
+            ],
+        )
+        .unwrap();
+        let reference = op.to_dense_real().unwrap();
+        let jw = op
+            .to_qubits(QubitMapping::JordanWigner)
+            .unwrap()
+            .to_dense_real()
+            .unwrap();
+        assert!(max_abs_diff(&reference, &jw) <= 1e-12);
+        let parity = op
+            .to_qubits(QubitMapping::Parity)
+            .unwrap()
+            .to_dense_real()
+            .unwrap();
+        let enc = |b| QubitMapping::Parity.encode_occupation(b, 4).unwrap();
+        for r in 0..16 {
+            for c in 0..16 {
+                let d = parity.get(enc(r), enc(c)).unwrap() - reference.get(r, c).unwrap();
+                assert!(d.abs() <= 1e-12, "({r}, {c})");
+            }
+        }
+    }
+
+    #[test]
     fn non_hermitian_operator_is_rejected() {
         let hop = FermionOperator::new(
             2,
@@ -305,16 +376,49 @@ mod tests {
 
     #[test]
     fn parity_encoding_of_h2_determinants() {
-        let enc = |b| QubitMapping::Parity.encode_occupation(b, 4);
+        let enc = |b| QubitMapping::Parity.encode_occupation(b, 4).unwrap();
         assert_eq!(enc(0b0101), 0b0011); // Hartree–Fock
         assert_eq!(enc(0b1010), 0b0110); // both electrons in σ*
         assert_eq!(
-            QubitMapping::JordanWigner.encode_occupation(0b1010, 4),
+            QubitMapping::JordanWigner
+                .encode_occupation(0b1010, 4)
+                .unwrap(),
             0b1010
         );
         // The encoding is a bijection on 4 modes.
         let mut seen: Vec<usize> = (0..16).map(enc).collect();
         seen.sort_unstable();
         assert_eq!(seen, (0..16).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn encode_occupation_rejects_states_that_do_not_fit() {
+        for mapping in [QubitMapping::JordanWigner, QubitMapping::Parity] {
+            // More modes than bits in a basis index.
+            assert!(matches!(
+                mapping.encode_occupation(1, usize::BITS as usize + 6),
+                Err(PhysicsError::UnsupportedOperation { .. })
+            ));
+            // An occupied mode beyond num_modes.
+            assert!(matches!(
+                mapping.encode_occupation(0b1_0000, 4),
+                Err(PhysicsError::UnsupportedOperation { .. })
+            ));
+        }
+        // Exactly usize::BITS modes is the largest valid register.
+        let all = usize::MAX;
+        let bits = usize::BITS as usize;
+        assert_eq!(
+            QubitMapping::JordanWigner
+                .encode_occupation(all, bits)
+                .unwrap(),
+            all
+        );
+        // Parity of a prefix of all-ones alternates 1, 0, 1, 0, …
+        let alternating = (0..bits).fold(0usize, |acc, j| acc | ((1 - j % 2) << j));
+        assert_eq!(
+            QubitMapping::Parity.encode_occupation(all, bits).unwrap(),
+            alternating
+        );
     }
 }

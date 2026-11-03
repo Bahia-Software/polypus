@@ -26,8 +26,9 @@ Bond lengths: 0.3, 0.5, 0.7414, 1.0, 1.5, 2.0 and 2.5 Å.
   is spin-orbital `p`.
 - Pauli strings in the `polypus-physics` text form: `X0 X1 Y2 Y3`, `I` for the
   identity. The identity coefficient includes the nuclear repulsion.
-- Terms with `|c| < 1e-12` are dropped as rounding noise; every physical H2
-  term is above `1e-4`.
+- Terms with `|c| ≤ 1e-14` are dropped as rounding noise, the same rule as
+  `H2_ROUNDING_TOLERANCE` in `chemistry/h2.rs`; every physical H2 term is
+  above `1e-4`.
 
 ## Regenerating
 

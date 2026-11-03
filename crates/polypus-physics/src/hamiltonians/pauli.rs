@@ -253,10 +253,16 @@ impl FromStr for PauliString {
                 Some('Z') => PauliAxis::Z,
                 _ => return Err(invalid(format!("invalid Pauli token {token:?}"))),
             };
-            let qubit = chars
-                .as_str()
-                .parse::<usize>()
-                .map_err(|_| invalid(format!("invalid qubit index in token {token:?}")))?;
+            // Canonical decimal only: no sign, no leading zeros ("X+1",
+            // "Z007" are rejected), so the text form round-trips.
+            let digits = chars.as_str();
+            let canonical = !digits.is_empty()
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && (digits == "0" || !digits.starts_with('0'));
+            let qubit = canonical
+                .then(|| digits.parse::<usize>().ok())
+                .flatten()
+                .ok_or_else(|| invalid(format!("invalid qubit index in token {token:?}")))?;
             ops.push((qubit, axis));
         }
         Self::new(ops)
@@ -349,10 +355,19 @@ impl PauliSum {
     /// dropped, terms sorted by string (identity first). The result does not
     /// depend on the input term order up to floating-point summation order of
     /// merged coefficients.
-    pub fn simplified(self) -> Self {
+    ///
+    /// # Errors
+    /// [`PhysicsError::InvalidPauliSum`] if merging overflows a coefficient
+    /// to infinity (finite inputs near `f64::MAX`).
+    pub fn simplified(self) -> Result<Self, PhysicsError> {
         let mut merged: BTreeMap<PauliString, f64> = BTreeMap::new();
         for term in self.terms {
             *merged.entry(term.string).or_insert(0.0) += term.coefficient;
+        }
+        if let Some((string, c)) = merged.iter().find(|(_, c)| !c.is_finite()) {
+            return Err(PhysicsError::InvalidPauliSum {
+                message: format!("merged coefficient of {string} overflows: {c}"),
+            });
         }
         let terms = merged
             .into_iter()
@@ -362,23 +377,32 @@ impl PauliSum {
                 string,
             })
             .collect();
-        Self {
+        Ok(Self {
             num_qubits: self.num_qubits,
             terms,
-        }
+        })
     }
 
     /// Drops the terms with `|c| ≤ tol`, keeping the order of the rest.
-    pub fn chop(self, tol: f64) -> Self {
+    ///
+    /// # Errors
+    /// [`PhysicsError::InvalidPauliSum`] if `tol` is negative or not finite
+    /// (a NaN tolerance would otherwise drop every term).
+    pub fn chop(self, tol: f64) -> Result<Self, PhysicsError> {
+        if !(tol.is_finite() && tol >= 0.0) {
+            return Err(PhysicsError::InvalidPauliSum {
+                message: format!("chop tolerance must be finite and non-negative, got {tol}"),
+            });
+        }
         let terms = self
             .terms
             .into_iter()
             .filter(|t| t.coefficient.abs() > tol)
             .collect();
-        Self {
+        Ok(Self {
             num_qubits: self.num_qubits,
             terms,
-        }
+        })
     }
 }
 
@@ -464,6 +488,48 @@ mod tests {
     }
 
     #[test]
+    fn non_canonical_qubit_indices_are_rejected() {
+        for s in ["X+1", "Z007", "Y00", "X 1", "X1.0", "Z-0"] {
+            assert!(
+                s.parse::<PauliString>().is_err(),
+                "{s:?} should be rejected"
+            );
+        }
+        assert_eq!(ps("Z0 X10").to_string(), "Z0 X10");
+    }
+
+    #[test]
+    fn simplified_rejects_overflowing_merges() {
+        let h = PauliSum::new(
+            1,
+            vec![
+                PauliTerm::new(f64::MAX, ps("Z0")),
+                PauliTerm::new(f64::MAX, ps("Z0")),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            h.simplified(),
+            Err(PhysicsError::InvalidPauliSum { .. })
+        ));
+    }
+
+    #[test]
+    fn chop_rejects_invalid_tolerances() {
+        let h = PauliSum::new(1, vec![PauliTerm::new(1.0, ps("Z0"))]).unwrap();
+        for tol in [f64::NAN, -1e-10, f64::INFINITY] {
+            assert!(
+                matches!(
+                    h.clone().chop(tol),
+                    Err(PhysicsError::InvalidPauliSum { .. })
+                ),
+                "{tol}"
+            );
+        }
+        assert_eq!(h.clone().chop(0.0).unwrap(), h);
+    }
+
+    #[test]
     fn repeated_qubit_is_rejected() {
         let err = PauliString::new([(1, PauliAxis::X), (1, PauliAxis::Z)]).unwrap_err();
         assert!(err.to_string().contains("qubit 1"));
@@ -498,7 +564,8 @@ mod tests {
             ],
         )
         .unwrap()
-        .simplified();
+        .simplified()
+        .unwrap();
         let got: Vec<_> = h
             .terms()
             .iter()
@@ -524,8 +591,8 @@ mod tests {
         ];
         let mut reversed = terms.clone();
         reversed.reverse();
-        let a = PauliSum::new(2, terms).unwrap().simplified();
-        let b = PauliSum::new(2, reversed).unwrap().simplified();
+        let a = PauliSum::new(2, terms).unwrap().simplified().unwrap();
+        let b = PauliSum::new(2, reversed).unwrap().simplified().unwrap();
         assert_eq!(a, b);
     }
 
@@ -540,7 +607,8 @@ mod tests {
             ],
         )
         .unwrap()
-        .chop(1e-10);
+        .chop(1e-10)
+        .unwrap();
         let strings: Vec<_> = h.terms().iter().map(|t| t.string.to_string()).collect();
         assert_eq!(strings, ["Z0", "I"]);
     }

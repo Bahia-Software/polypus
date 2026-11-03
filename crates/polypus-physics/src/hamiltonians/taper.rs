@@ -113,7 +113,7 @@ impl PauliSum {
             }
             terms.push(PauliTerm::new(coefficient, PauliString::new(ops)?));
         }
-        Ok(PauliSum::new(n - removed, terms)?.simplified())
+        PauliSum::new(n - removed, terms)?.simplified()
     }
 }
 
