@@ -58,3 +58,6 @@ coverage.xml
 lcov.info
 clippy.json
 .scannerwork/
+
+# Documentation site (mkdocs build)
+site/
