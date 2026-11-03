@@ -223,6 +223,7 @@ fn molecular_hamiltonian(r: f64) -> Result<FermionHamiltonian, PhysicsError> {
 mod tests {
     use super::*;
     use crate::hamiltonians::PauliString;
+    use std::collections::BTreeMap;
 
     const ENCODINGS: [H2Encoding; 2] = [H2Encoding::JordanWigner, H2Encoding::ParityTapered];
 
@@ -325,6 +326,72 @@ mod tests {
         assert_eq!(h2.encoding(), H2Encoding::JordanWigner);
         // σ–σ* one-body coupling vanishes by symmetry (up to rounding).
         assert!(h2.fermion_hamiltonian().one_body(0, 1).abs() < 1e-15);
+    }
+
+    /// Rows of a CSV file in `reference-data/h2-sto3g/` (generated with
+    /// PySCF + OpenFermion, see its README), header skipped.
+    fn reference_rows(file: &str) -> Vec<Vec<String>> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../reference-data/h2-sto3g/"
+        );
+        let text = std::fs::read_to_string(format!("{path}{file}"))
+            .unwrap_or_else(|e| panic!("read reference file {path}{file}: {e}"));
+        text.lines()
+            .skip(1)
+            .filter(|line| !line.is_empty())
+            .map(|line| line.split(',').map(str::to_string).collect())
+            .collect()
+    }
+
+    #[test]
+    fn jordan_wigner_matches_the_openfermion_reference() {
+        // R (as written in the file) -> (Pauli string -> coefficient).
+        let mut reference: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+        for row in reference_rows("jw_coefficients.csv") {
+            reference
+                .entry(row[0].clone())
+                .or_default()
+                .insert(row[1].clone(), row[2].parse().unwrap());
+        }
+        assert_eq!(reference.len(), 7, "bond lengths in the reference");
+        for (r, expected) in &reference {
+            let ours: BTreeMap<String, f64> =
+                H2Molecule::new(r.parse().unwrap(), H2Encoding::JordanWigner)
+                    .unwrap()
+                    .to_pauli_sum()
+                    .terms()
+                    .iter()
+                    .map(|t| (t.string.to_string(), t.coefficient))
+                    .collect();
+            let ours_strings: Vec<&String> = ours.keys().collect();
+            let expected_strings: Vec<&String> = expected.keys().collect();
+            assert_eq!(ours_strings, expected_strings, "R = {r} Å: Pauli strings");
+            for (s, c) in expected {
+                assert!(
+                    (ours[s] - c).abs() <= 1e-6,
+                    "R = {r} Å, {s}: {} vs {c}",
+                    ours[s]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fci_energies_match_the_pyscf_reference() {
+        let rows = reference_rows("fci_energies.csv");
+        assert_eq!(rows.len(), 7, "bond lengths in the reference");
+        for row in rows {
+            let r: f64 = row[0].parse().unwrap();
+            let fci: f64 = row[2].parse().unwrap();
+            for encoding in ENCODINGS {
+                let e = ground(r, encoding);
+                assert!(
+                    (e - fci).abs() <= 1e-8,
+                    "R = {r} Å, {encoding:?}: {e} vs {fci}"
+                );
+            }
+        }
     }
 
     #[test]
