@@ -9,7 +9,7 @@ Polypus trains quantum models in two ways:
 |---|---|---|
 | The model | Any feature map and ansatz you build in Qiskit | Encoders, a hardware-efficient ansatz, QCNN convolution and pooling |
 | Scoring | Your function of the measured bitstrings (or counts) | A readout of Pauli observables and a loss (hinge, cross-entropy, squared error, …) |
-| Adam's gradient | Finite differences of the fitness | Exact parameter-shift gradient |
+| Adam's gradient | Finite differences of the fitness | Analytic gradient: adjoint differentiation with `exact=True`, a parameter-shift estimate with shots |
 | Exact probabilities instead of shots | No | Yes (`exact=True`, local native simulator) |
 | Minibatches | No | Yes (`batch_size`) |
 | Prediction | Counts per row (`qml.predict`); you map them to classes | Decisions per row (`TrainedModel.predict`), or counts |
@@ -259,8 +259,8 @@ for _ in range(40):
 [`examples/qml_expval_jacobian_loop.py`](../../examples/qml_expval_jacobian_loop.py) runs this loop to the end and checks that the loss goes down.
 
 - **Inputs.** The derivative with respect to the features covers angle encoders, re-uploaded ones included, and IQP encoders (for `Rzz(x_i·x_j)` it applies the product rule). Amplitude and basis encoders have no derivative in the data: `wrt="inputs"` or `"both"` with one raises `polypus.ConfigurationError`; `wrt="params"` works with any model.
-- **Cost.** `expval` runs one circuit per row. `jacobian` runs two per shifted gate per row (`+π/2` and `−π/2`): every gate that reads a parameter (a parameter shared by several gates, as in `conv` and `pool`, counts once per gate), every encoder gate that reads the row for `"inputs"`, both for `"both"`. A `real_amplitudes(1)` over 2 qubits has 4 parameters, so 8 circuits per row.
-- **Execution.** A call opens one backend for all its rows (one allocation on CUNQA) and runs them in blocks sized from the cores and the backend, so memory stays bounded however many rows you pass; Ctrl+C stops it between blocks. The result does not depend on the blocks: a call on all the rows equals the calls on pieces of them, put together.
+- **Cost.** `expval` runs one circuit per row. With shots, `jacobian` runs two per shifted gate per row (`+π/2` and `−π/2`): every gate that reads a parameter (a parameter shared by several gates, as in `conv` and `pool`, counts once per gate), every encoder gate that reads the row for `"inputs"`, both for `"both"`. A `real_amplitudes(1)` over 2 qubits has 4 parameters, so 8 circuits per row. With `exact=True` it differentiates every one of those gates at once by **adjoint differentiation**: one pass per row and observable, about three simulations long, whatever the number of parameters, holding two statevectors at a time. When the memory budget holds one statevector of the model's width but not two, it runs the parameter shift instead and says so once in the log at `info` level; the result is the same to rounding. `Model.fit`'s exact gradient for Adam and `QuantumLayer`'s exact backward pass go the same way.
+- **Execution.** A call opens one backend for all its rows (one allocation on CUNQA) and runs them in blocks sized from the cores and the backend, so memory stays bounded however many rows you pass; Ctrl+C stops it between blocks, and with `exact=True` also inside a block. The result does not depend on the blocks: a call on all the rows equals the calls on pieces of them, put together.
 - **Seeds.** The functions return bare arrays, so the seed drawn when you omit `seed` is only logged: pass `seed=` to repeat a sampled call exactly. On Aer and CUNQA, a seeded call repeats on the same machine and configuration.
 
 ### In a PyTorch network: `polypus.torch.QuantumLayer`
