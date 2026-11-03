@@ -5,9 +5,11 @@
 //! task, will compile a [`PauliSum`] into a Trotterized circuit). It contains
 //! no circuit-compilation logic and has no dependency on `polypus-circuit`.
 
+pub mod exact;
 pub mod pauli;
 pub mod photon_polarization;
 
+pub use exact::{DenseMatrix, MAX_DENSE_QUBITS};
 pub use pauli::{PauliAxis, PauliString, PauliSum, PauliTerm, Phase};
 
 /// Trait for any physical system that can express its quantum Hamiltonian as a

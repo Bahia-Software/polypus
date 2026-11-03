@@ -74,6 +74,13 @@ pub enum PhysicsError {
         /// Human-readable description of the problem.
         message: String,
     },
+    /// A valid input is outside what an operation supports (e.g. a dense
+    /// matrix beyond the qubit limit, or a complex matrix where only real
+    /// ones are built).
+    UnsupportedOperation {
+        /// Human-readable description of the problem.
+        message: String,
+    },
 }
 
 impl fmt::Display for PhysicsError {
@@ -117,6 +124,9 @@ impl fmt::Display for PhysicsError {
             }
             PhysicsError::InvalidPauliSum { message } => {
                 write!(f, "invalid Pauli sum: {message}")
+            }
+            PhysicsError::UnsupportedOperation { message } => {
+                write!(f, "unsupported operation: {message}")
             }
         }
     }
