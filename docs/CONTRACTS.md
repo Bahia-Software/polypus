@@ -30,7 +30,7 @@ Rules of the road:
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 | C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
-| C-11 | Native QML (problem ↔ oracle, expectation Jacobian, `polypus.qml.Model`, `qml.expval`/`qml.jacobian`, `polypus.torch.QuantumLayer`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `tests/jacobian.rs` + `tests/adjoint.rs` + `src/model.rs` serde tests + `polypus-sim` `tests/adjoint.rs` + `polypus-infrastructure` `native.rs` adjoint tests + `polypus-evaluation` `qml_oracle.rs` + the primitive tests in `crates/polypus/src/bindings/qml.rs` + `tests/python/test_qml_native*.py` + `tests/python/test_torch_*.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
+| C-11 | Native QML (problem ↔ oracle, expectation Jacobian, `polypus.qml.Model`, `qml.expval`/`qml.jacobian`, `polypus.torch.QuantumLayer`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `tests/jacobian.rs` + `tests/adjoint.rs` + `src/model.rs` serde tests + `polypus-sim` `tests/adjoint.rs` + `polypus-infrastructure` `native.rs` adjoint tests + `polypus-evaluation` `qml_oracle.rs` + the primitive tests in `crates/polypus/src/bindings/qml.rs` + `tests/python/test_qml_native*.py` + `tests/python/test_qml_adjoint.py` + `tests/python/test_torch_*.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
 
 ✅ means the listed test enforces the contract; a ⏳ contract would be
 specified but only review-enforced until its test lands (none today). Known
@@ -2415,6 +2415,13 @@ batching and distribution are the oracle's concern.
     `x_j` towards `x_i` and `x_i` towards `x_j`, and is shifted **once** for
     both. Data re-uploading sums the gates that read a feature. Recording this
     changes no gate: every template is, gate for gate, what it was.
+  - *Adjoint differentiation.* (e)'s, for the Jacobian: `adjoint_runs(θ)` on
+    an `ExpectationJacobian` or a block gives one run per sample and readout
+    observable (`num_adjoint_runs`), sample-major, each differentiating the
+    gates the shift would move, and `jacobian_from_adjoint` reads them through
+    the same bookkeeping (parameter, or feature times its chain-rule factor),
+    with the same blocks. No loss: the observable is the readout's own. It is
+    the shift's Jacobian to rounding.
   - *Circuits and order.* `2 · shifts` circuits per sample and no unshifted
     one, `shifts` counting the gates that read a parameter (a parameter shared
     by `g` gates counts `g` times) for `Params`, the gates that read the sample
@@ -2616,7 +2623,11 @@ for a training loop of the caller's own:
 - **Circuits.** `expval` runs one per row; `jacobian` `2 · shifts` per row
   ((g): every gate that reads a parameter, once per gate, every encoder gate
   that reads the row, an IQP `Rzz` once for its two features), and no
-  unshifted circuit.
+  unshifted circuit. With `exact=True` it is (g)'s adjoint differentiation
+  instead, one run per row and observable on
+  `NativeStatevectorBackend::run_adjoint`, unless the memory budget holds one
+  statevector of the width but not two: then the shifted circuits, logged at
+  `info` (as (f)). The result is the same to rounding either way.
 - **Execution.** One backend and one scheduler per call — one connection, one
   `qraise` on CUNQA — closed on every way out, errors and Ctrl+C included. The
   rows run in sequential blocks, each bound, run and dropped before the next
@@ -2627,7 +2638,10 @@ for a training loop of the caller's own:
   the circuits per row, never configured. The whole
   block loop runs with the GIL released, and Ctrl+C raises `KeyboardInterrupt`
   between blocks (the exact path included, which has no planner) and between
-  waves. The result does not depend on the blocks: rows come back in row
+  waves, and, during an exact block's adjoint runs, inside the block: the
+  calling thread, the one a Ctrl+C can be seen on, polls the run's interrupt
+  guard while they run on rayon's threads and stops them, with the same
+  `KeyboardInterrupt`. The result does not depend on the blocks: rows come back in row
   order, and a call on some rows equals the concatenation of calls on chunks
   of them.
 - **Checks.** Every one runs before a backend exists and raises
@@ -2743,7 +2757,9 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     with `exact=True`; and the primitive tests there (the seeded result
     independent of the block size, row order, one backend created and closed
     once, a cancellation or an error between blocks, a backend closed when no
-    scheduler can be built over it, the array conversion), with the window
+    scheduler can be built over it, the array conversion, the exact Jacobian
+    by the adjoint whatever the blocks, a Ctrl+C inside an exact block and the
+    watcher that stops it), with the window
     tests in `crates/polypus-evaluation/src/qml_oracle.rs`
     (`a_backend_*`, `the_lift_*`, `many_circuits_per_item_*`,
     `the_window_is_never_zero`): `qml.expval`/`qml.jacobian`'s execution.
@@ -2782,8 +2798,11 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   `TestFitTypes` (the stub types of both), `TestPrimitiveTypes` (each
   `wrt`'s result type) and `TestTorchTypes` (the layer's inline types), the native
   QML cases of `test_interrupt.py` (Ctrl+C during `fit`, with and without a
-  `callback`, and during `qml.jacobian`, exact and sampled; the minibatch
-  rescore runs with the GIL released),
+  `callback`, and during `qml.jacobian`, exact and sampled, and inside one
+  long exact block; the minibatch rescore runs with the GIL released),
+  `test_qml_adjoint.py` (the adjoint and the parameter-shift fallback give the
+  same `qml.jacobian`, `fit` with Adam and `QuantumLayer` backward, the
+  fallback logged, and no memory for one statevector the exact path's error),
   `TestNativeQmlChecksRaiseIt` in `test_configuration_errors.py` (every check
   of `fit`, `predict`, `run`, `qml.expval` and `qml.jacobian` is a
   `polypus.ConfigurationError` raised before any CUNQA call, and a primitive
