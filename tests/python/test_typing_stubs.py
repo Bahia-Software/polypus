@@ -233,6 +233,52 @@ class TestAskTellTypes:
         assert 'snippet.py:5: error: "AskTell" has no attribute "close"' in report
 
 
+class TestTraceType:
+    """`trace` is `str | os.PathLike[str] | None`, keyword-only (contract C-12)."""
+
+    PRELUDE = (
+        "import pathlib\n"
+        "from typing import Any\n"
+        "import polypus\n"
+        "qc: Any = None\n"
+        "f: Any = None\n"
+    )
+    TRAIN = (
+        "polypus.train(qc, polypus.SPSA(), 64, 1, 2, f, 'local', 1, 1, 'x', trace={})\n"
+    )
+    RUN = "polypus.run_quantum_circuit(qc, 64, 'local', trace={})\n"
+
+    def test_paths_type_check(self, tmp_path):
+        source = self.PRELUDE
+        for call in (self.TRAIN, self.RUN):
+            source += call.format("'t.jsonl'") + call.format("pathlib.Path('t.jsonl')")
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+    def test_a_number_does_not_type_check(self, tmp_path):
+        # Proves the check above reads the stubs: an `int` is a TypeError at
+        # run time, so mypy must reject it too, as a value of the wrong type.
+        source = self.PRELUDE + self.TRAIN.format("1") + self.RUN.format("1")
+        status, report = _mypy(source, tmp_path)
+        assert status != 0 and "trace" in report, report
+        for function in ("train", "run_quantum_circuit"):
+            message = f'Argument "trace" to "{function}" has incompatible type "int"'
+            assert message in report, report
+
+    def test_the_documented_trace_example_type_checks(self, tmp_path):
+        docs = Path(__file__).resolve().parents[2] / "docs" / "guide" / "training.md"
+        example = _python_block(docs.read_text(encoding="utf-8"), 'trace="run1.jsonl"')
+        source = (
+            "import json\n"
+            "from typing import Any\n"
+            "import polypus\n"
+            "qc: Any = None\n"
+            "cost: Any = None\n"
+        ) + example
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+
 class TestTorchTypes:
     """`polypus.torch` is typed inline against PyTorch's own types."""
 

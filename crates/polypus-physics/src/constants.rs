@@ -12,6 +12,10 @@
 /// Speed of light in vacuum (m/s).
 pub const SPEED_OF_LIGHT_M_S: f64 = 2.997_924_58e8;
 
+/// Bohr radius `a₀` (Å), CODATA 2018. The atomic unit of length: the
+/// quantum-chemistry layer works in bohr, so `bohr = Å / BOHR_RADIUS_ANGSTROM`.
+pub const BOHR_RADIUS_ANGSTROM: f64 = 0.529_177_210_903;
+
 /// Reduced Planck constant ħ (eV·s).
 pub const HBAR_EV_S: f64 = 6.582_119_569e-16;
 
