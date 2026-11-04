@@ -263,6 +263,13 @@ fn tridiagonalize(a: &mut [f64], n: usize, d: &mut [f64], e: &mut [f64]) {
 /// Eigenvalues of the symmetric tridiagonal matrix with diagonal `d` and
 /// sub-diagonal `e[1..]`, by the implicit QL algorithm. On return `d` holds
 /// the eigenvalues (unsorted) and `e` is destroyed.
+///
+/// An off-diagonal element is negligible, and the matrix is split there, when
+/// `|e[m]| ≤ ε·‖T‖∞`: the Householder reduction already perturbs the
+/// eigenvalues by that much, so no accuracy is lost. Comparing `e[m]` only with
+/// its neighbours `|d[m]| + |d[m+1]|` instead fails near a zero eigenvalue,
+/// where those entries vanish too: for `Σ X_i` on 8 or 10 qubits (eigenvalue 0
+/// with multiplicity 70 or 252) it needs over 50 iterations (#562).
 fn tridiagonal_ql(d: &mut [f64], e: &mut [f64]) -> Result<(), PhysicsError> {
     let n = d.len();
     if n == 0 {
@@ -272,14 +279,16 @@ fn tridiagonal_ql(d: &mut [f64], e: &mut [f64]) -> Result<(), PhysicsError> {
         e[i - 1] = e[i];
     }
     e[n - 1] = 0.0;
+    // ‖T‖∞ (largest row sum), up to a factor ≤ 2 since only one of the two
+    // off-diagonals of each row is added.
+    let norm = (0..n).map(|i| d[i].abs() + e[i].abs()).fold(0.0, f64::max);
     for l in 0..n {
         let mut iterations = 0;
         loop {
             // Find a negligible off-diagonal element e[m] to split the matrix.
             let mut m = l;
             while m + 1 < n {
-                let dd = d[m].abs() + d[m + 1].abs();
-                if e[m].abs() <= f64::EPSILON * dd {
+                if e[m].abs() <= f64::EPSILON * norm {
                     break;
                 }
                 m += 1;
@@ -619,6 +628,53 @@ mod tests {
             &relabelled.eigenvalues().unwrap(),
             1e-10,
         );
+    }
+
+    /// `Σ_q X_q` on `n` qubits.
+    fn transverse_field(n: usize) -> PauliSum {
+        PauliSum::new(
+            n,
+            (0..n)
+                .map(|q| PauliTerm::new(1.0, PauliString::single(q, PauliAxis::X)))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn transverse_field_has_its_binomial_spectrum() {
+        // Σ X_q: eigenvalues n − 2k, each C(n, k) times. On 8 and 10 qubits the
+        // eigenvalue 0 (70 and 252 times) made the old split test exceed the
+        // iteration cap (#562).
+        for n in [8, 10] {
+            let mut expected = Vec::new();
+            let mut binomial = 1usize;
+            for k in (0..=n).rev() {
+                // C(n, n−k) = C(n, k): eigenvalue n − 2k, ascending as k falls.
+                expected.extend(std::iter::repeat_n((n as f64) - 2.0 * k as f64, binomial));
+                binomial = binomial * k / (n - k + 1);
+            }
+            assert_eq!(expected.len(), 1 << n);
+            let ev = transverse_field(n).eigenvalues().unwrap();
+            assert_close(&ev, &expected, 1e-12);
+        }
+    }
+
+    #[test]
+    fn xx_ring_on_eight_qubits_has_ground_energy_minus_eight() {
+        // Σ X_q X_{q+1} with periodic boundary: for even n, the X-basis Néel
+        // state gives E₀ = −n (an odd ring is frustrated: −(n−2)). Failed to
+        // converge at n = 8 before #562.
+        let n = 8;
+        let ring: Vec<PauliTerm> = (0..n)
+            .map(|q| {
+                let (_, xx) = PauliString::single(q, PauliAxis::X)
+                    .mul(&PauliString::single((q + 1) % n, PauliAxis::X));
+                PauliTerm::new(1.0, xx)
+            })
+            .collect();
+        let e0 = PauliSum::new(n, ring).unwrap().ground_energy().unwrap();
+        assert!((e0 + 8.0).abs() <= 1e-12, "{e0}");
     }
 
     #[test]
