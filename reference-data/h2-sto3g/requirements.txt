@@ -1,0 +1,6 @@
+# Versions used to generate the committed CSV files (Python 3.13).
+pyscf==2.14.0
+openfermion==1.8.1
+openfermionpyscf==0.5
+numpy==2.5.4
+scipy==1.18.1

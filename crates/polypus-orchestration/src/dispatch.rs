@@ -204,6 +204,42 @@ impl<O: EvaluationOracle + 'static> From<Box<O>> for Oracles {
 }
 
 impl Method {
+    /// The optimizer's name, the `method` a call trace's header records: a DE
+    /// run's strategy ([`DeStrategy::as_str`]: `"rand1bin"`, `"shade"` or
+    /// `"lshade"`), an Adam run's rule ([`AdamRule::as_str`]: `"adam"` or
+    /// `"momentum"`), and otherwise `"pso"`, `"qng"`, `"cmaes"`, `"spsa"`,
+    /// `"rotosolve"` or `"external"`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use polypus_optimizers::DeStrategy;
+    /// use polypus_orchestration::{DeConfig, Method};
+    ///
+    /// let method = Method::De(DeConfig {
+    ///     generations: 20,
+    ///     population_size: 10,
+    ///     tolerance: 1e-6,
+    ///     patience: 5,
+    ///     strategy: DeStrategy::LShade,
+    ///     mutation_factor: None,
+    ///     crossover_rate: None,
+    /// });
+    /// assert_eq!(method.name(), "lshade");
+    /// ```
+    pub fn name(&self) -> &'static str {
+        match self {
+            Method::De(cfg) => cfg.strategy.as_str(),
+            Method::Pso(_) => "pso",
+            Method::Qng(..) => "qng",
+            Method::Cmaes(_) => "cmaes",
+            Method::Adam(cfg) => cfg.rule.as_str(),
+            Method::Spsa(_) => "spsa",
+            Method::Rotosolve(_) => "rotosolve",
+            Method::External(..) => "external",
+        }
+    }
+
     /// Check every precondition the optimizer checks before any RNG draw or
     /// oracle call, in its order, without running anything: its configuration
     /// first, then `initial_point` (contract C-5). Each arm calls the

@@ -31,6 +31,7 @@ Rules of the road:
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 | C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
 | C-11 | Native QML (problem ↔ oracle, expectation Jacobian, `polypus.qml.Model`, `qml.expval`/`qml.jacobian`, `polypus.torch.QuantumLayer`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `tests/jacobian.rs` + `tests/adjoint.rs` + `src/model.rs` serde tests + `polypus-sim` `tests/adjoint.rs` + `polypus-infrastructure` `native.rs` adjoint tests + `polypus-evaluation` `qml_oracle.rs` + the primitive tests in `crates/polypus/src/bindings/qml.rs` + `tests/python/test_qml_native*.py` + `tests/python/test_qml_adjoint.py` + `tests/python/test_torch_*.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
+| C-12 | Call trace (`trace=` / `POLYPUS_CALL_TRACE`, JSON Lines v1) | `polypus-orchestration` `src/trace.rs`, `src/trace/decorators.rs`, `src/flow/trace_tests.rs`, `tests/conformance_with_trace.rs` + `polypus` `src/bindings/call_trace.rs` + `tests/python/test_call_trace*.py` (+ `tests/python/test_interrupt.py` `test_trace_on_interrupt` for Ctrl+C, and `tests/python/test_typing_stubs.py` `TestTraceType` for the stub type and the guide's example) | ✅ present | — |
 
 ✅ means the listed test enforces the contract; a ⏳ contract would be
 specified but only review-enforced until its test lands (none today). Known
@@ -2813,3 +2814,332 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   circuit after it and no final batch, a result unchanged by a callback that
   never stops).
 
+---
+
+## C-12 · Call trace (`trace=` / `POLYPUS_CALL_TRACE`, JSON Lines schema v1)
+
+`polypus.train` and `polypus.run_quantum_circuit` can write a *call trace* of a
+run: a JSON Lines file that records how the run called its planner, its
+backend, its optimizer and QNG's metric, with sizes, indices, times and
+outcomes only. It shows how many batches and backend calls a run made, how
+many circuits and shots each carried and how long each took, without changing
+the run. The trace needs no Python and lives in the `trace` module of
+`polypus-orchestration`: `src/trace.rs` holds the schema's types and
+`CallTracer`, which creates, writes, caps and closes the file, and
+`src/trace/decorators.rs` the four decorators that record the calls
+(`TracingPlanner`, `TracingBackend`, `TracingObserver` and `TracingVariance`).
+`TrainFlow` and `RunCircuitFlow` take the tracer in their `trace` field. The
+edge (`crates/polypus/src/bindings/call_trace.rs`) opens the trace from the
+`trace` argument or from `POLYPUS_CALL_TRACE`, and closes it with the status
+Python sees.
+
+`trace` is keyword-only and defaults to `None`. It takes a `str` or an
+`os.PathLike` whose path is a `str` (the stubs type it
+`Optional[Union[str, PathLike[str]]]`); any other value, a `bytes` path
+included, is a `TypeError` raised before anything runs.
+
+### The format
+
+- **(a) Lines, clock and closed fields.** A trace is UTF-8 JSON Lines: one JSON
+  object per event, each line ended by `\n`. The `run` header is the first line
+  and `end` the last. Every `t` is in nanoseconds since `t0`, the moment the
+  tracer was created, on a monotonic clock, and every `dt` is a duration in
+  nanoseconds; the wall-clock time appears only in the header, as
+  `t0_unix_ns`. The fields are closed: each line has exactly the fields its
+  `ev` has in the table below, in that order, and a reader of `v: 1` rejects a
+  line with any other key, so a new field means a new version.
+
+| `ev` | One line per | Fields |
+|---|---|---|
+| `run` | run, first | `v` (`1`), `ev`, `flow` (`"train"` or `"run_circuit"`), `id` (the run's effective id), `polypus` (the version that ran it), `method` (the optimizer; `null` for `"run_circuit"`), `dims` (the parameters it optimizes; `null` for `"run_circuit"`), `backend`, `infrastructure`, `n_qpus`, `shots` (per circuit), `seed` (the effective seed; `null` for a run without one, that is `run_quantum_circuit` on `qmio`, while `train` always has one), `t0_unix_ns` |
+| `batch` | planner call that runs circuits: `evaluate`, `execute` or `execute_replicas` | `ev`, `k` (the batch's index in the run, from 0), `op` (the method), `n` (circuits), `shots` (per circuit), `t`, `dt`, `ok` (whether it succeeded) |
+| `wave` | backend call that runs circuits: `run_circuits` or `run_shots_distributed` | `ev`, `k` (its batch; `null` for a call outside a planner batch, which the flows never make), `w` (its index in the batch, from 0), `op`, `n` (circuits; replicas for `run_shots_distributed`), `shots` (the shots per circuit asked for in that call; for `run_shots_distributed`, the sum of `replicas`), `t`, `dt`, `ok`, and for `run_shots_distributed` only, `replicas` (the shots of each replica) |
+| `iter` | optimizer iteration | `ev`, `i` (the iteration, from 1), `evals` (candidates scored so far), `batches` (the batches recorded before it), `best` (`TrainProgress.best_fitness`; `null` if it is not finite), `t` (when the optimizer reported the iteration, taken before the `callback` runs) |
+| `metric` | call to QNG's metric (a `VarianceOracle`) | `ev`, `n` (the elements asked for: 1 for `variance`, `dims` for `variance_diagonal`), `t`, `dt` |
+| `end` | run, last | `ev`, `status` (h), `batches`, `waves`, `circuits` (the sum of the batches' `n`), `truncated` (f), `t` |
+
+A batch's `wave` lines come before its `batch` line, which is recorded once the
+batch returns. The counts of `end` cover every event recorded, those a size cap
+kept out of the file included (f): its `batches`, `waves` and `circuits` equal
+the `batch` lines, the `wave` lines and the sum of the batches' `n` unless
+`truncated` is `true`. The [JSON Schema](#json-schema-of-version-1) below gives
+each line's fields, their types and their ranges, but two rules of the table
+are beyond it, so a reader that validates with the schema alone accepts a line
+that breaks them: the order of the fields, which
+`header_and_events_serialize_to_schema_v1_lines` pins, and `replicas` being on
+the `run_shots_distributed` waves and on no other line, which the Python tests
+check with `check_trace` (`tests/python/call_trace.py`).
+
+- **(b) The trace changes nothing.** With or without a trace, a run returns the
+  same result, bit for bit (`TrainResult`, `RunResult`), raises the same error
+  and makes the same calls to its backend, with the same arguments, seeds
+  included, in the same order. A traced run is always observed: it gets a
+  `TracingObserver` even without a `callback`, so it takes C-5's observed path,
+  whose outcome an observer that never stops the run leaves bit for bit the
+  same. Its calls to the backend stay the same as long as the run's oracles
+  stop running circuits once a failure is recorded, as those of
+  `polypus-evaluation` do: an observed run stops at the end of the iteration
+  in which a failure was recorded (C-5).
+- **(c) Every method is forwarded.** Each decorator forwards every method of
+  its trait to what it wraps, with the same arguments, and returns what that
+  returns, error included, the methods the trait gives a default included:
+  `TracingBackend` the 10 of `QuantumBackend`, `TracingPlanner` the 5 of
+  `Planner`, `TracingVariance` the 2 of `VarianceOracle` and `TracingObserver`
+  the 1 of `TrainObserver`. A decorator that kept a default would make other
+  calls than the untraced run: the default `run_shots_distributed` would call
+  the wrapper's `run_circuits`, and the default `variance_diagonal` would call
+  `variance` once per element. A method added to one of these traits gets its
+  forwarding, and its test, in the same PR.
+
+### Opening, naming, capping and closing
+
+- **(d) Opening.** The `trace` argument wins over `POLYPUS_CALL_TRACE`. The
+  file is created new (`create_new`, that is `O_EXCL`): whatever is already at
+  the path, a symbolic link included (even a dangling one), is left as it is,
+  never overwritten or followed. On Unix the file's mode is `0640`, narrowed
+  by the umask. The trace never creates a directory. If the file cannot be
+  created (something is at the path, its directory does not exist, the
+  process may not write there), the run logs one warning, `call trace off`,
+  with the run's id, the path and the error, and goes on without a trace. The
+  trace is opened before the backend is created, so its clock counts the
+  backend's start-up (on CUNQA, raising the QPUs), and every way out of the
+  run from there closes it (h).
+- **(e) File names from the variable.** Unset or empty, `POLYPUS_CALL_TRACE` is
+  off. Otherwise, for a run whose `trace` is `None`, it names the directory
+  where the run writes its trace, in a file of its own:
+  `<id>-<pid>-<n>.jsonl`, for `train` and `run_quantum_circuit` alike, where
+  `<id>` is the run's effective id (the `id` of its result and of its
+  header), `<pid>` is the process's id and `<n>` counts, from 0, the traces
+  the variable named before in the process. The effective id ends in a UUID
+  v4, and that is what keeps apart the files of different runs: `<pid>` and
+  `<n>` repeat among the processes that share a directory (in two
+  containers, on two hosts, or once the system hands a pid on), and anyone
+  who can list the processes knows them. Every character of `<id>` outside
+  `[A-Za-z0-9._-]` becomes `_`, so the name stays inside the directory
+  whatever the id holds, and an id longer than 100 characters keeps its first
+  100, followed by `-` and eight hexadecimal digits of a hash of the whole id
+  (the low 32 bits of the 64-bit FNV-1a of its UTF-8 bytes), so two ids that
+  share their first 100 characters still get different names.
+- **(f) Size cap.** `POLYPUS_CALL_TRACE_MAX_MB` caps every trace, in MiB (2^20
+  bytes): a whole number, at least 1, in ASCII digits alone, without a sign,
+  spaces or a unit, whose size in bytes fits in 64 bits (so below 2^44 MiB);
+  unset, the cap is 512 MiB. An invalid value is logged with one warning per
+  process and ignored, so the default applies. The header counts toward the
+  cap. An event that would take the trace past it is counted
+  but not written, and neither is any event after it; the `end` line is
+  written regardless, with `"truncated": true`, so the file never grows past
+  the cap plus its `end` line.
+- **(g) Write failures.** Recording never fails the run. The first write error
+  (a full disk, an I/O error) logs one warning, `call trace stopped`, and stops
+  the trace: nothing more is written, `end` included. A trace without an `end`
+  line is incomplete, as is the trace of a process that was killed; its whole
+  lines can still be read, up to the first that is not JSON.
+- **(h) Status.** The `status` of `end` is the outcome Python sees: `"ok"` when
+  the run returns its result; `"cancelled"` when it raises
+  `KeyboardInterrupt`, as Ctrl+C does (it reaches the edge as the
+  `KeyboardInterrupt` of `check_signals` inside a backend error, not as a
+  cancelled run), and so do a cancelled run (`InfrastructureError::Cancelled`)
+  and an aborted one (`BackendError::Aborted`); `"error"` for any other
+  exception, one raised before the first batch included, such as by creating
+  the backend; and `"aborted"` when nobody closed the trace: a `CallTracer`
+  dropped without `finish` writes its `end` line with that status. Only the
+  first `finish` writes.
+- **(i) Content.** A trace holds the fields of the schema and nothing else:
+  never circuits, parameters, counts, environment variables or paths.
+- **(j) Cost.** Without a trace nothing is installed: the flows run on the
+  run's own planner, the same `Arc`, and add no decorator and no observer.
+  With one, each line is serialized into one reused buffer and written through
+  a 64 KiB buffer, flushed only after the header and when the trace is closed,
+  behind one mutex per trace, uncontended in practice. The event lines
+  (`batch`, `wave`, `iter`, `metric`) are written by a hand-written encoder that
+  produces exactly the bytes `serde_json` would, which
+  `event_lines_encode_as_serde_json_does` and
+  `event_lines_encode_as_serde_json_does_for_random_values` check.
+
+### JSON Schema of version 1
+
+The schema, exactly. `tests/python/call_trace.py` reads it from this block
+(`load_schema`), and the Python tests read every trace with its `read_trace`,
+which validates every whole line against it.
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "polypus-call-trace-v1",
+  "title": "Polypus call trace, version 1: one JSON object per line",
+  "oneOf": [
+    {"$ref": "#/$defs/run"}, {"$ref": "#/$defs/batch"}, {"$ref": "#/$defs/wave"},
+    {"$ref": "#/$defs/iter"}, {"$ref": "#/$defs/metric"}, {"$ref": "#/$defs/end"}
+  ],
+  "$defs": {
+    "run": {
+      "type": "object", "additionalProperties": false,
+      "required": ["v", "ev", "flow", "id", "polypus", "method", "dims", "backend", "infrastructure", "n_qpus", "shots", "seed", "t0_unix_ns"],
+      "properties": {
+        "v": {"const": 1},
+        "ev": {"const": "run"},
+        "flow": {"enum": ["train", "run_circuit"]},
+        "id": {"type": "string"},
+        "polypus": {"type": "string"},
+        "method": {"type": ["string", "null"]},
+        "dims": {"type": ["integer", "null"], "minimum": 1},
+        "backend": {"type": "string"},
+        "infrastructure": {"type": "string"},
+        "n_qpus": {"type": "integer", "minimum": 1},
+        "shots": {"type": "integer", "minimum": 1},
+        "seed": {"type": ["integer", "null"], "minimum": 0},
+        "t0_unix_ns": {"type": "integer", "minimum": 0}
+      }
+    },
+    "batch": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "k", "op", "n", "shots", "t", "dt", "ok"],
+      "properties": {
+        "ev": {"const": "batch"},
+        "k": {"type": "integer", "minimum": 0},
+        "op": {"enum": ["evaluate", "execute", "execute_replicas"]},
+        "n": {"type": "integer", "minimum": 0},
+        "shots": {"type": "integer", "minimum": 0},
+        "t": {"type": "integer", "minimum": 0},
+        "dt": {"type": "integer", "minimum": 0},
+        "ok": {"type": "boolean"}
+      }
+    },
+    "wave": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "k", "w", "op", "n", "shots", "t", "dt", "ok"],
+      "properties": {
+        "ev": {"const": "wave"},
+        "k": {"type": ["integer", "null"], "minimum": 0},
+        "w": {"type": "integer", "minimum": 0},
+        "op": {"enum": ["run_circuits", "run_shots_distributed"]},
+        "n": {"type": "integer", "minimum": 0},
+        "shots": {"type": "integer", "minimum": 0},
+        "t": {"type": "integer", "minimum": 0},
+        "dt": {"type": "integer", "minimum": 0},
+        "ok": {"type": "boolean"},
+        "replicas": {"type": "array", "items": {"type": "integer", "minimum": 0}}
+      }
+    },
+    "iter": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "i", "evals", "batches", "best", "t"],
+      "properties": {
+        "ev": {"const": "iter"},
+        "i": {"type": "integer", "minimum": 1},
+        "evals": {"type": "integer", "minimum": 0},
+        "batches": {"type": "integer", "minimum": 0},
+        "best": {"type": ["number", "null"]},
+        "t": {"type": "integer", "minimum": 0}
+      }
+    },
+    "metric": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "n", "t", "dt"],
+      "properties": {
+        "ev": {"const": "metric"},
+        "n": {"type": "integer", "minimum": 0},
+        "t": {"type": "integer", "minimum": 0},
+        "dt": {"type": "integer", "minimum": 0}
+      }
+    },
+    "end": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "status", "batches", "waves", "circuits", "truncated", "t"],
+      "properties": {
+        "ev": {"const": "end"},
+        "status": {"enum": ["ok", "error", "cancelled", "aborted"]},
+        "batches": {"type": "integer", "minimum": 0},
+        "waves": {"type": "integer", "minimum": 0},
+        "circuits": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"},
+        "t": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}
+```
+
+**Enforcing test:**
+
+- **Rust:**
+  - `crates/polypus-orchestration/src/trace.rs`:
+    `header_and_events_serialize_to_schema_v1_lines` (a);
+    `create_never_overwrites_a_file_or_follows_a_symlink` and
+    `trace_file_is_created_0640_or_stricter` (d);
+    `size_cap_truncates_and_still_closes` and
+    `worst_case_trace_fits_two_megabytes` (f);
+    `write_failure_warns_once_and_leaves_no_end` and
+    `a_transient_write_error_writes_nothing_more` (g);
+    `trace_drop_writes_aborted`, `drop_failure_logs_one_error`,
+    `finish_is_written_once` and
+    `finish_stamps_the_end_after_a_record_in_progress` (h);
+  - `crates/polypus-orchestration/src/trace/decorators.rs`:
+    `planner_trace_records_every_batch`,
+    `a_backend_wrapped_outside_a_batch_has_no_k` and
+    `iter_is_stamped_before_the_observer_and_metric_spans_the_oracle` (a);
+    `traced_calls_return_what_untraced_calls_return` (b);
+    `tracing_backend_forwards_every_method`,
+    `tracing_planner_forwards_every_method`,
+    `tracing_planner_passes_on_the_callers_cancel_token`,
+    `tracing_observer_forwards_every_call` and
+    `tracing_variance_forwards_both_methods` (c);
+  - `crates/polypus-orchestration/src/flow/trace_tests.rs`:
+    `trace_matches_method_shape`, `trace_iter_and_metric_events_are_exact`,
+    `run_circuit_flow_traces_its_replicas` and
+    `method_name_labels_every_method` (a);
+    `trace_does_not_change_the_outcome` and
+    `trace_keeps_the_error_and_the_backend_calls_of_a_failed_run` (b);
+    `trace_size_cap` (f); `trace_survives_write_errors` (g);
+    `trace_off_installs_nothing` (j);
+  - `crates/polypus-orchestration/tests/conformance_with_trace.rs`:
+    `conformance_with_trace`, the whole `polypus-backend-conformance` battery
+    on the native backend wrapped in a `TracingBackend` (c);
+  - `crates/polypus/src/bindings/call_trace.rs`:
+    `trace_file_name_is_sanitized` and `file_name_hash_is_fnv1a_64` (e);
+    `max_mb_parses_whole_mebibytes` (f);
+    `run_status_follows_the_python_error` and
+    `an_interrupt_inside_a_backend_error_is_cancelled` (h).
+- **Python:**
+  - `tests/python/test_call_trace.py`:
+    `test_trace_is_a_keyword_only_argument_that_defaults_to_none`,
+    `test_a_trace_that_is_not_a_path_raises_before_anything_runs` and
+    `test_a_bytes_trace_path_raises_before_anything_runs` (the argument);
+    `test_trace_header_fields`, `test_run_quantum_circuit_trace` and
+    `test_qng_metric_events_match_variance_calls` (a);
+    `test_trace_does_not_change_results` (b);
+    `test_same_trace_path_twice_keeps_the_first_file` and
+    `test_a_trace_in_a_missing_directory_runs_without_a_trace` (d);
+    `test_reader_stops_at_last_complete_line` (g);
+    `test_trace_status_follows_the_outcome` and
+    `test_an_error_before_the_first_batch_closes_the_trace_with_error` (h);
+  - `tests/python/test_call_trace_cunqa.py`: `test_cunqa_trace_forwarding` and
+    `test_cunqa_train_trace_forwarding` (b, c: the same calls and seeds at the
+    CUNQA seam, `run_shots_distributed` included, with and without a trace);
+    `test_a_failing_cunqa_job_closes_the_trace_with_error` (h);
+  - `tests/python/test_call_trace_process.py`:
+    `test_an_existing_path_or_symlink_is_left_alone_with_one_warning` and
+    `test_trace_file_mode_is_0640` (d);
+    `test_env_mode_writes_one_file_per_run`,
+    `test_a_file_named_after_the_pid_alone_does_not_stop_the_trace`,
+    `test_runs_with_the_same_pid_and_count_get_different_names`,
+    `test_the_trace_argument_wins_over_the_variable`,
+    `test_env_mode_creates_no_directory`, `test_an_empty_variable_is_off` and
+    `test_trace_id_is_sanitized` (d, e);
+    `test_max_mb_caps_the_trace` and
+    `test_an_invalid_max_mb_is_warned_about_once_and_ignored` (f);
+    `test_killed_run_leaves_a_readable_trace` (g);
+    `test_trace_contains_only_schema_fields` (i);
+    `test_native_trace_independent_of_budget` (the `batch` lines of a native
+    run are the same whatever `n_qpus`, memory budget and threads, as C-7
+    requires; only its waves follow the memory budget);
+  - `tests/python/test_call_trace_schema.py`: `test_trace_schema` (the traces
+    of every optimizer and of a circuit run, on one QPU and on several,
+    validate against the schema above),
+    `test_the_schema_rejects_what_v1_does_not_allow` and
+    `test_read_trace_validates_every_whole_line_that_is_json` (a);
+  - `tests/python/test_typing_stubs.py`: `TestTraceType` (the stub type of
+    `trace`, and the training guide's example type-checks);
+  - `tests/python/test_interrupt.py`: `test_trace_on_interrupt` (h: Ctrl+C
+    during a traced run closes its trace `cancelled`, a complete trace that
+    validates against the schema).

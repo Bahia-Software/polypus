@@ -19,7 +19,7 @@ Both run on the same backends and infrastructures and take the same optimizers. 
 
 ## Qiskit circuits: `qml.train`
 
-`polypus.qml.train()` trains a data-encoding circuit: a Qiskit `feature_map` encodes each row of `x_train` (one sample per row, `len(feature_map.parameters)` values each), an `ansatz` holds the trainable weights, and the optimizer maximises the mean per-sample score over the training set. It takes the same optimizers and parameters as `train()`, `polypus.External` included: there each candidate the library asks for runs one circuit per training sample, and `max_evaluations` counts candidates, not circuits.
+`polypus.qml.train()` trains a data-encoding circuit: a Qiskit `feature_map` encodes each row of `x_train` (one sample per row, `len(feature_map.parameters)` values each), an `ansatz` holds the trainable weights, and the optimizer maximises the mean per-sample score over the training set. It takes the same optimizers and parameters as `train()` except `fusion` and `trace`, so a `qml.train` run writes no call trace. `polypus.External` works too: each candidate the library asks for runs one circuit per training sample, and `max_evaluations` counts candidates, not circuits.
 
 Pass `y_train` (one label per row) to train a supervised model: each sample is then scored against **its own label**. Here a binary classifier reads out the parity of the measured bits:
 

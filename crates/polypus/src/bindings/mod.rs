@@ -6,6 +6,7 @@ use pyo3::PyResult;
 
 pub mod adam;
 pub mod calibration;
+mod call_trace;
 pub mod callback;
 pub mod circuit;
 pub mod cmaes;
@@ -47,6 +48,7 @@ use crate::infrastructure::{
     ExecutionConfig, Infrastructure, InfrastructureError, OptLevel, OptionValue, Planner,
     ShotDistributingPlanner, DEFAULT_WALLTIME,
 };
+use crate::orchestration::trace::{TraceFlow, TraceHeader};
 use crate::orchestration::{
     AdamConfig, CmaesConfig, DeConfig, ExternalConfig, FinalEvaluation, Method, OracleError,
     PsoConfig, QngConfig, Resources, RotosolveConfig, RunCircuitFlow, Scheduler, SpsaConfig,
@@ -54,6 +56,7 @@ use crate::orchestration::{
 };
 use polypus_optimizers::{OptimizationOutcome, VarianceOracle};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -1526,7 +1529,27 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// been received, so a hostile endpoint can make the process allocate as much
 /// memory as it announces. Off CESGA's private network, use a tunnel (see "QMIO
 /// transport threat model" in `docs/backends.md`).
-#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None))]
+///
+/// `trace` (keyword-only, default `None`) writes the run's call trace
+/// (contract C-12) to a new JSON Lines file: a header line, one `batch` line
+/// (`execute_replicas`) and one `wave` line per backend call, with their sizes
+/// and times (each replica's shots too when `n_qpus > 1`) and nothing else (no
+/// circuits or counts), and last an `end` line with how the run ended
+/// (`"ok"`, `"error"` or `"cancelled"`). It is a path, a `str` or an
+/// `os.PathLike[str]`, to a file that does not exist yet, in a directory that
+/// does. If something is already there, a file or a symbolic link, or the
+/// directory does not exist, nothing is created or changed and the run goes on
+/// without a trace, after one warning in the Polypus log (shown only once a
+/// logger is installed with `polypus.init_logger`). A `bytes` path, or a value
+/// that is not a path, raises `TypeError` before anything runs. The trace never
+/// changes the result or the error. Without `trace`,
+/// `POLYPUS_CALL_TRACE=<directory>` writes one trace per run there, named
+/// `<id>-<pid>-<n>.jsonl`, as for `train`, after the run's id (`RunResult.id`,
+/// cut to its first 100 characters and a hash if longer), the process id and
+/// the number of traces the variable named before in the process; the
+/// directory must exist. `POLYPUS_CALL_TRACE_MAX_MB` caps a trace, in whole
+/// MiB (512 MiB by default).
+#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, *, trace=None))]
 pub fn run_quantum_circuit<'py>(
     qc: Bound<'py, PyAny>,
     shots: u32,
@@ -1541,6 +1564,7 @@ pub fn run_quantum_circuit<'py>(
     fusion: Option<bool>,
     options: Option<OptionsArg>,
     walltime: Option<String>,
+    trace: Option<PathBuf>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     // Entry-point trace carrying the full circuit `Debug` repr on every call:
@@ -1621,6 +1645,30 @@ pub fn run_quantum_circuit<'py>(
         "run {id} starting: infrastructure={infrastructure}, backend={backend}, \
          n_qpus={n_qpus}, shots={shots}, seed={effective_seed:?}"
     );
+    // The call trace (contract C-12), if `trace` names a path or
+    // `POLYPUS_CALL_TRACE` a directory (where the file is named after `id`,
+    // the effective id), as in `train`. It starts before the backend
+    // exists, so its clock counts the backend's start-up too (on CUNQA,
+    // raising the QPUs), and every way out from here closes it with the
+    // status Python sees. Creating it writes the header line to the file, so
+    // the GIL is released; a path that cannot be created leaves the run
+    // untraced.
+    let py = qc.py();
+    let header = TraceHeader {
+        flow: TraceFlow::RunCircuit,
+        id: id.clone(),
+        polypus: python_version(env!("CARGO_PKG_VERSION")),
+        method: None,
+        dims: None,
+        backend: backend.to_owned(),
+        infrastructure: infrastructure.clone(),
+        n_qpus,
+        shots,
+        seed: effective_seed,
+    };
+    let tracer = py.detach(|| call_trace::open(trace, header));
+    // The flow's handle on the trace, moved into the run below.
+    let flow_trace = tracer.clone();
 
     // Release the GIL for the whole run, mirroring `train`: circuit execution is
     // GIL-free on the native backend (and internally reacquires the GIL where
@@ -1650,13 +1698,18 @@ pub fn run_quantum_circuit<'py>(
                 RunCircuitFlow {
                     circuits: vec![bound_qc],
                     shots,
+                    trace: flow_trace,
                 },
                 &interruptible_token(),
             );
             scheduler.close();
             out
         });
-    let counts_vec = counts_result.map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
+    // A failed run, creating its backend included, closes the trace with the
+    // status of the error Python gets.
+    let counts_vec = counts_result
+        .map_err(crate::exceptions::infrastructure_error_to_pyerr)
+        .map_err(|err| call_trace::close_on_error(py, tracer.as_ref(), err))?;
     // Completion counterpart of the start record above. There is no
     // iterations/convergence notion on this path (those are `TrainResult`
     // fields), so this reports only the run and how long it took.
@@ -1665,7 +1718,7 @@ pub fn run_quantum_circuit<'py>(
     // `counts` is a `list[dict]` with one map per replica, and `merged_counts` is
     // their key-by-key sum as a single `dict`. Keys are sorted in both.
     let merged = merge_counts(&counts_vec);
-    Python::attach(|py| {
+    let out = Python::attach(|py| {
         let counts = counts_to_pylist(py, &counts_vec)?.into_any().unbind();
         let merged_counts = counts_to_pydict(py, &merged)?.into_any().unbind();
         Py::new(
@@ -1680,7 +1733,11 @@ pub fn run_quantum_circuit<'py>(
             },
         )
         .map(|result| result.into_any())
-    })
+    });
+    // The outcome returned to Python, the result or a failure to build it,
+    // closes the trace.
+    call_trace::close(py, tracer.as_ref(), &out);
+    out
 }
 
 /// Unified entry point: train a variational quantum circuit with a chosen optimizer.
@@ -1760,6 +1817,25 @@ pub fn run_quantum_circuit<'py>(
 /// a seeded run returns exactly the same result. A `callback` that is neither
 /// callable nor `None` raises `TypeError` before anything runs.
 ///
+/// `trace` (keyword-only, default `None`) writes the run's call trace
+/// (contract C-12) to a new JSON Lines file: a header line, one line per
+/// planner batch, backend wave, optimizer iteration and call to QNG's metric,
+/// with their sizes and times and nothing else (no circuits, parameters or
+/// counts), and last an `end` line with how the run ended (`"ok"`, `"error"`
+/// or `"cancelled"`). It is a path, a `str` or an `os.PathLike[str]`, to a
+/// file that does not exist yet, in a directory that does. If something is
+/// already there, a file or a symbolic link, or the directory does not exist,
+/// nothing is created or changed and the run goes on without a trace, after
+/// one warning in the Polypus log (shown only once a logger is installed with
+/// `polypus.init_logger`). A `bytes` path, or a value that is not a path,
+/// raises `TypeError` before anything runs. The trace never changes the
+/// result or the error. Without `trace`, `POLYPUS_CALL_TRACE=<directory>`
+/// writes one trace per run there, named `<id>-<pid>-<n>.jsonl` after the
+/// run's id (`TrainResult.id`, cut to its first 100 characters and a hash if
+/// longer), the process id and the number of traces the variable named before
+/// in the process; the directory must exist. `POLYPUS_CALL_TRACE_MAX_MB`
+/// caps a trace, in whole MiB (512 MiB by default).
+///
 /// Interruption: pressing Ctrl+C (or otherwise sending `SIGINT`) stops the
 /// optimization promptly and raises `KeyboardInterrupt` in Python, instead of
 /// waiting for the run to finish, with or without a `callback`. An exception
@@ -1798,7 +1874,7 @@ pub fn run_quantum_circuit<'py>(
 ///         infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
 ///     )
 /// ```
-#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, initial_point=None, final_shots=None, *, callback=None))]
+#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, initial_point=None, final_shots=None, *, callback=None, trace=None))]
 pub fn train<'py>(
     qc: Bound<'py, PyAny>,
     method: Bound<'py, PyAny>,
@@ -1820,6 +1896,7 @@ pub fn train<'py>(
     initial_point: Option<Vec<f64>>,
     final_shots: Option<Bound<'py, PyAny>>,
     callback: Option<Bound<'py, PyAny>>,
+    trace: Option<PathBuf>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
@@ -1924,12 +2001,35 @@ pub fn train<'py>(
         shots,
         effective_seed,
     );
+    // The call trace (contract C-12), if `trace` names a path or
+    // `POLYPUS_CALL_TRACE` a directory (where the file is named after the
+    // effective id). It starts before the backend exists, so its clock counts
+    // the backend's start-up too (on CUNQA, raising the QPUs), and every way
+    // out from here closes it with the status Python sees. Creating it writes
+    // the header line to the file, so the GIL is released; a path that cannot
+    // be created leaves the run untraced.
+    let py = method.py();
+    let header = TraceHeader {
+        flow: TraceFlow::Train,
+        id: effective_id.clone(),
+        polypus: python_version(env!("CARGO_PKG_VERSION")),
+        method: Some(method_enum.name()),
+        dims: Some(dimensions),
+        backend: backend.to_owned(),
+        infrastructure: infrastructure.clone(),
+        n_qpus,
+        shots,
+        seed: Some(effective_seed),
+    };
+    let tracer = py.detach(|| call_trace::open(trace, header));
     let backend = Infrastructure::create_backend(&config)
-        .map_err(crate::exceptions::backend_error_to_pyerr)?;
+        .map_err(crate::exceptions::backend_error_to_pyerr)
+        .map_err(|err| call_trace::close_on_error(py, tracer.as_ref(), err))?;
     // Pair the backend with its default planner (the atomic-wave SequentialPlanner)
     // and validate the pairing up front.
     let resources = Resources::new(backend, None, Arc::new(config.run_params()))
-        .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
+        .map_err(crate::exceptions::infrastructure_error_to_pyerr)
+        .map_err(|err| call_trace::close_on_error(py, tracer.as_ref(), err))?;
     let scheduler = Scheduler::ephemeral(resources);
     let flow = TrainFlow {
         factory: VqcOracleFactory {
@@ -1943,6 +2043,7 @@ pub fn train<'py>(
         final_shots,
         observer: training_observer(callback, &errors, &effective_id),
         errors: errors.clone(),
+        trace: tracer.clone(),
     };
     // Release the GIL for the whole optimization: parameter binding and native
     // simulation are GIL-free, so holding it would stall every other Python
@@ -1951,11 +2052,11 @@ pub fn train<'py>(
     // carries the `check_signals`-backed interrupt guard the pyo3-free planner
     // calls between waves, so Ctrl+C still aborts at the next wave boundary.
     let token = interruptible_token();
-    let result = method
-        .py()
-        .detach(|| scheduler.run_cancellable(flow, &token));
+    let result = py.detach(|| scheduler.run_cancellable(flow, &token));
     scheduler.close();
-    finish_optimization(method.py(), result, effective_seed, effective_id, start)
+    let out = finish_optimization(py, result, effective_seed, effective_id, start);
+    call_trace::close(py, tracer.as_ref(), &out);
+    out
 }
 
 /// Compose `feature_map` with `ansatz` into the QML circuit template, adding a
@@ -2322,6 +2423,7 @@ pub fn qml_train<'py>(
         final_shots,
         observer: training_observer(callback, &errors, &effective_id),
         errors: errors.clone(),
+        trace: None,
     };
     // Release the GIL for the optimization (see `train` and docs/ENGINEERING.md
     // §3): the Qiskit binding + Aer calls re-acquire it, and the run token's
@@ -2470,8 +2572,14 @@ pub fn qml_predict<'py>(
             Infrastructure::create_backend(&config).map_err(InfrastructureError::Backend)?;
         let resources = Resources::new(backend, None, Arc::new(config.run_params()))?;
         let scheduler = Scheduler::ephemeral(resources);
-        let out =
-            scheduler.run_cancellable(RunCircuitFlow { circuits, shots }, &interruptible_token());
+        let out = scheduler.run_cancellable(
+            RunCircuitFlow {
+                circuits,
+                shots,
+                trace: None,
+            },
+            &interruptible_token(),
+        );
         scheduler.close();
         out
     });
@@ -2763,6 +2871,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("native run_quantum_circuit succeeds");
         let bound = result.bind(py);
@@ -2833,6 +2942,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("native run succeeds");
             let bound = result.bind(py);
@@ -2881,6 +2991,7 @@ mod tests {
                     None,
                     "polypus",
                     Some(7),
+                    None,
                     None,
                     None,
                     None,
@@ -2960,6 +3071,7 @@ mod tests {
                 None,
                 "aer",
                 Some(3),
+                None,
                 None,
                 None,
                 None,
@@ -4633,7 +4745,7 @@ mod tests {
         train_with(py, infrastructure, method, expectation_function, None, None)
     }
 
-    /// [`train_on`] with `final_shots` and `callback`.
+    /// [`train_on`] with `final_shots` and `callback`, and no `trace`.
     fn train_with<'py>(
         py: Python<'py>,
         infrastructure: &str,
@@ -4663,6 +4775,7 @@ mod tests {
             None,
             final_shots,
             callback,
+            None,
         )
     }
 

@@ -107,6 +107,7 @@ import sys
 import time
 
 import pytest
+from call_trace import check_trace, read_trace
 
 pytestmark = pytest.mark.integration
 
@@ -342,6 +343,25 @@ def test_native_training_with_a_callback_responds_to_sigint_promptly():
             "likely holding the GIL or swallowing the pending signal"
         ),
     )
+
+
+def test_trace_on_interrupt(tmp_path):
+    # Contract C-12: Ctrl+C reaches the edge as the KeyboardInterrupt of
+    # `check_signals` inside a backend error, not as a cancelled run
+    # (`InfrastructureError::Cancelled`); the trace still closes "cancelled".
+    path = tmp_path / "interrupted.jsonl"
+    _assert_responds_to_sigint_promptly(
+        _NATIVE_CHILD.replace(_ID_LINE, _ID_LINE + f" trace={str(path)!r},"),
+        failure_hint=(
+            "native training with a call trace — the trace likely holds the "
+            "GIL or the run"
+        ),
+    )
+    # Read as every trace of the tests is: each line against the schema, then
+    # the whole trace against what a closed trace satisfies.
+    trace = read_trace(path)
+    check_trace(trace)
+    assert trace.end["status"] == "cancelled"
 
 
 def test_qml_training_responds_to_sigint_promptly():

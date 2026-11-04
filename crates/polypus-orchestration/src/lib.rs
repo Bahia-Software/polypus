@@ -6,7 +6,7 @@
 //! variational optimizers), and it is depended on by `polypus-evaluation` and the
 //! `polypus` edge.
 //!
-//! Two responsibilities live here:
+//! Three responsibilities live here:
 //!
 //! - **[`dispatch_optimizer`]** turns a chosen [`Method`] plus an
 //!   [`EvaluationOracle`](polypus_optimizers::EvaluationOracle) into an
@@ -20,6 +20,10 @@
 //!   alike; a training flow's `pyo3`-touching oracle is built by an
 //!   [`OracleFactory`] implemented in `polypus-evaluation`, so the *order* stays
 //!   with the scheduler while its domain detail does not.
+//! - **[`trace`]** is the call trace (contract C-12): a
+//!   [`CallTracer`](trace::CallTracer) writes a run's planner batches, backend
+//!   waves, optimizer iterations and QNG metric calls as JSON Lines (schema v1),
+//!   within a size cap, and closes the trace with the run's status.
 //!
 //! The crate is deliberately **Python-free**: the GIL is released by the caller
 //! (`polypus`, via `py.detach`) and a real oracle failure reaches here as a
@@ -35,6 +39,7 @@ pub mod progress;
 pub mod scheduler;
 #[cfg(test)]
 mod test_log;
+pub mod trace;
 mod walltime;
 
 pub use dispatch::{

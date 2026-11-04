@@ -8,13 +8,16 @@
 
 use std::sync::Arc;
 
-use polypus_infrastructure::{BoundCircuit, CancelToken, CircuitTask, Counts, InfrastructureError};
+use polypus_infrastructure::{
+    BoundCircuit, CancelToken, CircuitTask, Counts, InfrastructureError, Planner,
+};
 use polypus_optimizers::{EvaluationOracle, OptimizationOutcome, OptimizerError};
 
 use crate::dispatch::{dispatch_optimizer_observed, Method, OracleError, OracleErrorSlot, Oracles};
 use crate::final_batch::{final_batch, EliteRecorder};
 use crate::progress::TrainObserver;
 use crate::scheduler::Resources;
+use crate::trace::{CallTracer, TracingObserver, TracingPlanner, TracingVariance};
 use crate::walltime::{watched, SystemClock};
 
 /// A unit of orchestratable work run by [`Scheduler::run`](crate::Scheduler::run).
@@ -35,9 +38,8 @@ pub trait Flow {
 /// Runs a batch of bound circuits through the resources' planner and returns the
 /// counts — one [`Counts`] per circuit, in input order, or, when the planner splits
 /// one circuit's shots across replicas, one per replica in apportionment order
-/// (contract C-3). It calls [`Planner::execute_replicas`](polypus_infrastructure::Planner::execute_replicas),
-/// so the per-replica breakdown reaches the edge unmerged; the merged total is
-/// computed there.
+/// (contract C-3). It calls [`Planner::execute_replicas`], so the per-replica
+/// breakdown reaches the edge unmerged; the merged total is computed there.
 ///
 /// The single-vs-distributed decision is **which planner is in
 /// [`Resources`]** (chosen by the `polypus` edge when it parses kwargs), not this
@@ -48,6 +50,16 @@ pub struct RunCircuitFlow {
     pub circuits: Vec<BoundCircuit>,
     /// Shots per circuit.
     pub shots: u32,
+    /// The call trace that records the run (contract C-12), if any. With
+    /// `Some`, the batch goes to the planner through a [`TracingPlanner`],
+    /// which writes it as a `batch` line and each call it makes to the backend
+    /// as a `wave` line. `None` installs nothing.
+    ///
+    /// The trace never changes the run: its counts, its error and its calls to
+    /// the backend are the same with it and without it. The flow does not
+    /// close the trace: whoever created the tracer calls
+    /// [`CallTracer::finish`] once the run returns.
+    pub trace: Option<Arc<CallTracer>>,
 }
 
 impl Flow for RunCircuitFlow {
@@ -67,12 +79,21 @@ impl Flow for RunCircuitFlow {
                 shots: self.shots,
             })
             .collect();
-        resources.planner.execute_replicas(
-            resources.backend.as_ref(),
-            &tasks,
-            &resources.config,
-            cancel,
-        )
+        match &self.trace {
+            Some(tracer) => TracingPlanner::new(Arc::clone(&resources.planner), Arc::clone(tracer))
+                .execute_replicas(
+                    resources.backend.as_ref(),
+                    &tasks,
+                    &resources.config,
+                    cancel,
+                ),
+            None => resources.planner.execute_replicas(
+                resources.backend.as_ref(),
+                &tasks,
+                &resources.config,
+                cancel,
+            ),
+        }
     }
 }
 
@@ -144,11 +165,34 @@ pub struct TrainFlow<F: OracleFactory> {
     /// the run, which then returns what it has reached and still sends the
     /// final batch of [`final_shots`](Self::final_shots). An error it records
     /// in [`errors`](Self::errors) is the run's, and skips the final batch.
-    /// `None` runs exactly as before. See [`TrainObserver`].
+    /// `None` runs exactly as before, unless the run is
+    /// [traced](Self::trace). See [`TrainObserver`].
     pub observer: Option<Box<dyn TrainObserver>>,
     /// Shared failure slot: the oracle records into it, `dispatch_optimizer` takes
     /// it, and the edge downcasts + re-raises.
     pub errors: OracleErrorSlot,
+    /// The call trace that records the run (contract C-12), if any. With
+    /// `Some`, the factory builds the oracle over the run's planner wrapped in
+    /// a [`TracingPlanner`], which writes each batch and each call it makes to
+    /// the backend; QNG's metric is wrapped in a [`TracingVariance`], which
+    /// writes each call to it; and a [`TracingObserver`] writes each iteration,
+    /// then shows it to [`observer`](Self::observer), if there is one. `None`
+    /// installs nothing.
+    ///
+    /// The trace never changes the run's outcome or its error: a traced run is
+    /// observed even without an `observer`, and an observer that never stops
+    /// the run leaves its outcome bit for bit the same (contract C-5). Nor
+    /// does it change the run's calls to the backend, as long as the run's
+    /// oracles stop running circuits once [`errors`](Self::errors) holds a
+    /// failure, as those of `polypus-evaluation` do: an observed run stops at
+    /// the end of the iteration in which a failure was recorded (contract
+    /// C-5), while an untraced run without an `observer` goes on to the
+    /// optimizer's end, so an oracle that keeps running circuits after a
+    /// failure runs those of the later iterations only untraced.
+    ///
+    /// The flow does not close the trace: whoever created the tracer calls
+    /// [`CallTracer::finish`] once the run returns.
+    pub trace: Option<Arc<CallTracer>>,
 }
 
 /// What a [`TrainFlow`] run produces.
@@ -200,24 +244,59 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
         // and the per-run `CancelToken` both exist, so the oracle captures the exact
         // token this run cancels on — while the *order* still lives with the
         // scheduler that runs it.
-        let oracles = self.factory.build(resources, cancel, &self.errors);
+        //
+        // A traced run builds it over its planner wrapped to record each batch
+        // and the backend calls the batch makes, wraps QNG's metric to record
+        // each call, and records each iteration before its own observer, if it
+        // has one, sees it. The walltime watch below reads the run's own
+        // backend either way. An untraced run installs none of them.
+        let (oracles, method, mut observer) = match &self.trace {
+            None => (
+                self.factory.build(resources, cancel, &self.errors),
+                self.method,
+                self.observer,
+            ),
+            Some(tracer) => {
+                let traced = Resources {
+                    backend: Arc::clone(&resources.backend),
+                    planner: Arc::new(TracingPlanner::new(
+                        Arc::clone(&resources.planner),
+                        Arc::clone(tracer),
+                    )),
+                    config: Arc::clone(&resources.config),
+                };
+                let method = match self.method {
+                    Method::Qng(cfg, metric) => Method::Qng(
+                        cfg,
+                        Box::new(TracingVariance::new(metric, Arc::clone(tracer))),
+                    ),
+                    method => method,
+                };
+                let observer: Box<dyn TrainObserver> =
+                    Box::new(TracingObserver::new(self.observer, Arc::clone(tracer)));
+                (
+                    self.factory.build(&traced, cancel, &self.errors),
+                    method,
+                    Some(observer),
+                )
+            }
+        };
         // Only a backend whose allocation expires (CUNQA) gets the overrun watch,
         // which times every oracle of the run as one watch.
         let oracles = match resources.backend.walltime() {
             Some(walltime) => watched(
                 oracles,
                 walltime,
-                &self.method,
+                &method,
                 self.dimensions,
                 &resources.config.id,
                 SystemClock,
             ),
             None => oracles,
         };
-        let mut observer = self.observer;
         let Some(final_shots) = self.final_shots else {
             let optimization = dispatch_optimizer_observed(
-                self.method,
+                method,
                 oracles,
                 self.dimensions,
                 &self.errors,
@@ -235,7 +314,7 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
         // a minibatch the oracle's `evaluate_batch_with_shots` scores every
         // sample (the native QML oracle does), and the full-dataset view goes
         // to the optimizer as it came.
-        let count = self.method.final_candidates();
+        let count = method.final_candidates();
         let Oracles {
             evaluation,
             gradient,
@@ -246,7 +325,7 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
         // An optimizer error, an interrupt or a failure the observer recorded
         // returns here: no final batch. A stop the observer asked for does not.
         let optimization = dispatch_optimizer_observed(
-            self.method,
+            method,
             Oracles {
                 evaluation: Box::new(Arc::clone(&elite)),
                 gradient,
@@ -292,6 +371,9 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
         })
     }
 }
+
+#[cfg(test)]
+mod trace_tests;
 
 #[cfg(test)]
 mod tests {
@@ -377,6 +459,7 @@ mod tests {
             .run(RunCircuitFlow {
                 circuits,
                 shots: 500,
+                trace: None,
             })
             .expect("the flow must run");
 
@@ -437,6 +520,7 @@ mod tests {
             .run(RunCircuitFlow {
                 circuits: vec![BoundCircuit::Qasm2("a".to_string())],
                 shots: 500,
+                trace: None,
             })
             .expect("the flow must run");
         assert_eq!(counts.len(), 2);
@@ -504,6 +588,7 @@ mod tests {
             final_shots: None,
             observer: None,
             errors: OracleErrorSlot::new(),
+            trace: None,
         };
         // `OracleError` does not implement `Debug`, so match rather than
         // `.expect`.
@@ -590,6 +675,7 @@ mod tests {
             final_shots: None,
             observer: None,
             errors: OracleErrorSlot::new(),
+            trace: None,
         };
         assert!(scheduler.run(flow).is_ok(), "the train flow must run");
         scheduler.close();
@@ -757,7 +843,7 @@ mod tests {
     }
 
     /// A small run of every optimizer, with its name.
-    fn every_method() -> Vec<(&'static str, Method)> {
+    pub(super) fn every_method() -> Vec<(&'static str, Method)> {
         use crate::{
             AdamConfig, CmaesConfig, DeConfig, ExternalConfig, PsoConfig, QngConfig,
             RotosolveConfig, SpsaConfig,
@@ -921,6 +1007,7 @@ mod tests {
             final_shots,
             observer,
             errors,
+            trace: None,
         });
         scheduler.close();
         result

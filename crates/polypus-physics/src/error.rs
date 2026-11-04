@@ -68,6 +68,31 @@ pub enum PhysicsError {
         z: u32,
         message: String,
     },
+    /// A Pauli string or Pauli sum is malformed (repeated qubit, qubit out of
+    /// range, non-finite coefficient, or unparsable text).
+    InvalidPauliSum {
+        /// Human-readable description of the problem.
+        message: String,
+    },
+    /// A valid input is outside what an operation supports (e.g. a dense
+    /// matrix beyond the qubit limit, or a complex matrix where only real
+    /// ones are built).
+    UnsupportedOperation {
+        /// Human-readable description of the problem.
+        message: String,
+    },
+    /// A fermionic operator is malformed (mode out of range or non-finite
+    /// coefficient).
+    InvalidFermionOperator {
+        /// Human-readable description of the problem.
+        message: String,
+    },
+    /// Molecular integrals are malformed (wrong size, non-finite values, or
+    /// symmetries broken beyond the tolerance).
+    InvalidIntegrals {
+        /// Human-readable description of the problem.
+        message: String,
+    },
 }
 
 impl fmt::Display for PhysicsError {
@@ -108,6 +133,18 @@ impl fmt::Display for PhysicsError {
             }
             PhysicsError::EndfDataNotFound { z, message } => {
                 write!(f, "ENDF-6 data not found for Z={z}: {message}")
+            }
+            PhysicsError::InvalidPauliSum { message } => {
+                write!(f, "invalid Pauli sum: {message}")
+            }
+            PhysicsError::UnsupportedOperation { message } => {
+                write!(f, "unsupported operation: {message}")
+            }
+            PhysicsError::InvalidFermionOperator { message } => {
+                write!(f, "invalid fermion operator: {message}")
+            }
+            PhysicsError::InvalidIntegrals { message } => {
+                write!(f, "invalid molecular integrals: {message}")
             }
         }
     }
