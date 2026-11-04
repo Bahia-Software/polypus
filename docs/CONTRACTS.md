@@ -2783,7 +2783,8 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   chain rule of a loss, chunks, seeds, shots, every rejection),
   `test_torch_quantum_layer.py` (the PyTorch layer: forward bit for bit
   `expval` in one call per batch, `gradcheck` with default tolerances for the
-  parameters and the inputs, the `wrt` each backward pass asks for, amplitude
+  parameters and the inputs, the backward pass the same by the adjoint and by
+  the shift fallback, the `wrt` each backward pass asks for, amplitude
   and basis encoders, dtype and device, shapes, the derived seeds and their
   replay, training with SGD, Adam and LBFGS, `state_dict`, `deepcopy` and
   `from_trained`), `test_torch_import.py` (the import without PyTorch, the
@@ -2802,8 +2803,9 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   `callback`, and during `qml.jacobian`, exact and sampled, and inside one
   long exact block; the minibatch rescore runs with the GIL released),
   `test_qml_adjoint.py` (the adjoint and the parameter-shift fallback give the
-  same `qml.jacobian`, `fit` with Adam and `QuantumLayer` backward, the
-  fallback logged, and no memory for one statevector the exact path's error),
+  same `qml.jacobian` and `fit` with Adam, the fallback logged, and no memory
+  for one statevector the exact path's error; the same comparison for the
+  `QuantumLayer` backward is in `test_torch_quantum_layer.py`),
   `TestNativeQmlChecksRaiseIt` in `test_configuration_errors.py` (every check
   of `fit`, `predict`, `run`, `qml.expval` and `qml.jacobian` is a
   `polypus.ConfigurationError` raised before any CUNQA call, and a primitive

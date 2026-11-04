@@ -35,6 +35,7 @@ else:
 
 import polypus.torch as polypus_torch  # noqa: E402
 from polypus.torch import QuantumLayer, from_trained  # noqa: E402
+from qml_adjoint_helpers import adjoint_and_shift, assert_close  # noqa: E402
 
 ROWS = [[0.4, 1.1], [1.3, -0.2], [2.0, 0.7]]
 SHOTS = 64
@@ -185,7 +186,7 @@ class TestBackward:
         layer = QuantumLayer(model, exact=True)
         params = torch.tensor(point(model), dtype=torch.float64, requires_grad=True)
         f = functional(layer)
-        # Default tolerances: with exact=True the parameter shift is exact.
+        # Default tolerances: with exact=True the gradient is exact.
         assert torch.autograd.gradcheck(f, (rows(requires_grad=True), params))
         assert torch.autograd.gradcheck(f, (rows(), params))
         assert torch.autograd.gradcheck(f, (rows(requires_grad=True), params.detach()))
@@ -204,6 +205,26 @@ class TestBackward:
             layer.params.grad.numpy(), np.einsum("bo,bok->k", w, by_params)
         )
         assert np.array_equal(x.grad.numpy(), np.einsum("bo,bof->bf", w, by_inputs))
+
+    def test_the_backward_pass_is_the_same_by_the_adjoint_and_by_the_shift(self):
+        # The exact gradient is the adjoint's, or the parameter shift's when
+        # the memory budget holds one statevector but not two (#503); both are
+        # exact, so they agree to rounding (see qml_adjoint_helpers).
+        adjoint, shift = adjoint_and_shift(
+            """
+            import torch
+            from polypus.torch import QuantumLayer
+
+            layer = QuantumLayer(model, initial_params=params, exact=True, seed=3)
+            x = torch.tensor(rows, dtype=torch.float64, requires_grad=True)
+            weights = torch.tensor(
+                [[1.0, -0.5], [0.25, 2.0], [-1.0, 0.75]], dtype=torch.float64
+            )
+            (layer(x) * weights).sum().backward()
+            print("RESULT", json.dumps([layer.params.grad.tolist(), x.grad.tolist()]))
+            """
+        )
+        assert_close(adjoint, shift)
 
     @pytest.mark.parametrize(
         ("x_grad", "params_grad", "wrt"),
