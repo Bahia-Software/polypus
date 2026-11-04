@@ -92,6 +92,16 @@ Entries were curated from the Conventional Commits history. Releases before
   `InvalidFermionOperator` and `InvalidIntegrals`, so an exhaustive `match`
   on it outside its crate must handle them (#529).
 
+### Documentation
+- The documentation site (MkDocs Material) is published at the Pages root,
+  with the rustdoc of every crate under `/rust/`. Only the crate index pages
+  of the old rustdoc URLs (`.../polypus/<crate>/`) redirect to
+  `.../polypus/rust/<crate>/`; deeper rustdoc links change. The
+  `documentation` link of the `polypus` crate points at its new rustdoc home.
+- The site takes the Polypus cyan and octopus mark, Inter and JetBrains Mono
+  served from the site itself (no third-party font requests), and a new
+  landing page with a tabbed quickstart.
+
 ## [0.8.0] - 2026-10-30
 
 ### Upgrading from 0.7
