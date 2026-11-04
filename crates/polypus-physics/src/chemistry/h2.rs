@@ -365,7 +365,7 @@ mod tests {
             assert_eq!(ours_strings, expected_strings, "R = {r} Å: Pauli strings");
             for (s, c) in expected {
                 assert!(
-                    (ours[s] - c).abs() <= 1e-6,
+                    (ours[s] - c).abs() <= 1e-10,
                     "R = {r} Å, {s}: {} vs {c}",
                     ours[s]
                 );
@@ -383,7 +383,7 @@ mod tests {
             for encoding in ENCODINGS {
                 let e = ground(r, encoding);
                 assert!(
-                    (e - fci).abs() <= 1e-8,
+                    (e - fci).abs() <= 1e-10,
                     "R = {r} Å, {encoding:?}: {e} vs {fci}"
                 );
             }
@@ -406,7 +406,7 @@ mod tests {
             let hf: f64 = row[1].parse().unwrap();
             let h2 = H2Molecule::new(r, H2Encoding::JordanWigner).unwrap();
             let e = hartree_fock_energy(&h2);
-            assert!((e - hf).abs() <= 1e-8, "R = {r} Å: {e} vs {hf}");
+            assert!((e - hf).abs() <= 1e-10, "R = {r} Å: {e} vs {hf}");
             // The same energy is the qubit Hamiltonian's diagonal at the
             // Hartree–Fock state |0101⟩ (σ↑ and σ↓ occupied, block order).
             let diagonal = h2
