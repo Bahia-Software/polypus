@@ -38,5 +38,7 @@ env/bin/pip install -r requirements.txt
 env/bin/python generate.py
 ```
 
-The output is deterministic: re-running with the pinned versions reproduces
-the committed files byte for byte.
+The output is deterministic up to rounding: re-running with the pinned
+versions gives the same Pauli strings and every value to within 1e-12.
+Only the direct dependencies are pinned, and BLAS-backed steps can differ
+in the last digits across CPUs and library builds.
