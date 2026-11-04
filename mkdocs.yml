@@ -1,0 +1,137 @@
+site_name: Polypus
+site_description: Quantum circuit execution and variational training, with a Rust core and Python bindings.
+site_url: https://bahia-software.github.io/polypus/
+repo_url: https://github.com/Bahia-Software/polypus
+repo_name: Bahia-Software/polypus
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+exclude_docs: |
+  superpowers/
+  _hooks/
+  adr/0004-phase-table.py
+  overrides/
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  logo: assets/logo-mark.png
+  favicon: assets/favicon.png
+  # Fonts are fetched at build time by the privacy plugin and served from the
+  # site, so readers' browsers never contact Google Fonts.
+  font:
+    text: Inter
+    code: JetBrains Mono
+  # Brand colours are defined in docs/stylesheets/extra.css.
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - announce.dismiss
+    - content.code.copy
+    - content.tabs.link
+    - navigation.footer
+    - navigation.sections
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - toc.follow
+
+extra_css:
+  - stylesheets/extra.css
+
+copyright: >-
+  &copy; Bahía Software and the Galicia Supercomputing Center (CESGA) &middot;
+  <a href="https://github.com/Bahia-Software/polypus/blob/main/LICENSE">EUPL-1.2</a>
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      # GitHub-style anchors, so `#c-4--...` links work on GitHub and on the site.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+hooks:
+  - docs/_hooks/repo_files.py
+
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+  links:
+    not_found: warn
+    anchors: warn
+
+extra:
+  version: 0.9.0-dev
+  generator: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Bahia-Software/polypus
+      name: Polypus on GitHub
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/polypus-quantum/
+      name: polypus-quantum on PyPI
+
+plugins:
+  - search
+  - privacy:
+      # No page uses Mermaid; don't vendor the theme's lazy-loaded copy.
+      assets_exclude:
+        - unpkg.com/mermaid@*
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - User guide:
+      - Overview: guide/README.md
+      - Running circuits: guide/running.md
+      - Variational training: guide/training.md
+      - Quantum machine learning: guide/qml.md
+      - Circuits and interchange: guide/circuits.md
+      - Memory budget: guide/memory.md
+      - Performance: guide/performance.md
+  - Reference:
+      - Rust API: https://bahia-software.github.io/polypus/rust/polypus/
+  - Developers:
+      - Contributing: CONTRIBUTING.md
+      - Writing a backend: backends.md
+      - Contracts: CONTRACTS.md
+      - Engineering rules: ENGINEERING.md
+      - Releasing: RELEASING.md
+      - Architecture decisions:
+          - adr/README.md
+          - adr/0001-terminal-measurements.md
+          - adr/0002-qml-supervised-labels.md
+          - adr/0004-openqasm3-profile-and-angle-expressions.md
+          - adr/0005-registry-option-values.md
+          - adr/0006-declared-classical-registers.md
+          - adr/0007-native-qml.md
+  - Changelog: changelog.md

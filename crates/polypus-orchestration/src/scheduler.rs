@@ -462,6 +462,7 @@ mod tests {
             RunCircuitFlow {
                 circuits: two_circuits(),
                 shots: 100,
+                trace: None,
             },
             &cancel,
         );
@@ -548,6 +549,7 @@ mod tests {
             RunCircuitFlow {
                 circuits: two_circuits(),
                 shots: 100,
+                trace: None,
             },
             &cancel,
         );
@@ -587,6 +589,7 @@ mod tests {
             RunCircuitFlow {
                 circuits: two_circuits(),
                 shots: 100,
+                trace: None,
             },
             &CancelToken::default(),
         );

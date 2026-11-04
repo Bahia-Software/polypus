@@ -14,6 +14,7 @@
 # depending on its configuration); pyright/Pylance resolve them by reading
 # Qiskit's source.
 
+from os import PathLike
 from typing import (
     Any,
     Callable,
@@ -585,6 +586,7 @@ def train(
     final_shots: Optional[SupportsIndex] = None,
     *,
     callback: Optional[_TrainCallback] = None,
+    trace: Optional[Union[str, PathLike[str]]] = None,
 ) -> TrainResult: ...
 def run_quantum_circuit(
     qc: Union[QuantumCircuit, Circuit, str],
@@ -600,6 +602,8 @@ def run_quantum_circuit(
     fusion: Optional[bool] = None,
     options: Optional[_Options] = None,
     walltime: Optional[str] = None,
+    *,
+    trace: Optional[Union[str, PathLike[str]]] = None,
 ) -> RunResult: ...
 def statevector(
     qc: Circuit, params: Optional[_FloatVector] = None, fusion: bool = True

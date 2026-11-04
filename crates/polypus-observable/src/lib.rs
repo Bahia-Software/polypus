@@ -20,11 +20,14 @@
 //! ## Relationship to `polypus-physics::PauliSum`
 //!
 //! This is the *diagonal, counts-based* cost analogue of the physics crate's
-//! `PauliSum`. They are deliberately separate: `PauliSum`'s terms are
-//! single-qubit Paulis (no `Z_i·Z_j` coupling) and are Trotter-oriented, so it
-//! cannot express a QUBO/Ising cost. A future unification could offer an
-//! `IsingObservable::from_pauli_sum` for the diagonal (Z-only) subset, but the
-//! two are not coupled today.
+//! `PauliSum`, a Hermitian operator made of multi-qubit Pauli strings
+//! (`Z0 Z1`, `X0 X1 Y2 Y3`). They are separate: every evaluator here reduces
+//! the counts of one circuit measured in the computational basis, so it can
+//! only express diagonal (`Z`-only) costs, while a general `PauliSum` needs one
+//! basis-rotated circuit per group of qubit-wise commuting terms. Measuring a
+//! `PauliSum` (grouping, parity reduction, the oracle that runs one circuit per
+//! group) is planned in issues #530 and #424; until then the two types are not
+//! coupled.
 //!
 //! ## Bit-ordering convention
 //!

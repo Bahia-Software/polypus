@@ -116,6 +116,11 @@ fn wave_concurrency_for(
 /// Implementing this trait for a new provider (IBM, IQM, a subprocess bridge, …)
 /// is sufficient to make it available to every algorithm in Polypus without
 /// touching any algorithm code.
+///
+/// `TracingBackend` in `polypus_orchestration::trace` forwards every method of
+/// this trait, so that a traced run makes the same calls as an untraced one: a
+/// method added here must be forwarded there too, with its test, in the same
+/// change (contract C-12(c)).
 pub trait QuantumBackend: Send + Sync {
     /// Execute a slice of bound circuits.
     ///
