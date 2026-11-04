@@ -400,9 +400,10 @@ boundary stays out-of-process and explicit; see
   sign-off.
 - **Enforcement.** The root `Cargo.toml` denies `unsafe_code` and
   `clippy::undocumented_unsafe_blocks` for every crate (`[workspace.lints]`).
-  Each authorised site (the three blocks in `kernels.rs` and the `pre_exec`
-  above) carries its own block-scoped `#[allow(unsafe_code)]`, so the
-  repository has exactly four of them, and any other `unsafe`, even a fourth
+  Each authorised site carries its own block-scoped `#[allow(unsafe_code)]`:
+  the two blocks in `kernels.rs` (`apply_pairs`, shared by the dense and the
+  controlled 1-qubit kernels, and `apply_2q`) and the `pre_exec` above. So the
+  repository has exactly three of them, and any other `unsafe`, even a third
   one in `kernels.rs`, fails to compile. A new site still needs the benchmark,
   the `// SAFETY:` comment and the sign-off above. Its `allow` goes on that one
   block, never on a module or a crate.

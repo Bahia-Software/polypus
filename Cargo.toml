@@ -116,7 +116,7 @@ libm               = "0.2.16"
 # see "Lint policy" in docs/CONTRIBUTING.md). CI also runs clippy with `-D warnings`.
 #
 # `unsafe_code = "deny"` enforces docs/ENGINEERING.md §5: the only authorised `unsafe`
-# sites are the three blocks of `polypus-sim/src/kernels.rs` and the signed-off
+# sites are the two blocks of `polypus-sim/src/kernels.rs` and the signed-off
 # `pre_exec` of `polypus-subprocess-backend`, each with its own block-scoped
 # `#[allow(unsafe_code)]`. A new `unsafe` anywhere else fails to compile until it gets
 # the same benchmark, `// SAFETY:` comment and maintainer sign-off.
