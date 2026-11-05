@@ -39,6 +39,7 @@ Optimizers **maximise** the fitness. For a minimisation problem, return the nega
 | `initial_point` | Optional point to start the search from, such as an earlier run's `best_params`: `dimensions` finite numbers. See [Starting point](#starting-point). |
 | `final_shots` | Optional shots per circuit for one last batch that re-evaluates the best candidates after the optimizer stops: an integer `>= 1`. See [Final re-evaluation](#final-re-evaluation). |
 | `callback` | Keyword-only. Optional callable, called once per iteration with a `polypus.TrainProgress`; returning `True` stops the run. See [Watching and stopping a run](#watching-and-stopping-a-run). |
+| `trace` | Keyword-only. Optional path (`str` or `os.PathLike`) of a new file for the run's call trace (contract C-12). See [Tracing the calls of a run](#tracing-the-calls-of-a-run). |
 
 Ctrl+C stops the optimization promptly and raises `KeyboardInterrupt`, with or without a `callback`. An exception raised by `expectation_function`, by the `ask()` or `tell()` of an [external optimizer](#external-optimizers), or by a `callback`, propagates as itself.
 
@@ -670,6 +671,70 @@ An iteration is a generation of `DE`, `PSO` and `CMAES` (counted across `CMAES` 
 `evaluations` counts the candidates the optimizer has had scored, each candidate of each batch once, including the point an exact gradient measures in its own batch (`Adam` in `qml.Model.fit`). The shifted circuits of that gradient, the calls of `QNG`'s `variance_function` and the final re-evaluation are not counted. In `train` a candidate is one circuit; in `qml.train` and `qml.Model.fit` it is one circuit per training sample. With `batch_size` in `qml.Model.fit`, `best_fitness` is the minibatch estimate the optimizer steers by, except for `Adam`, which tracks its best on the whole training set.
 
 An exception raised in the callback propagates as itself, `KeyboardInterrupt` included, and the run returns no result and sends no final re-evaluation. A `callback` that is neither callable nor `None` raises `TypeError` before anything runs. A callback that never stops the run leaves its result unchanged: a seeded run returns the same `TrainResult` with and without it.
+
+## Tracing the calls of a run
+
+`trace`, a keyword argument of `train` and of [`run_quantum_circuit`](running.md#tracing-a-circuit-run), writes the run's call trace: a JSON Lines file, one JSON object per line, that records how the run used its planner, its backend and its optimizer, with sizes and times only. It shows how many batches and backend calls a run makes, how many circuits and shots each one carries and how long each takes, without changing what the run computes: a seeded run returns the same result, bit for bit, with and without a trace.
+
+The `ev` field of each line says what it records:
+
+| `ev` | One line per | Fields |
+|---|---|---|
+| `run` | run, always the first line | `v` (the schema version, `1`), `flow` (`"train"`), `id` (the effective run id), `polypus` (the version), `method`, `dims`, `backend`, `infrastructure`, `n_qpus`, `shots`, `seed` (the effective seed), `t0_unix_ns` (when the trace started, in nanoseconds since the Unix epoch) |
+| `batch` | batch of circuits the optimizer sends at once, the final re-evaluation included | `k` (its index, from 0), `op`, `n` (circuits), `shots` (per circuit), `t`, `dt`, `ok` (whether it succeeded) |
+| `wave` | call to the backend within a batch | `k` (its batch), `w` (its index in the batch), `op`, `n`, `shots`, `t`, `dt`, `ok`, and `replicas` (the shots of each replica) when the shots are split across QPUs |
+| `iter` | iteration of the optimizer, as the `callback` sees it | `i` (the iteration), `evals` (candidates scored so far), `batches` (batches sent before it), `best` (the best fitness so far; `null` if it is not finite), `t` |
+| `metric` | evaluation of `QNG`'s metric, which calls `variance_function` once for each element it asks for | `n` (the metric elements asked for, so the calls of `variance_function` the line covers), `t`, `dt` |
+| `end` | run, always the last line | `status`, `batches`, `waves` and `circuits` (the run's totals), `truncated`, `t` |
+
+Every `t` counts nanoseconds from the start of the trace, on a monotonic clock, and every `dt` is a duration in nanoseconds. A batch's `wave` lines come before its `batch` line, which is written once the batch returns. Contract C-12 in [`docs/CONTRACTS.md`](../CONTRACTS.md) describes every field and gives the trace's JSON Schema.
+
+```python
+import json
+
+result = polypus.train(
+    qc,
+    polypus.SPSA(max_iters=200),
+    shots=1024,
+    n_qpus=1,
+    dimensions=2,
+    expectation_function=cost,
+    infrastructure="local",
+    nodes=1,
+    cores_per_qpu=1,
+    id="run1",
+    trace="run1.jsonl",
+)
+
+with open("run1.jsonl", encoding="utf-8") as file:
+    lines = [json.loads(line) for line in file]
+# The file is never overwritten, so a second run with the same path is not
+# traced: check that the trace is this run's.
+if lines[0]["id"] != result.id:
+    raise RuntimeError("run1.jsonl holds the trace of another run")
+end = lines[-1]
+batches = [line for line in lines if line["ev"] == "batch"]
+seconds = sum(batch["dt"] for batch in batches) / 1e9
+print(f"{end['status']}: {end['batches']} batches, {end['circuits']} circuits")
+print(f"{seconds:.1f} s in batches")
+```
+
+`trace` takes a `str` or an `os.PathLike`, such as a `pathlib.Path`; any other value raises `TypeError` before anything runs. The file must be new: a trace never overwrites a file, never follows a symbolic link and never creates a directory. If the file cannot be created, because something already exists at the path or its directory does not, the run logs a warning (`call trace off`) and goes on without a trace.
+
+To trace runs without changing the code that starts them, set `POLYPUS_CALL_TRACE` to an existing directory: every run of `train` and `run_quantum_circuit` in the process whose `trace` is `None` then writes its trace there, in a file of its own, `<id>-<pid>-<n>.jsonl`, where `<id>` is the effective run id (`TrainResult.id` or `RunResult.id`), `<pid>` the process id and `<n>` counts the traces the variable has named in the process, from 0. The UUID that ends the effective id keeps the names of different runs apart, even in processes that share the directory and have the same process id, as in two containers or on two hosts. The `trace` argument wins over the variable. `POLYPUS_CALL_TRACE_MAX_MB` caps every trace at that many MiB, 512 by default: once the cap is reached, the trace writes nothing more but its `end` line, which then has `"truncated": true` and still counts every batch, wave and circuit of the run. A value other than a whole number of at least 1 and below 2^44 is ignored, with a warning.
+
+A trace holds the fields above and nothing else: never the circuits, the parameters, the counts, environment variables or paths.
+
+The `status` of the `end` line says how the run ended:
+
+| `status` | The run |
+|---|---|
+| `"ok"` | returned its result |
+| `"error"` | raised an exception, even before its first batch |
+| `"cancelled"` | was interrupted, as by Ctrl+C (`KeyboardInterrupt`) |
+| `"aborted"` | ended without closing its trace, so how it ended is unknown |
+
+A trace without an `end` line was cut short: its process was killed, or writing the trace failed, and the run then logged one warning (`call trace stopped`) and went on untraced. The lines written whole can still be read, up to the first that is not valid JSON.
 
 ## Choosing an optimizer
 

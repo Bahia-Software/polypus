@@ -18,7 +18,7 @@
   <a href="#quickstart">Quickstart</a> |
   <a href="https://github.com/Bahia-Software/polypus/tree/main/docs/guide">User guide</a> |
   <a href="https://github.com/Bahia-Software/polypus-tutorials">Tutorials</a> |
-  <a href="https://bahia-software.github.io/polypus/">API reference</a> |
+  <a href="https://bahia-software.github.io/polypus/">Documentation</a> |
   <a href="https://github.com/Bahia-Software/polypus/blob/main/CHANGELOG.md">Changelog</a> |
   <a href="#citing-polypus">Cite</a>
 </p>
@@ -215,7 +215,7 @@ The [tutorials](https://github.com/Bahia-Software/polypus-tutorials), in English
 | [Memory budget](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/memory.md) | `POLYPUS_MEM_BUDGET`, cgroup detection, `InsufficientMemoryError` |
 | [Performance](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/performance.md) | Batched simulation, GIL-free binding, gate-parallel auto-calibration |
 
-The [API reference](https://bahia-software.github.io/polypus/) is the rustdoc of the workspace crates. The Python API is documented in the [user guide](https://github.com/Bahia-Software/polypus/tree/main/docs/guide) and in the type stubs and docstrings of [`python/polypus/`](https://github.com/Bahia-Software/polypus/tree/main/python/polypus).
+The [documentation site](https://bahia-software.github.io/polypus/) hosts the [user and developer guides](https://bahia-software.github.io/polypus/) and the changelog; the Rust API of every crate is under [`rust/`](https://bahia-software.github.io/polypus/rust/polypus/).
 
 ## Architecture
 
@@ -236,7 +236,7 @@ Polypus is a Cargo workspace. Only the three crates marked PyO3 link against Pyt
 | [`polypus-optimizers`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-optimizers) | DE (classic, SHADE, L-SHADE), PSO, QNG, CMA-ES, Adam (or momentum), SPSA and Rotosolve, and a bridge to ask/tell optimizers |
 | [`polypus-observable`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-observable) | QUBO and Ising cost observables |
 | [`polypus-qml`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-qml) | Quantum machine learning models: datasets, layers, readout and losses |
-| [`polypus-physics`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-physics) | Monte Carlo transport and Pauli-sum Hamiltonians |
+| [`polypus-physics`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-physics) | Monte Carlo transport, Pauli-sum Hamiltonians (Jordan–Wigner and parity mappings, tapering, exact diagonalization) and molecular Hamiltonians (H₂, STO-3G) |
 | [`polypus-backend`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-backend) | The `QuantumBackend` trait that backends implement and the `Planner` that sizes circuit waves |
 | [`polypus-backend-conformance`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-backend-conformance) | Conformance tests for backends |
 | [`polypus-subprocess-backend`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-subprocess-backend) | Bridge for backends written in Python |

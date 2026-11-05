@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block htmltitle %}
+  {% if page.is_homepage %}
+    <title>{{ config.site_name }} · Quantum circuits across many QPUs</title>
+  {% else %}
+    {{ super() }}
+  {% endif %}
+{% endblock %}
+
+{% block announce %}
+  These docs follow the development branch ({{ config.extra.version }}). For the released 0.8.0, see the
+  <a href="https://pypi.org/project/polypus-quantum/">README on PyPI</a>.
+{% endblock %}

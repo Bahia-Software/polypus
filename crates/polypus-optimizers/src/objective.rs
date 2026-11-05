@@ -66,6 +66,11 @@ impl<T: EvaluationOracle + ?Sized> EvaluationOracle for std::sync::Arc<T> {
 /// Gradient needs. Keeping it behind a trait means the QNG loop stays pure
 /// Rust: a Python-backed implementation (or any other runtime) lives entirely
 /// in the caller.
+///
+/// `TracingVariance` in `polypus_orchestration::trace` forwards every method
+/// of this trait, so that a traced run makes the same calls as an untraced
+/// one: a method added here must be forwarded there too, with its test, in the
+/// same change (contract C-12(c)).
 pub trait VarianceOracle: Send + Sync {
     /// `Var[H_a | theta]`: the diagonal QFIM element for parameter index `a`.
     fn variance(&self, theta: &[f64], param_index: usize) -> f64;
