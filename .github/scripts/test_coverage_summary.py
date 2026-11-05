@@ -12,7 +12,7 @@ _spec.loader.exec_module(coverage_summary)
 
 # A minimal `cargo llvm-cov report --lcov`: two files of one crate, one of
 # another, one outside `crates/`, absolute paths like a runner's (without its
-# `/home/<user>/` prefix, which hygiene.py rejects as a cluster path). FN/FNDA
+# home-directory prefix, which hygiene.py rejects as a cluster path). FN/FNDA
 # are ignored; the first record has LF/LH, the others only DA records (the
 # fallback).
 LCOV = """\
