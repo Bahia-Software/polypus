@@ -26,6 +26,7 @@ use polypus_circuit::{
     CircuitError, ConcreteCircuit, GateInstruction, GateParam, ParameterizedCircuit,
 };
 
+use crate::adjoint::{check_rows, AdjointRun, DiagonalObservable};
 use crate::dataset::Dataset;
 use crate::error::{QmlError, ValidationError};
 use crate::loss::{categorical_cross_entropy, categorical_cross_entropy_gradient, Loss};
@@ -207,6 +208,10 @@ impl QmlProblem {
                         .map(|&i| untied.templates[i].clone())
                         .collect(),
                     owners: untied.owners.clone(),
+                    positions: indices
+                        .iter()
+                        .map(|&i| untied.positions[i].clone())
+                        .collect(),
                 }),
         })
     }
@@ -693,6 +698,112 @@ impl QmlProblem {
     ) -> Result<Vec<f64>, QmlError> {
         self.gradient_from_weighted(probabilities)
     }
+
+    // ── Adjoint differentiation (issue #503) ────────────────────────────────
+    //
+    // The same exact gradient for a caller that holds the statevector: one
+    // adjoint run per sample instead of `2 · occurrences` shifted circuits.
+
+    /// The adjoint runs of the exact gradient at `theta`: one per sample, in
+    /// sample order (see [`AdjointRun`]).
+    ///
+    /// `base` holds the exact probabilities of [`bind_batch`](Self::bind_batch)`(theta)`,
+    /// in order — the run that scores `theta` — because the loss is not linear
+    /// in the expectations: the chain rule needs them. Their loss derivative is
+    /// folded into each run's observable, so a run differentiates sample `i`'s
+    /// share of the fitness itself:
+    ///
+    /// `O_i = −(1/n) · Loss'(⟨O₀⟩_i, y_i) · O₀`, or, for the categorical loss,
+    /// `−(1/n) · Σ_j CE'(z_i, y_i)[j] · O_j`
+    ///
+    /// — one run per sample whatever the number of classes. Each run
+    /// differentiates every trainable gate of its untied template, the gates the
+    /// shift rule of [`gradient_circuits`](Self::gradient_circuits) moves; hand
+    /// the derivatives to [`gradient_from_adjoint`](Self::gradient_from_adjoint).
+    ///
+    /// A model without an exact gradient fails with
+    /// [`QmlError::NoExactGradient`]; a `theta` of the wrong length as
+    /// [`bind_batch`](Self::bind_batch) does; a `base` of the wrong length with
+    /// [`QmlError::CountsLengthMismatch`], and an unreadable one as
+    /// [`fitness_from_probabilities`](Self::fitness_from_probabilities) does.
+    pub fn adjoint_runs(
+        &self,
+        theta: &[f64],
+        base: &[HashMap<String, f64>],
+    ) -> Result<Vec<AdjointRun>, QmlError> {
+        let untied = self.untied.as_ref().map_err(Clone::clone)?;
+        if theta.len() != self.num_params() {
+            return Err(QmlError::Circuit(CircuitError::WrongNumberOfParams {
+                expected: self.num_params(),
+                got: theta.len(),
+            }));
+        }
+        let n = self.num_circuits();
+        let labels = self.train.labels();
+        let observables = self
+            .model
+            .resolved_readout()
+            .observables()
+            .iter()
+            .map(|observable| observable.diagonal())
+            .collect::<Result<Vec<_>, QmlError>>()?;
+        // `coefficients[i][j]`: the weight of observable `j` in sample `i`'s run.
+        let coefficients: Vec<Vec<f64>> = if self.loss == Loss::CategoricalCrossEntropy {
+            self.expectations_per_class_from_weighted(base)?
+                .iter()
+                .zip(labels)
+                .map(|(z, &y)| {
+                    categorical_cross_entropy_gradient(z, y as usize)
+                        .iter()
+                        .map(|g| -g / n as f64)
+                        .collect()
+                })
+                .collect()
+        } else {
+            self.expectations_from_weighted(base)?
+                .iter()
+                .zip(labels)
+                .map(|(&e, &y)| Ok(vec![-self.loss.gradient(e, y)? / n as f64]))
+                .collect::<Result<_, QmlError>>()?
+        };
+        // Each occurrence takes the value of the parameter it reads.
+        let values: Vec<f64> = untied.owners.iter().map(|&k| theta[k]).collect();
+        untied
+            .templates
+            .iter()
+            .zip(&untied.positions)
+            .zip(&coefficients)
+            .map(|((template, positions), coefficients)| {
+                Ok(AdjointRun {
+                    circuit: template.assign_parameters(&values)?,
+                    wrt: positions.clone(),
+                    observable: DiagonalObservable::combine(coefficients, &observables),
+                })
+            })
+            .collect()
+    }
+
+    /// `∂fitness/∂θ` from the derivatives of the runs of
+    /// [`adjoint_runs`](Self::adjoint_runs): one row per run, in order, one
+    /// derivative per entry of its `wrt`. Each derivative is added to the
+    /// parameter its gate reads, so a parameter that several gates share gets
+    /// the sum of theirs.
+    ///
+    /// The wrong number of rows is [`QmlError::CountsLengthMismatch`] (expected
+    /// [`num_circuits`](Self::num_circuits)), as is a row of the wrong length
+    /// (expected the number of trainable gates); a model without an exact
+    /// gradient fails with [`QmlError::NoExactGradient`].
+    pub fn gradient_from_adjoint(&self, derivatives: &[Vec<f64>]) -> Result<Vec<f64>, QmlError> {
+        let untied = self.untied.as_ref().map_err(Clone::clone)?;
+        check_rows(derivatives, self.num_circuits(), untied.owners.len())?;
+        let mut gradient = vec![0.0; self.num_params()];
+        for row in derivatives {
+            for (derivative, &owner) in row.iter().zip(&untied.owners) {
+                gradient[owner] += derivative;
+            }
+        }
+        Ok(gradient)
+    }
 }
 
 /// Deterministic minibatch selection over `num_samples` samples: the first
@@ -729,15 +840,20 @@ struct Untied {
     /// `owners[j]` is the trainable parameter occurrence `j` reads. The same for
     /// every sample: the trainable gates never depend on the data.
     owners: Vec<usize>,
+    /// `positions[i][j]`: where occurrence `j`'s gate sits in template `i`.
+    /// Per sample, since an encoder may emit a different number of gates for
+    /// different samples ahead of the trainable ones.
+    positions: Vec<Vec<usize>>,
 }
 
 impl Untied {
     /// Untie every template, or say why the model has no exact gradient.
     fn from_templates(templates: &[ParameterizedCircuit]) -> Result<Untied, QmlError> {
         let mut untied = Vec::with_capacity(templates.len());
+        let mut positions = Vec::with_capacity(templates.len());
         let mut owners: Option<Vec<usize>> = None;
         for (sample, template) in templates.iter().enumerate() {
-            let (circuit, sample_owners) = untie(template)?;
+            let (circuit, sample_owners, sample_positions) = untie(template)?;
             match &owners {
                 Some(first) if *first != sample_owners => {
                     return Err(QmlError::NoExactGradient {
@@ -751,10 +867,12 @@ impl Untied {
                 None => owners = Some(sample_owners),
             }
             untied.push(circuit);
+            positions.push(sample_positions);
         }
         Ok(Untied {
             templates: untied,
             owners: owners.unwrap_or_default(),
+            positions,
         })
     }
 }
@@ -835,22 +953,26 @@ fn classify(gate: &GateInstruction) -> GateClass {
 }
 
 /// Copy `template` with every `Param(k)` occurrence renumbered `Param(j)` in
-/// gate order, returning the copy and `owners` (`owners[j] = k`).
+/// gate order, returning the copy, `owners` (`owners[j] = k`) and the position
+/// of each occurrence's gate.
 ///
 /// Only Pauli rotations are untied; fixed angles (the encoders') are copied.
 /// Anything else that could carry an angle, an expression angle, or an
 /// instruction [`classify`] does not know, is a [`QmlError::NoExactGradient`].
-fn untie(template: &ParameterizedCircuit) -> Result<(ParameterizedCircuit, Vec<usize>), QmlError> {
-    let (untied, slots) = untie_traced(template, &[])?;
+fn untie(
+    template: &ParameterizedCircuit,
+) -> Result<(ParameterizedCircuit, Vec<usize>, Vec<usize>), QmlError> {
+    let untied = untie_traced(template, &[])?;
     // With no input gates every slot is a parameter occurrence.
-    let owners = slots
+    let owners = untied
+        .slots
         .into_iter()
         .filter_map(|slot| match slot {
             Slot::Param(k) => Some(k),
             Slot::Input { .. } => None,
         })
         .collect();
-    Ok((untied, owners))
+    Ok((untied.template, owners, untied.positions))
 }
 
 /// What occurrence `j` (`Param(j)` of an untied template) stands for.
@@ -866,6 +988,20 @@ pub(crate) enum Slot {
     },
 }
 
+/// What [`untie_traced`] returns: the untied template, what each of its slots
+/// reads, and where each slot's gate sits in the template.
+#[derive(Debug, Clone)]
+pub(crate) struct UntiedTemplate {
+    /// The template with occurrence `j` as `Param(j)`.
+    pub(crate) template: ParameterizedCircuit,
+    /// `slots[j]`: what occurrence `j` stands for.
+    pub(crate) slots: Vec<Slot>,
+    /// `positions[j]`: the position of occurrence `j`'s gate in `template`
+    /// (the same as in the template it was untied from, gate for gate) — the
+    /// gate an adjoint gradient differentiates for that slot.
+    pub(crate) positions: Vec<usize>,
+}
+
 /// [`untie`], also giving a slot of its own to each gate in `inputs` (a
 /// template's [`InputTrace`](crate::model::InputTrace) gates, in gate order),
 /// whose fixed angle becomes a free one so it can be shifted too.
@@ -876,10 +1012,11 @@ pub(crate) enum Slot {
 pub(crate) fn untie_traced(
     template: &ParameterizedCircuit,
     inputs: &[InputGate],
-) -> Result<(ParameterizedCircuit, Vec<Slot>), QmlError> {
+) -> Result<UntiedTemplate, QmlError> {
     use GateInstruction as G;
     let mut untied = ParameterizedCircuit::new(template.num_qubits());
     let mut slots = Vec::new();
+    let mut positions = Vec::new();
     let mut inputs = inputs.iter().peekable();
     for (position, gate) in template.gates().iter().enumerate() {
         let rejected = |what: &str| QmlError::NoExactGradient {
@@ -906,6 +1043,7 @@ pub(crate) fn untie_traced(
                             angle: *angle,
                             features: input.features.clone(),
                         });
+                        positions.push(position);
                         Ok(GateParam::Param(slots.len() - 1))
                     }
                     (GateParam::Param(_), Some(_)) => Err(rejected(
@@ -913,6 +1051,7 @@ pub(crate) fn untie_traced(
                     )),
                     (GateParam::Param(k), None) => {
                         slots.push(Slot::Param(*k));
+                        positions.push(position);
                         Ok(GateParam::Param(slots.len() - 1))
                     }
                     _ => Err(rejected(
@@ -958,7 +1097,11 @@ pub(crate) fn untie_traced(
             ),
         });
     }
-    Ok((untied, slots))
+    Ok(UntiedTemplate {
+        template: untied,
+        slots,
+        positions,
+    })
 }
 
 #[cfg(test)]
@@ -2074,8 +2217,9 @@ mod tests {
         ] {
             template.try_push(gate).unwrap();
         }
-        let (untied, owners) = untie(&template).unwrap();
+        let (untied, owners, positions) = untie(&template).unwrap();
         assert_eq!(owners, vec![1, 1, 0]);
+        assert_eq!(positions, vec![1, 2, 4]);
         assert_eq!(untied.num_params(), 3);
         assert_eq!(untied.gates()[0], template.gates()[0]);
         assert_eq!(
@@ -2161,7 +2305,12 @@ mod tests {
             input_gate(0, vec![(0, 1.0)]),
             input_gate(3, vec![(0, 0.2), (1, 0.3)]),
         ];
-        let (untied, slots) = untie_traced(&template, &inputs).unwrap();
+        let UntiedTemplate {
+            template: untied,
+            slots,
+            positions,
+        } = untie_traced(&template, &inputs).unwrap();
+        assert_eq!(positions, vec![0, 1, 3]);
         assert_eq!(
             slots,
             vec![
@@ -2189,8 +2338,8 @@ mod tests {
             template.assign_parameters(&[0.0, 0.5]).unwrap()
         );
         // With no trace it is `untie` exactly.
-        let (plain, owners) = untie(&template).unwrap();
-        assert_eq!(untie_traced(&template, &[]).unwrap().0, plain);
+        let (plain, owners, _) = untie(&template).unwrap();
+        assert_eq!(untie_traced(&template, &[]).unwrap().template, plain);
         assert_eq!(owners, vec![1]);
     }
 
@@ -2218,6 +2367,22 @@ mod tests {
                 other => panic!("unexpected error {other:?}"),
             }
         }
+    }
+
+    /// A model without an exact gradient has no adjoint one either: both
+    /// halves fail with the same `NoExactGradient` as the shift rule's. No
+    /// layer emits such a model, so the problem's untying is failed by hand.
+    #[test]
+    fn the_adjoint_gradient_needs_an_exact_gradient_too() {
+        let mut problem = catalogue().remove(0);
+        let error = QmlError::NoExactGradient {
+            reason: "instruction 3 is not a Pauli rotation".to_string(),
+        };
+        problem.untied = Err(error.clone());
+        let theta = vec![0.1; problem.num_params()];
+        assert_eq!(problem.gradient_circuits(&theta).unwrap_err(), error);
+        assert_eq!(problem.adjoint_runs(&theta, &[]).unwrap_err(), error);
+        assert_eq!(problem.gradient_from_adjoint(&[]).unwrap_err(), error);
     }
 
     /// Models covering every layer that emits trainable gates, the shared

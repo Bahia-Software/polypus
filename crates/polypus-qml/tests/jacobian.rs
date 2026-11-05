@@ -9,8 +9,7 @@
 //! with respect to the inputs for the angle and IQP encoders (re-uploaded or
 //! not). Same `STEP` and `TOLERANCE` as `gradient_exactness.rs`.
 //!
-//! Contract C-11, "The expectation Jacobian (Rust)". Draft pending human
-//! sign-off.
+//! Contract C-11, "The expectation Jacobian (Rust)".
 
 use std::collections::HashMap;
 

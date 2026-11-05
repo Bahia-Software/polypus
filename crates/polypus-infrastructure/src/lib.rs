@@ -56,7 +56,7 @@ pub use cunqa::{validate_walltime, CunqaBackend, InvalidWalltime, DEFAULT_WALLTI
 pub use error::EntropyError;
 pub use execution_config::{BackendConfig, ExecutionConfig};
 pub use local::LocalBackend;
-pub use native::NativeStatevectorBackend;
+pub use native::{AdjointTask, NativeStatevectorBackend};
 #[cfg(feature = "qmio")]
 pub use qmio::QmioBackend;
 

@@ -8,8 +8,6 @@ against a central finite difference (``STEP``/``TOLERANCE`` as in the Rust
 ``gradient_exactness.rs``), for every layer and readout, with respect to the
 parameters and, for angle and IQP encoders, the inputs. With shots both are
 seeded estimators. Every check runs before a backend exists.
-
-Contract test: draft pending human sign-off.
 """
 
 import math

@@ -24,7 +24,7 @@ ruff==0.16.1  # pinned; keep in sync with .github/workflows/ci.yml (see pyprojec
 # python/polypus/*.pyi against the compiled extension (docs/CONTRIBUTING.md).
 # Pinned like ruff, so a new mypy release cannot turn CI red without a
 # deliberate bump.
-mypy==2.4.0
+mypy==2.4.1
 
 # Strips outputs from tutorials/*.ipynb on commit (.gitattributes); after
 # installing, run `nbstripout --install` once per clone to register the git

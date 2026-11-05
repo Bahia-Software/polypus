@@ -21,7 +21,7 @@ Rules of the road:
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`, `test_cunqa_contract.py`) | ✅ present | the CUNQA seal sent `cores` to `qraise`, which CUNQA renamed `cores_per_qpu` in 2.4.0, so every reservation raised `TypeError` on CUNQA ≥ 2.4 (#204, fixed: `cores_per_qpu` goes through unchanged; **CUNQA 2.3 is no longer supported**); `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` received `backend` and `id` and CUNQA `run_qcs` received `backend`, none of them read (LOCAL-2, #230, fixed: Rust no longer sends them); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
-| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings; `polypus-qml`'s `every_instruction_kind_is_classified` in `src/problem.rs` for the gradient's gate classification) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
+| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings; `polypus-qml`'s `every_instruction_kind_is_classified` in `src/problem.rs` for the gradient's gate classification; `polypus-sim`'s `apply_inverse_undoes_every_instruction_kind` in `src/statevector.rs` and `every_instruction_kind_is_differentiated_through` in `tests/adjoint.rs` for the adjoint gradient) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed); CUNQA 3.0.0 failed such a job (`key 'counts' not found`) and split the key of a circuit with several classical registers with spaces (#253, #304, fixed in the seal); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` (+ `crates/polypus-optimizers/tests/initial_point.rs` and `tests/python/test_initial_point.py` for `initial_point`, `tests/python/test_final_shots.py` for `final_shots`, and `tests/python/test_qml_native_initial_point_final_shots.py` for both through `qml.Model.fit`; `crates/polypus-optimizers/tests/observer.rs` and `tests/python/test_callback.py` for `callback`) | ✅ present | DE `best_fitness` mismatch (C4) |
@@ -30,7 +30,7 @@ Rules of the road:
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 | C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
-| C-11 | Native QML (problem ↔ oracle, expectation Jacobian, `polypus.qml.Model`, `qml.expval`/`qml.jacobian`, `polypus.torch.QuantumLayer`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `tests/jacobian.rs` + `src/model.rs` serde tests + `polypus-evaluation` `qml_oracle.rs` + the primitive tests in `crates/polypus/src/bindings/qml.rs` + `tests/python/test_qml_native*.py` + `tests/python/test_torch_*.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
+| C-11 | Native QML (problem ↔ oracle, expectation Jacobian, `polypus.qml.Model`, `qml.expval`/`qml.jacobian`, `polypus.torch.QuantumLayer`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `tests/jacobian.rs` + `tests/adjoint.rs` + `src/model.rs` serde tests + `polypus-sim` `tests/adjoint.rs` + `polypus-infrastructure` `native.rs` adjoint tests + `polypus-evaluation` `qml_oracle.rs` + the primitive tests in `crates/polypus/src/bindings/qml.rs` + `tests/python/test_qml_native*.py` + `tests/python/test_qml_adjoint.py` + `tests/python/test_torch_*.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
 | C-12 | Call trace (`trace=` / `POLYPUS_CALL_TRACE`, JSON Lines v1) | `polypus-orchestration` `src/trace.rs`, `src/trace/decorators.rs`, `src/flow/trace_tests.rs`, `tests/conformance_with_trace.rs` + `polypus` `src/bindings/call_trace.rs` + `tests/python/test_call_trace*.py` (+ `tests/python/test_interrupt.py` `test_trace_on_interrupt` for Ctrl+C, and `tests/python/test_typing_stubs.py` `TestTraceType` for the stub type and the guide's example) | ✅ present | — |
 
 ✅ means the listed test enforces the contract; a ⏳ contract would be
@@ -442,6 +442,13 @@ sorts every instruction kind into the Pauli rotations it can differentiate
 and the angle-taking ones it rejects. An instruction kind it does not name is
 rejected, never passed through, so adding an instruction also means
 classifying it there: `every_instruction_kind_is_classified` fails until it is.
+The native simulator's adjoint gradient
+(`StatevectorSimulator::adjoint_gradient`) differentiates the same five
+rotations and steps back through the inverse of every other instruction
+(`Statevector::apply_inverse`, built from the vocabulary itself: no
+instruction is added for it); `apply_inverse_undoes_every_instruction_kind`
+and `every_instruction_kind_is_differentiated_through` fail until a new
+instruction has its inverse.
 
 Corollaries:
 
@@ -2344,15 +2351,39 @@ batching and distribution are the oracle's concern.
   `GateInstruction` kind is classified, and a model containing one the rule
   cannot handle has no exact gradient (`QmlError::NoExactGradient`, raised
   lazily, so gradient-free optimizers still train it).
+  - *Adjoint differentiation.* For a caller that holds the exact statevector,
+    `adjoint_runs(θ, base)` and `gradient_from_adjoint` give the same gradient
+    with no shifted circuit: one run per sample — the untied template bound at
+    `θ`, which is the circuit `bind_batch(θ)` gives, with every trainable gate
+    differentiated and the loss's chain rule folded into its diagonal
+    observable — where `base` is `θ`'s exact probabilities (the loss is not
+    linear in the expectations). It differentiates the same gates per
+    occurrence, sums a shared parameter's gates the same way, and fails with
+    the same `NoExactGradient`. It is the shift gradient to rounding, not bit
+    for bit (the sums run in another order); the native simulator computes it
+    in about three simulations holding two statevectors
+    (`StatevectorSimulator::adjoint_gradient`), against `2 · occurrences + 1`
+    circuits.
 - **(f) The oracle.** The `QmlOracle` scores a native problem
   (`QmlSource::Native`) through the same candidate windows as the Qiskit form:
   one finite fitness per candidate (C-5), sampled through the planner or, in
   exact mode, from `NativeStatevectorBackend::run_circuits_exact` (C-3's exact
   probabilities, same memory budget and windows). It is also the run's
-  `GradientOracle`, for Adam. Without a minibatch its `value_and_gradient`
-  returns `θ`'s fitness, read from the base circuits that lead the gradient's
-  batch, with the gradient, so an Adam iteration is one call and `θ`'s circuits
-  run once; in exact mode that value is, bit for bit, what `evaluate_batch`
+  `GradientOracle`, for Adam. Its exact gradient is the adjoint one ((e)):
+  `θ`'s base circuits run exactly, giving the value and the chain rule, then
+  one adjoint run per sample on `NativeStatevectorBackend::run_adjoint`, which
+  counts two statevectors per run against the memory budget. When the budget
+  holds one statevector of the width but not two
+  (`NativeStatevectorBackend::adjoint_fits`), it is the parameter shift's
+  instead, logged at `info` the first time on that backend (once per fit, or
+  per `qml.jacobian` call, not once per gradient); when it holds none, the
+  error is the exact path's
+  `InsufficientMemory`. The sampled (shots) gradient is always the parameter
+  shift's. Without a minibatch its `value_and_gradient`
+  returns `θ`'s fitness, read from the gradient's own base circuits (those
+  that lead the shift's batch, or the exact run that precedes the adjoint),
+  with the gradient, so an Adam iteration is one call and `θ`'s circuits run
+  once; in exact mode that value is, bit for bit, what `evaluate_batch`
   returns for `θ`. With a minibatch it returns `None` (those base circuits are
   the minibatch's, and Adam tracks its best on every sample), and Adam scores
   `θ` apart. Its `scores_theta` declares which, `true` exactly without a
@@ -2385,6 +2416,13 @@ batching and distribution are the oracle's concern.
     `x_j` towards `x_i` and `x_i` towards `x_j`, and is shifted **once** for
     both. Data re-uploading sums the gates that read a feature. Recording this
     changes no gate: every template is, gate for gate, what it was.
+  - *Adjoint differentiation.* (e)'s, for the Jacobian: `adjoint_runs(θ)` on
+    an `ExpectationJacobian` or a block gives one run per sample and readout
+    observable (`num_adjoint_runs`), sample-major, each differentiating the
+    gates the shift would move, and `jacobian_from_adjoint` reads them through
+    the same bookkeeping (parameter, or feature times its chain-rule factor),
+    with the same blocks. No loss: the observable is the readout's own. It is
+    the shift's Jacobian to rounding.
   - *Circuits and order.* `2 · shifts` circuits per sample and no unshifted
     one, `shifts` counting the gates that read a parameter (a parameter shared
     by `g` gates counts `g` times) for `Params`, the gates that read the sample
@@ -2586,7 +2624,11 @@ for a training loop of the caller's own:
 - **Circuits.** `expval` runs one per row; `jacobian` `2 · shifts` per row
   ((g): every gate that reads a parameter, once per gate, every encoder gate
   that reads the row, an IQP `Rzz` once for its two features), and no
-  unshifted circuit.
+  unshifted circuit. With `exact=True` it is (g)'s adjoint differentiation
+  instead, one run per row and observable on
+  `NativeStatevectorBackend::run_adjoint`, unless the memory budget holds one
+  statevector of the width but not two: then the shifted circuits, logged at
+  `info` (as (f)). The result is the same to rounding either way.
 - **Execution.** One backend and one scheduler per call — one connection, one
   `qraise` on CUNQA — closed on every way out, errors and Ctrl+C included. The
   rows run in sequential blocks, each bound, run and dropped before the next
@@ -2597,7 +2639,10 @@ for a training loop of the caller's own:
   the circuits per row, never configured. The whole
   block loop runs with the GIL released, and Ctrl+C raises `KeyboardInterrupt`
   between blocks (the exact path included, which has no planner) and between
-  waves. The result does not depend on the blocks: rows come back in row
+  waves, and, during an exact block's adjoint runs, inside the block: the
+  calling thread, the one a Ctrl+C can be seen on, polls the run's interrupt
+  guard while they run on rayon's threads and stops them, with the same
+  `KeyboardInterrupt`. The result does not depend on the blocks: rows come back in row
   order, and a call on some rows equals the concatenation of calls on chunks
   of them.
 - **Checks.** Every one runs before a backend exists and raises
@@ -2686,6 +2731,10 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     zero-sample guards;
   - `crates/polypus-qml/tests/gradient_exactness.rs` and
     `every_instruction_kind_is_classified` in `src/problem.rs`: (e);
+  - `crates/polypus-qml/tests/adjoint.rs` and
+    `the_adjoint_gradient_needs_an_exact_gradient_too` in `src/problem.rs`,
+    with `crates/polypus-sim/tests/adjoint.rs` for the simulator's derivative:
+    (e)'s adjoint differentiation;
   - `crates/polypus-qml/tests/jacobian.rs`, the `untie_traced_*` tests in
     `src/problem.rs`, the tests in `src/jacobian.rs` (a structure other than
     sample 0's, an angle gate that is not a Pauli rotation, an opaque encoder
@@ -2695,7 +2744,10 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     format, exact round-trip and revalidation on load;
   - the `native_*`, `a_minibatch_*`, `evaluate_full_*` and `the_factory_*`
     tests in `crates/polypus-evaluation/src/qml_oracle.rs`, the `exact_*`
-    tests in `crates/polypus-infrastructure/src/native.rs`, and the `adam_*` and
+    and `adjoint_*` tests and
+    `the_adjoint_needs_two_statevectors_and_falls_back_to_the_shift_with_one`
+    in `crates/polypus-infrastructure/src/native.rs`, `the_shift_fallback_*`
+    and `a_cancelled_exact_gradient_*` in `qml_oracle.rs`, and the `adam_*` and
     `a_minibatched_*` tests in `crates/polypus-orchestration/src/dispatch.rs`:
     (f);
   - `a_bound_circuit_converts_gate_for_gate` and
@@ -2706,7 +2758,9 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     with `exact=True`; and the primitive tests there (the seeded result
     independent of the block size, row order, one backend created and closed
     once, a cancellation or an error between blocks, a backend closed when no
-    scheduler can be built over it, the array conversion), with the window
+    scheduler can be built over it, the array conversion, the exact Jacobian
+    by the adjoint whatever the blocks, a Ctrl+C inside an exact block and the
+    watcher that stops it), with the window
     tests in `crates/polypus-evaluation/src/qml_oracle.rs`
     (`a_backend_*`, `the_lift_*`, `many_circuits_per_item_*`,
     `the_window_is_never_zero`): `qml.expval`/`qml.jacobian`'s execution.
@@ -2729,7 +2783,8 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   chain rule of a loss, chunks, seeds, shots, every rejection),
   `test_torch_quantum_layer.py` (the PyTorch layer: forward bit for bit
   `expval` in one call per batch, `gradcheck` with default tolerances for the
-  parameters and the inputs, the `wrt` each backward pass asks for, amplitude
+  parameters and the inputs, the backward pass the same by the adjoint and by
+  the shift fallback, the `wrt` each backward pass asks for, amplitude
   and basis encoders, dtype and device, shapes, the derived seeds and their
   replay, training with SGD, Adam and LBFGS, `state_dict`, `deepcopy` and
   `from_trained`), `test_torch_import.py` (the import without PyTorch, the
@@ -2745,8 +2800,12 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   `TestFitTypes` (the stub types of both), `TestPrimitiveTypes` (each
   `wrt`'s result type) and `TestTorchTypes` (the layer's inline types), the native
   QML cases of `test_interrupt.py` (Ctrl+C during `fit`, with and without a
-  `callback`, and during `qml.jacobian`, exact and sampled; the minibatch
-  rescore runs with the GIL released),
+  `callback`, and during `qml.jacobian`, exact and sampled, and inside one
+  long exact block; the minibatch rescore runs with the GIL released),
+  `test_qml_adjoint.py` (the adjoint and the parameter-shift fallback give the
+  same `qml.jacobian` and `fit` with Adam, the fallback logged, and no memory
+  for one statevector the exact path's error; the same comparison for the
+  `QuantumLayer` backward is in `test_torch_quantum_layer.py`),
   `TestNativeQmlChecksRaiseIt` in `test_configuration_errors.py` (every check
   of `fit`, `predict`, `run`, `qml.expval` and `qml.jacobian` is a
   `polypus.ConfigurationError` raised before any CUNQA call, and a primitive

@@ -324,13 +324,19 @@ boundary stays out-of-process and explicit; see
   detected limit is read once per process (`OnceLock`), the variable on every
   call. The model is `16 · 2^n` bytes (`BYTES_PER_AMPLITUDE`), which is the native
   backend's real peak because shot sampling (`Statevector::sample`) needs only
-  `O(shots)` extra memory, not a `2^n` CDF. Its parsers and `resolve_budget` are
-  pure (they take text / values), so the budget logic is tested without `/proc`
-  or the environment. Tests never *write* the environment — `set_var` in a
-  multithreaded test binary is racy and `unsafe` is off-limits (§5). The tests of
-  the wrappers over the active budget (`check_statevector_fits`,
-  `max_statevector_concurrency`, `wave_concurrency`) read it as the process sees
-  it, and assert only what holds for any budget, plus what any Linux host
+  `O(shots)` extra memory, not a `2^n` CDF. The one run that holds two is the
+  adjoint gradient (#503: the state and the pulled-back observable,
+  `polypus_sim::ADJOINT_STATEVECTORS`): the native backend counts each as one
+  `(n + 1)`-qubit statevector, the same bytes, both to throttle and to refuse,
+  and its exact QML gradient falls back to the parameter shift (one
+  statevector, logged once per backend at `info`) when the budget holds one but
+  not two. The budget's parsers and `resolve_budget` are pure (they take text /
+  values), so the budget logic is tested without `/proc` or the environment.
+  Tests never *write* the environment — `set_var` in a multithreaded test
+  binary is racy and `unsafe` is off-limits (§5). The tests of the wrappers
+  over the active budget (`check_statevector_fits`,
+  `max_statevector_concurrency`, `wave_concurrency`) read it as the process
+  sees it, and assert only what holds for any budget, plus what any Linux host
   guarantees: there they need `/proc/meminfo`, which a Linux test environment
   must provide. Several processes sharing one cgroup (MPI ranks of a job step)
   each see the whole limit and must set `POLYPUS_MEM_BUDGET` per process.
