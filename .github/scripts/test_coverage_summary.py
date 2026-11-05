@@ -11,11 +11,12 @@ coverage_summary = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(coverage_summary)
 
 # A minimal `cargo llvm-cov report --lcov`: two files of one crate, one of
-# another, one outside `crates/`, absolute paths as on a runner. FN/FNDA are
-# ignored; the first record has LF/LH, the others only DA records (the
+# another, one outside `crates/`, absolute paths like a runner's (without its
+# `/home/<user>/` prefix, which hygiene.py rejects as a cluster path). FN/FNDA
+# are ignored; the first record has LF/LH, the others only DA records (the
 # fallback).
 LCOV = """\
-SF:/home/runner/work/polypus/polypus/crates/polypus-sim/src/lib.rs
+SF:/runner/work/polypus/polypus/crates/polypus-sim/src/lib.rs
 FN:3,polypus_sim::f
 FNDA:1,polypus_sim::f
 DA:1,4
@@ -24,15 +25,15 @@ DA:3,1
 LF:3
 LH:2
 end_of_record
-SF:/home/runner/work/polypus/polypus/crates/polypus-sim/src/kernels.rs
+SF:/runner/work/polypus/polypus/crates/polypus-sim/src/kernels.rs
 DA:10,3000000000
 DA:11,0
 end_of_record
-SF:/home/runner/work/polypus/polypus/crates/polypus/src/bindings/mod.rs
+SF:/runner/work/polypus/polypus/crates/polypus/src/bindings/mod.rs
 DA:5,0
 DA:6,2
 end_of_record
-SF:/home/runner/work/polypus/polypus/examples/rust-backend-template/src/lib.rs
+SF:/runner/work/polypus/polypus/examples/rust-backend-template/src/lib.rs
 DA:1,1
 end_of_record
 """
@@ -69,7 +70,7 @@ def test_lines_are_lf_and_lh_or_else_the_da_records():
 # LH 259), cut down: LF/LH declare more lines than the DA records list, and
 # `cargo llvm-cov report` prints LF/LH.
 REAL_SHAPE = """\
-SF:/home/runner/work/polypus/polypus/crates/polypus-observable/src/qubo.rs
+SF:/runner/work/polypus/polypus/crates/polypus-observable/src/qubo.rs
 FN:55,_RNvMNtCs1_18polypus_observable4quboNtB2_13QuboObservable3new
 FNDA:12,_RNvMNtCs1_18polypus_observable4quboNtB2_13QuboObservable3new
 FNF:1
@@ -87,7 +88,7 @@ end_of_record
 
 def test_lf_and_lh_win_over_fewer_da_records():
     files = coverage_summary.parse_lcov(REAL_SHAPE)
-    path = "/home/runner/work/polypus/polypus/crates/polypus-observable/src/qubo.rs"
+    path = "/runner/work/polypus/polypus/crates/polypus-observable/src/qubo.rs"
     assert files == {path: (5, 3)}
     assert coverage_summary.per_crate(files) == {"polypus-observable": (5, 3)}
 
