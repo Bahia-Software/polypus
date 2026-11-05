@@ -52,12 +52,21 @@
 //! depend on how expensive a single gate is, and a fast circuit pays nothing —
 //! and the cadence adapts to the hook's own measured cost, so even a hook that
 //! turns out to take milliseconds cannot eat the run.
+//!
+//! ## Exact gradients
+//!
+//! [`StatevectorSimulator::adjoint_gradient`] differentiates the expectation of
+//! a diagonal observable with respect to the angles of a circuit's Pauli
+//! rotations (`Rx`, `Ry`, `Rz`, `Rxx`, `Rzz`) by adjoint differentiation: one
+//! sweep forward and one back, holding [`ADJOINT_STATEVECTORS`] statevectors,
+//! where the parameter-shift rule runs two circuits per rotation.
 
 #![warn(missing_docs)]
 
 /// 64-bit complex amplitude type used throughout the simulator.
 pub type C64 = num_complex::Complex<f64>;
 
+mod adjoint;
 // Machine-aware calibration of the gate-parallel threshold. Only meaningful —
 // and only compiled — when the `parallel` feature provides a path to calibrate.
 #[cfg(feature = "parallel")]
@@ -70,6 +79,7 @@ mod rng;
 mod simulator;
 mod statevector;
 
+pub use adjoint::AdjointGradient;
 #[cfg(feature = "parallel")]
 pub use calibration::{
     calibrate_and_cache, calibrate_parallel_threshold, resolved_fallback_reason,
@@ -87,6 +97,12 @@ pub use statevector::Statevector;
 /// [`SimError::TooManyQubits`] rather than attempting the allocation. The value
 /// is also well below `usize::BITS`, so `1 << n` can never overflow.
 pub const MAX_QUBITS: usize = 30;
+
+/// Statevectors [`StatevectorSimulator::adjoint_gradient`] holds at once: the
+/// state `ψ` and the pulled-back observable `λ`. A caller that budgets memory
+/// per statevector (`16 · 2^n` bytes each) reserves this many per gradient in
+/// flight.
+pub const ADJOINT_STATEVECTORS: usize = 2;
 
 /// Maximum classical register width a counts key can hold. Sampled outcomes are
 /// keyed by a `usize` whose bit `i` is classical bit `i`, so a measurement into

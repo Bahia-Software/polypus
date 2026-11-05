@@ -5,9 +5,10 @@ loop by hand instead, from the two loss-free primitives:
 
 - ``qml.expval(model, x, params)``: every readout observable's expectation per
   row, shape ``(rows, observables)``;
-- ``qml.jacobian(model, x, params)``: their derivatives by the parameter-shift
-  rule, shape ``(rows, observables, num_params)``, or with respect to the
-  inputs (``wrt="inputs"``), or both (``wrt="both"``).
+- ``qml.jacobian(model, x, params)``: their derivatives, shape
+  ``(rows, observables, num_params)``, or with respect to the inputs
+  (``wrt="inputs"``), or both (``wrt="both"``). With ``exact=True`` they are
+  exact, by adjoint differentiation; with shots, parameter-shift estimates.
 
 The loss is yours, so is its chain rule: here a squared error
 ``mean((⟨Z₀⟩ − y)²)``, whose gradient is ``2·mean((⟨Z₀⟩ − y)·∂⟨Z₀⟩/∂θ)``, fed to

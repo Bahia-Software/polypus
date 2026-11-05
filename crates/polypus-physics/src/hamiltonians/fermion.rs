@@ -195,9 +195,10 @@ impl FermionHamiltonian {
     /// repulsion energy and the integrals (layout in the type docs).
     ///
     /// # Errors
-    /// [`PhysicsError::InvalidIntegrals`] if `num_spatial` is 0, a vector has
-    /// the wrong length, a value is not finite, or a symmetry is broken by
-    /// more than [`INTEGRAL_SYMMETRY_TOLERANCE`].
+    /// [`PhysicsError::InvalidIntegrals`] if `num_spatial` is 0 or so large
+    /// that `K⁴` overflows `usize`, a vector has the wrong length, a value is
+    /// not finite, or a symmetry is broken by more than
+    /// [`INTEGRAL_SYMMETRY_TOLERANCE`].
     pub fn new(
         num_spatial: usize,
         nuclear_repulsion: f64,
@@ -209,17 +210,25 @@ impl FermionHamiltonian {
         if k == 0 {
             return Err(invalid("at least one spatial orbital is required".into()));
         }
-        if one_body.len() != k * k {
+        // K² and K⁴ are checked once here; every later index is below them.
+        let (one_len, two_len) = match k.checked_mul(k) {
+            Some(k2) => (k2, k2.checked_mul(k2)),
+            None => (0, None),
+        };
+        let Some(two_len) = two_len else {
             return Err(invalid(format!(
-                "one-body integrals: expected {} values for {k} orbitals, got {}",
-                k * k,
+                "{k} spatial orbitals: K⁴ integrals do not fit in memory"
+            )));
+        };
+        if one_body.len() != one_len {
+            return Err(invalid(format!(
+                "one-body integrals: expected {one_len} values for {k} orbitals, got {}",
                 one_body.len()
             )));
         }
-        if two_body.len() != k * k * k * k {
+        if two_body.len() != two_len {
             return Err(invalid(format!(
-                "two-body integrals: expected {} values for {k} orbitals, got {}",
-                k * k * k * k,
+                "two-body integrals: expected {two_len} values for {k} orbitals, got {}",
                 two_body.len()
             )));
         }
@@ -233,7 +242,7 @@ impl FermionHamiltonian {
         }
 
         let h = |p: usize, q: usize| one_body[p * k + q];
-        let mut sym_one = vec![0.0; k * k];
+        let mut sym_one = vec![0.0; one_len];
         for p in 0..k {
             for q in 0..k {
                 let (a, b) = (h(p, q), h(q, p));
@@ -249,7 +258,7 @@ impl FermionHamiltonian {
         }
 
         let idx = |p: usize, q: usize, r: usize, s: usize| ((p * k + q) * k + r) * k + s;
-        let mut sym_two = vec![0.0; k * k * k * k];
+        let mut sym_two = vec![0.0; two_len];
         for p in 0..k {
             for q in 0..k {
                 for r in 0..k {
@@ -299,20 +308,32 @@ impl FermionHamiltonian {
         self.nuclear_repulsion
     }
 
-    /// Symmetrized one-body integral `h_pq` (`p, q < K`).
-    pub fn one_body(&self, p: usize, q: usize) -> f64 {
-        self.one_body[p * self.num_spatial + q]
+    /// Symmetrized one-body integral `h_pq`, or `None` unless `p, q < K`.
+    pub fn one_body(&self, p: usize, q: usize) -> Option<f64> {
+        let k = self.num_spatial;
+        (p < k && q < k).then(|| self.one_body[p * k + q])
     }
 
-    /// Symmetrized two-body integral `(pq|rs)` (all indices `< K`).
-    pub fn two_body(&self, p: usize, q: usize, r: usize, s: usize) -> f64 {
+    /// Symmetrized two-body integral `(pq|rs)`, or `None` unless all indices
+    /// are `< K`.
+    pub fn two_body(&self, p: usize, q: usize, r: usize, s: usize) -> Option<f64> {
         let k = self.num_spatial;
-        self.two_body[((p * k + q) * k + r) * k + s]
+        [p, q, r, s]
+            .iter()
+            .all(|&i| i < k)
+            .then(|| self.two_body[((p * k + q) * k + r) * k + s])
     }
 
     /// Mode of spatial orbital `p` with spin `spin` (0 = up, 1 = down), in
-    /// the block order: up orbitals first.
-    pub fn spin_orbital(&self, p: usize, spin: usize) -> usize {
+    /// the block order: up orbitals first. `None` unless `p < K` and
+    /// `spin < 2`.
+    pub fn spin_orbital(&self, p: usize, spin: usize) -> Option<usize> {
+        (p < self.num_spatial && spin < 2).then(|| self.mode(p, spin))
+    }
+
+    /// [`spin_orbital`](Self::spin_orbital) without the range check, for
+    /// indices that are in range by construction.
+    fn mode(&self, p: usize, spin: usize) -> usize {
         p + spin * self.num_spatial
     }
 
@@ -328,9 +349,9 @@ impl FermionHamiltonian {
         for spin in 0..2 {
             for p in 0..k {
                 for q in 0..k {
-                    let c = self.one_body(p, q);
+                    let c = self.one_body[p * k + q];
                     if c != 0.0 {
-                        let (a, b) = (self.spin_orbital(p, spin), self.spin_orbital(q, spin));
+                        let (a, b) = (self.mode(p, spin), self.mode(q, spin));
                         terms.push(FermionTerm::new(c, vec![(a, Create), (b, Annihilate)]));
                     }
                 }
@@ -342,11 +363,9 @@ impl FermionHamiltonian {
                     for q in 0..k {
                         for r in 0..k {
                             for s in 0..k {
-                                let c = self.two_body(p, q, r, s);
-                                let (ps, qs) =
-                                    (self.spin_orbital(p, sigma), self.spin_orbital(q, sigma));
-                                let (rs, ss) =
-                                    (self.spin_orbital(r, tau), self.spin_orbital(s, tau));
+                                let c = self.two_body[((p * k + q) * k + r) * k + s];
+                                let (ps, qs) = (self.mode(p, sigma), self.mode(q, sigma));
+                                let (rs, ss) = (self.mode(r, tau), self.mode(s, tau));
                                 if c == 0.0 || ps == rs || qs == ss {
                                     continue;
                                 }
@@ -377,7 +396,7 @@ impl FermionHamiltonian {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{assert_close, symmetric_integral_arrays};
+    use crate::test_support::{assert_close, symmetric_integral_arrays, symmetric_integrals};
     use Ladder::{Annihilate, Create};
 
     fn op(num_modes: usize, terms: Vec<(f64, Vec<(usize, Ladder)>)>) -> FermionOperator {
@@ -476,9 +495,12 @@ mod tests {
         let m = ham.to_fermion_operator().to_dense_real().unwrap();
         let hf = 0b0101;
         let doubly_excited = 0b1010;
-        let expected_hf = 0.7138 + 2.0 * ham.one_body(0, 0) + ham.two_body(0, 0, 0, 0);
+        let expected_hf =
+            0.7138 + 2.0 * ham.one_body(0, 0).unwrap() + ham.two_body(0, 0, 0, 0).unwrap();
         assert!((m.get(hf, hf).unwrap() - expected_hf).abs() < 1e-14);
-        assert!((m.get(doubly_excited, hf).unwrap() - ham.two_body(0, 1, 0, 1)).abs() < 1e-14);
+        assert!(
+            (m.get(doubly_excited, hf).unwrap() - ham.two_body(0, 1, 0, 1).unwrap()).abs() < 1e-14
+        );
     }
 
     #[test]
@@ -508,18 +530,21 @@ mod tests {
         noisy_two[7] -= 4e-12; // (01|11) only: index ((0·2+1)·2+1)·2+1
         let noisy = FermionHamiltonian::new(2, 0.7, noisy_one, noisy_two).unwrap();
         assert_eq!(
-            noisy.one_body(0, 1).to_bits(),
-            noisy.one_body(1, 0).to_bits()
+            noisy.one_body(0, 1).unwrap().to_bits(),
+            noisy.one_body(1, 0).unwrap().to_bits()
         );
         let group = [(0, 1, 1, 1), (1, 0, 1, 1), (1, 1, 0, 1), (1, 1, 1, 0)];
         for &(p, q, r, s) in &group {
             assert_eq!(
-                noisy.two_body(p, q, r, s).to_bits(),
-                noisy.two_body(0, 1, 1, 1).to_bits()
+                noisy.two_body(p, q, r, s).unwrap().to_bits(),
+                noisy.two_body(0, 1, 1, 1).unwrap().to_bits()
             );
             // The average moves by at most the injected noise (here by
             // 2·4e-12/8, since (01|11) fills two of the 8 permutation slots).
-            assert!((noisy.two_body(p, q, r, s) - clean.two_body(p, q, r, s)).abs() <= 4e-12);
+            assert!(
+                (noisy.two_body(p, q, r, s).unwrap() - clean.two_body(p, q, r, s).unwrap()).abs()
+                    <= 4e-12
+            );
         }
         assert!(noisy
             .to_fermion_operator()
@@ -553,9 +578,30 @@ mod tests {
             FermionHamiltonian::new(1, 0.0, vec![1.0], vec![0.5, 0.5]),
             FermionHamiltonian::new(1, f64::NAN, vec![1.0], vec![0.5]),
             FermionHamiltonian::new(1, 0.0, vec![f64::INFINITY], vec![0.5]),
+            // K⁴ overflows (K = 2^(BITS/4)), and K² too (K = usize::MAX):
+            // an error, not a panic or a wrapped length.
+            FermionHamiltonian::new(1 << (usize::BITS / 4), 0.0, vec![], vec![]),
+            FermionHamiltonian::new(usize::MAX, 0.0, vec![], vec![]),
         ];
         for r in bad {
             assert!(matches!(r, Err(PhysicsError::InvalidIntegrals { .. })));
         }
+    }
+
+    #[test]
+    fn accessors_reject_out_of_range_indices() {
+        // K = 2: one_body(0, 2) used to read the entry stored at index 2, h₁₀.
+        let ham = symmetric_integrals(2, 7);
+        assert!(ham.one_body(1, 1).is_some());
+        assert_eq!(ham.one_body(0, 2), None);
+        assert_eq!(ham.one_body(2, 0), None);
+        assert!(ham.two_body(1, 1, 1, 1).is_some());
+        for bad in [(2, 0, 0, 0), (0, 2, 0, 0), (0, 0, 2, 0), (0, 0, 0, 2)] {
+            assert_eq!(ham.two_body(bad.0, bad.1, bad.2, bad.3), None, "{bad:?}");
+        }
+        assert_eq!(ham.spin_orbital(1, 0), Some(1));
+        assert_eq!(ham.spin_orbital(1, 1), Some(3));
+        assert_eq!(ham.spin_orbital(2, 0), None);
+        assert_eq!(ham.spin_orbital(0, 2), None);
     }
 }

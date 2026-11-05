@@ -36,6 +36,13 @@ use crate::error::PhysicsError;
 /// matrix (`2^10 × 2^10` doubles, 8 MiB).
 pub const MAX_DENSE_QUBITS: usize = 10;
 
+/// Largest asymmetry `|a_rc − a_cr|` that
+/// [`DenseMatrix::symmetric_eigenvalues`] accepts, relative to the largest
+/// `|a_ij|` of the matrix. Above it the matrix is not symmetric; below it the
+/// difference is rounding (e.g. `0.1 + 0.2 + 0.3` against `0.3 + 0.2 + 0.1`)
+/// and the pair is replaced by its mean.
+pub const SYMMETRY_TOLERANCE: f64 = 1e-12;
+
 /// Maximum QL iterations per eigenvalue before reporting non-convergence.
 const MAX_QL_ITERATIONS: usize = 50;
 
@@ -83,23 +90,49 @@ impl DenseMatrix {
 
     /// Eigenvalues of the matrix, sorted ascending.
     ///
-    /// A matrix built by [`PauliSum::to_dense_real`] is always symmetric
-    /// (real coefficients times Hermitian Pauli strings with real entries);
-    /// symmetry is checked anyway, exactly, because the solver only reads the
-    /// lower triangle and would silently return wrong eigenvalues otherwise.
+    /// A matrix built by [`PauliSum::to_dense_real`] is always exactly
+    /// symmetric (real coefficients times Hermitian Pauli strings with real
+    /// entries), but one built from a Hermitian
+    /// [`FermionOperator`](super::FermionOperator) can differ from its
+    /// transpose in the last bit, when a pair of entries sums the same terms in
+    /// a different order (#562). Symmetry is therefore checked to within
+    /// [`SYMMETRY_TOLERANCE`] relative to the largest entry, and each pair is
+    /// then replaced by its mean, so the solver (which only reads the lower
+    /// triangle) diagonalizes exactly the symmetric part. A matrix that is
+    /// already exactly symmetric is used unchanged.
     ///
     /// # Errors
-    /// [`PhysicsError::UnsupportedOperation`] if the matrix is not symmetric;
-    /// [`PhysicsError::SimulationError`] if the QL iteration does not
-    /// converge (not expected for finite symmetric input).
+    /// [`PhysicsError::UnsupportedOperation`] if the matrix is not symmetric
+    /// within [`SYMMETRY_TOLERANCE`]; [`PhysicsError::SimulationError`] if the
+    /// QL iteration does not converge (not expected for finite symmetric
+    /// input).
     pub fn symmetric_eigenvalues(&self) -> Result<Vec<f64>, PhysicsError> {
-        if !self.is_symmetric() {
-            return Err(PhysicsError::UnsupportedOperation {
-                message: "eigenvalues requested for a non-symmetric matrix".into(),
-            });
-        }
         let n = self.dim;
+        let largest = self.data.iter().fold(0.0, |m: f64, v| m.max(v.abs()));
+        let tolerance = SYMMETRY_TOLERANCE * largest;
         let mut a = self.data.clone();
+        for r in 0..n {
+            for c in 0..r {
+                let (lower, upper) = (a[r * n + c], a[c * n + r]);
+                if lower == upper {
+                    continue;
+                }
+                let difference = (lower - upper).abs();
+                if difference.is_nan() || difference > tolerance {
+                    return Err(PhysicsError::UnsupportedOperation {
+                        message: format!(
+                            "eigenvalues requested for a non-symmetric matrix: \
+                             a[{r}][{c}] = {lower} and a[{c}][{r}] = {upper}"
+                        ),
+                    });
+                }
+                // One rounding (the halving is exact): the correctly rounded
+                // mean, as for the integrals in `FermionHamiltonian::new`.
+                let mean = (lower + upper) / 2.0;
+                a[r * n + c] = mean;
+                a[c * n + r] = mean;
+            }
+        }
         let mut d = vec![0.0; n];
         let mut e = vec![0.0; n];
         tridiagonalize(&mut a, n, &mut d, &mut e);
@@ -263,6 +296,13 @@ fn tridiagonalize(a: &mut [f64], n: usize, d: &mut [f64], e: &mut [f64]) {
 /// Eigenvalues of the symmetric tridiagonal matrix with diagonal `d` and
 /// sub-diagonal `e[1..]`, by the implicit QL algorithm. On return `d` holds
 /// the eigenvalues (unsorted) and `e` is destroyed.
+///
+/// An off-diagonal element is negligible, and the matrix is split there, when
+/// `|e[m]| ≤ ε·‖T‖∞`: the Householder reduction already perturbs the
+/// eigenvalues by that much, so no accuracy is lost. Comparing `e[m]` only with
+/// its neighbours `|d[m]| + |d[m+1]|` instead fails near a zero eigenvalue,
+/// where those entries vanish too: for `Σ X_i` on 8 or 10 qubits (eigenvalue 0
+/// with multiplicity 70 or 252) it needs over 50 iterations (#562).
 fn tridiagonal_ql(d: &mut [f64], e: &mut [f64]) -> Result<(), PhysicsError> {
     let n = d.len();
     if n == 0 {
@@ -272,14 +312,16 @@ fn tridiagonal_ql(d: &mut [f64], e: &mut [f64]) -> Result<(), PhysicsError> {
         e[i - 1] = e[i];
     }
     e[n - 1] = 0.0;
+    // ‖T‖∞ (largest row sum), up to a factor ≤ 2 since only one of the two
+    // off-diagonals of each row is added.
+    let norm = (0..n).map(|i| d[i].abs() + e[i].abs()).fold(0.0, f64::max);
     for l in 0..n {
         let mut iterations = 0;
         loop {
             // Find a negligible off-diagonal element e[m] to split the matrix.
             let mut m = l;
             while m + 1 < n {
-                let dd = d[m].abs() + d[m + 1].abs();
-                if e[m].abs() <= f64::EPSILON * dd {
+                if e[m].abs() <= f64::EPSILON * norm {
                     break;
                 }
                 m += 1;
@@ -619,6 +661,94 @@ mod tests {
             &relabelled.eigenvalues().unwrap(),
             1e-10,
         );
+    }
+
+    /// `Σ_q X_q` on `n` qubits.
+    fn transverse_field(n: usize) -> PauliSum {
+        PauliSum::new(
+            n,
+            (0..n)
+                .map(|q| PauliTerm::new(1.0, PauliString::single(q, PauliAxis::X)))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn transverse_field_has_its_binomial_spectrum() {
+        // Σ X_q: eigenvalues n − 2k, each C(n, k) times. On 8 and 10 qubits the
+        // eigenvalue 0 (70 and 252 times) made the old split test exceed the
+        // iteration cap (#562).
+        for n in [8, 10] {
+            let mut expected = Vec::new();
+            let mut binomial = 1usize;
+            for k in (0..=n).rev() {
+                // C(n, n−k) = C(n, k): eigenvalue n − 2k, ascending as k falls.
+                expected.extend(std::iter::repeat_n((n as f64) - 2.0 * k as f64, binomial));
+                binomial = binomial * k / (n - k + 1);
+            }
+            assert_eq!(expected.len(), 1 << n);
+            let ev = transverse_field(n).eigenvalues().unwrap();
+            assert_close(&ev, &expected, 1e-12);
+        }
+    }
+
+    #[test]
+    fn xx_ring_on_eight_qubits_has_ground_energy_minus_eight() {
+        // Σ X_q X_{q+1} with periodic boundary: for even n, the X-basis Néel
+        // state gives E₀ = −n (an odd ring is frustrated: −(n−2)). Failed to
+        // converge at n = 8 before #562.
+        let n = 8;
+        let ring: Vec<PauliTerm> = (0..n)
+            .map(|q| {
+                let (_, xx) = PauliString::single(q, PauliAxis::X)
+                    .mul(&PauliString::single((q + 1) % n, PauliAxis::X));
+                PauliTerm::new(1.0, xx)
+            })
+            .collect();
+        let e0 = PauliSum::new(n, ring).unwrap().ground_energy().unwrap();
+        assert!((e0 + 8.0).abs() <= 1e-12, "{e0}");
+    }
+
+    #[test]
+    fn rounding_asymmetry_is_accepted_and_averaged() {
+        // The #562 example, 0.6 (a†₀a₁ + a†₁a₀) written as six terms: entry
+        // (0, 1) sums 0.1 + 0.2 + 0.3 and entry (1, 0) sums 0.3 + 0.2 + 0.1.
+        let mut m = DenseMatrix::zeros(2);
+        for (v, w) in [(0.1, 0.3), (0.2, 0.2), (0.3, 0.1)] {
+            m.add_to(0, 1, v);
+            m.add_to(1, 0, w);
+        }
+        assert_eq!(m.get(0, 1), Some(0.6000000000000001));
+        assert_eq!(m.get(1, 0), Some(0.6));
+        assert!(!m.is_symmetric(), "is_symmetric stays exact");
+        assert_close(&m.symmetric_eigenvalues().unwrap(), &[-0.6, 0.6], 1e-15);
+    }
+
+    #[test]
+    fn symmetry_tolerance_scales_with_the_largest_entry() {
+        // Entries of 1000: an asymmetry of 1e-10 is 1e-13 relative (accepted),
+        // while 1e-8 is 1e-11 relative (rejected). An absolute 1e-12 would
+        // reject both.
+        let matrix = |asymmetry: f64| DenseMatrix {
+            dim: 2,
+            data: vec![1000.0, 1.0, 1.0 + asymmetry, -1000.0],
+        };
+        assert!(matrix(1e-10).symmetric_eigenvalues().is_ok());
+        assert!(matches!(
+            matrix(1e-8).symmetric_eigenvalues(),
+            Err(PhysicsError::UnsupportedOperation { .. })
+        ));
+        // A clearly non-symmetric matrix is still rejected: symmetrizing it
+        // would report ±0.5 for a matrix whose eigenvalues are 0, 0.
+        let nilpotent = DenseMatrix {
+            dim: 2,
+            data: vec![0.0, 1.0, 0.0, 0.0],
+        };
+        assert!(matches!(
+            nilpotent.symmetric_eigenvalues(),
+            Err(PhysicsError::UnsupportedOperation { .. })
+        ));
     }
 
     #[test]

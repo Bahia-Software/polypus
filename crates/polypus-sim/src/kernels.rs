@@ -429,6 +429,128 @@ pub(crate) fn apply_2q(
     }
 }
 
+// ── Reductions (adjoint differentiation) ─────────────────────────────────
+//
+// A reduction is a floating-point sum, and addition is not associative: summed
+// in whatever order a thread pool happens to split the work, the result would
+// change with the thread count. These kernels therefore fix the order: the
+// buffer is cut into blocks of `REDUCTION_BLOCK` amplitudes, each block is
+// summed sequentially from its first index, and the blocks' partial sums are
+// added left to right. Both paths run exactly those additions — the parallel
+// one only computes the blocks concurrently — so the result is bit for bit the
+// same with or without `parallel` and for any number of threads
+// (docs/ENGINEERING.md §4). No `unsafe`: the blocks are disjoint slices.
+
+/// Amplitudes per block of a reduction. Part of the summation order, so
+/// changing it changes the last bits of every reduction; it is not a tuning
+/// knob. 4096 amplitudes (64 KiB) keeps a block in L2, and leaves the parallel
+/// path one partial sum per 4096 amplitudes to collect (4 MiB at 30 qubits,
+/// against a 16 GiB statevector).
+pub(crate) const REDUCTION_BLOCK: usize = 4096;
+
+/// One block of [`weigh`]: scale each amplitude by its weight and sum
+/// `weight · |amplitude|²` over the block, from its first index. `start` is the
+/// block's global index. The flag is `false` if any weight is not finite.
+#[inline]
+fn weigh_block<W: Fn(usize) -> f64>(chunk: &mut [C64], start: usize, weight: &W) -> (f64, bool) {
+    let mut sum = 0.0;
+    let mut finite = true;
+    for (local, amp) in chunk.iter_mut().enumerate() {
+        let w = weight(start + local);
+        finite &= w.is_finite();
+        sum += w * amp.norm_sqr();
+        *amp = amp.scale(w);
+    }
+    (sum, finite)
+}
+
+/// Apply the diagonal operator `O|b⟩ = weight(b)|b⟩` in place and return
+/// `⟨ψ|O|ψ⟩` of the state the buffer held, plus whether every weight was
+/// finite. The sum runs in the fixed block order described above, so it is the
+/// same with and without `parallel`.
+pub(crate) fn weigh<W: Fn(usize) -> f64 + Sync>(
+    data: &mut [C64],
+    weight: &W,
+    parallel: bool,
+) -> (f64, bool) {
+    #[cfg(feature = "parallel")]
+    if parallel {
+        use rayon::prelude::*;
+        let partials: Vec<(f64, bool)> = data
+            .par_chunks_mut(REDUCTION_BLOCK)
+            .enumerate()
+            .map(|(k, chunk)| weigh_block(chunk, k * REDUCTION_BLOCK, weight))
+            .collect();
+        return partials
+            .into_iter()
+            .fold((0.0, true), |(sum, finite), (s, f)| (sum + s, finite && f));
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    let _ = parallel;
+
+    data.chunks_mut(REDUCTION_BLOCK)
+        .enumerate()
+        .fold((0.0, true), |(sum, finite), (k, chunk)| {
+            let (s, f) = weigh_block(chunk, k * REDUCTION_BLOCK, weight);
+            (sum + s, finite && f)
+        })
+}
+
+/// One block of [`pauli_inner`], over the basis states `start..end`.
+#[inline]
+fn pauli_inner_block(
+    lambda: &[C64],
+    psi: &[C64],
+    start: usize,
+    end: usize,
+    x: usize,
+    z: usize,
+) -> C64 {
+    let mut acc = C64::new(0.0, 0.0);
+    for b in start..end {
+        let term = lambda[b ^ x].conj() * psi[b];
+        if (b & z).count_ones() & 1 == 0 {
+            acc += term;
+        } else {
+            acc -= term;
+        }
+    }
+    acc
+}
+
+/// `Σ_b conj(λ[b ⊕ x]) · (−1)^{|b ∧ z|} · ψ[b]`, which is `⟨λ|X^x Z^z|ψ⟩` for
+/// the Pauli string with `X` on the bits of `x` and `Z` on the bits of `z`
+/// (`Z` acting first). A `Y` on a qubit is `i·X·Z` there, so the caller
+/// multiplies by `i` per `Y`. Reads both buffers, allocates no third one, and
+/// sums in the fixed block order described above.
+pub(crate) fn pauli_inner(lambda: &[C64], psi: &[C64], x: usize, z: usize, parallel: bool) -> C64 {
+    // `b ^ x` must stay inside the buffer: true when every bit of the masks is
+    // a qubit of a `2^n` buffer. Callers build the masks from validated qubits;
+    // reaching this is a bug, and indexing would panic anyway.
+    assert!(lambda.len() == psi.len() && psi.len().is_power_of_two() && (x | z) < psi.len());
+    let len = psi.len();
+    let block = |k: usize| {
+        let start = k * REDUCTION_BLOCK;
+        pauli_inner_block(lambda, psi, start, (start + REDUCTION_BLOCK).min(len), x, z)
+    };
+    let blocks = len.div_ceil(REDUCTION_BLOCK);
+
+    #[cfg(feature = "parallel")]
+    if parallel {
+        use rayon::prelude::*;
+        let partials: Vec<C64> = (0..blocks).into_par_iter().map(block).collect();
+        return partials
+            .into_iter()
+            .fold(C64::new(0.0, 0.0), |acc, partial| acc + partial);
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    let _ = parallel;
+
+    (0..blocks).fold(C64::new(0.0, 0.0), |acc, k| acc + block(k))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,5 +803,111 @@ mod tests {
     fn one_qubit_panics_on_a_buffer_shorter_than_two_to_the_n() {
         let mut data = sample_data(2);
         apply_1q(&mut data, 3, 2, &gates::h(), true);
+    }
+
+    /// A weight that varies with every bit, so a mis-indexed block shows up.
+    fn weight(b: usize) -> f64 {
+        0.25 + (b % 7) as f64 - 0.5 * (b.count_ones() as f64)
+    }
+
+    /// `n` qubits spanning several reduction blocks (and a partial last one is
+    /// impossible: blocks and buffers are both powers of two).
+    const MULTI_BLOCK_QUBITS: usize = 14;
+
+    #[test]
+    fn weigh_scales_by_the_weight_and_returns_the_expectation() {
+        let n = MULTI_BLOCK_QUBITS;
+        let original = sample_data(n);
+        let mut data = original.clone();
+        let (sum, finite) = weigh(&mut data, &weight, false);
+        assert!(finite);
+        let naive: f64 = original
+            .iter()
+            .enumerate()
+            .map(|(b, a)| weight(b) * a.norm_sqr())
+            .sum();
+        assert!((sum - naive).abs() <= 1e-12 * naive.abs());
+        for (b, (scaled, a)) in data.iter().zip(&original).enumerate() {
+            assert_eq!(*scaled, a.scale(weight(b)), "amplitude {b}");
+        }
+    }
+
+    #[test]
+    fn weigh_flags_a_non_finite_weight() {
+        let mut data = sample_data(MULTI_BLOCK_QUBITS);
+        let (_, finite) = weigh(
+            &mut data,
+            &|b| if b == 9000 { f64::NAN } else { 1.0 },
+            false,
+        );
+        assert!(!finite);
+    }
+
+    /// `⟨λ|P|ψ⟩` for every single- and two-qubit `X`/`Z` mask on a small
+    /// register, against the Pauli string applied by hand.
+    #[test]
+    fn pauli_inner_matches_the_pauli_applied_by_hand() {
+        let n = 4;
+        let psi = sample_data(n);
+        let lambda: Vec<C64> = psi.iter().rev().map(|a| a * C64::new(0.3, -0.7)).collect();
+        for x in 0..(1usize << n) {
+            for z in [0, 1, 2, 5, 12] {
+                // P|b⟩ = (−1)^{|b ∧ z|} |b ⊕ x⟩ (Z first, then X).
+                let mut p_psi = vec![C64::new(0.0, 0.0); 1 << n];
+                for (b, &a) in psi.iter().enumerate() {
+                    let sign = if (b & z).count_ones() % 2 == 0 {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    p_psi[b ^ x] += a * sign;
+                }
+                let expected: C64 = lambda.iter().zip(&p_psi).map(|(l, p)| l.conj() * p).sum();
+                let got = pauli_inner(&lambda, &psi, x, z, false);
+                assert!((got - expected).norm() < 1e-9, "x={x} z={z}");
+            }
+        }
+    }
+
+    /// docs/ENGINEERING.md §4: the parallel reductions equal the sequential ones
+    /// bit for bit, whatever the thread count, because the blocks and the order
+    /// in which their sums are combined do not depend on it.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn reductions_are_bit_identical_across_paths_and_thread_counts() {
+        let n = MULTI_BLOCK_QUBITS;
+        let psi = sample_data(n);
+        let lambda: Vec<C64> = psi.iter().map(|a| a * C64::new(-0.2, 0.9)).collect();
+        let masks = [(0b10, 0b10), (0b1_0000_0001, 0), (0, 0b10_0000_0000_0100)];
+
+        let mut seq_data = psi.clone();
+        let seq_weigh = weigh(&mut seq_data, &weight, false);
+        let seq_inner: Vec<C64> = masks
+            .iter()
+            .map(|&(x, z)| pauli_inner(&lambda, &psi, x, z, false))
+            .collect();
+
+        for threads in [1, 2, 3, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("a small thread pool");
+            pool.install(|| {
+                let mut par_data = psi.clone();
+                let par_weigh = weigh(&mut par_data, &weight, true);
+                assert_eq!(
+                    par_weigh.0.to_bits(),
+                    seq_weigh.0.to_bits(),
+                    "{threads} threads"
+                );
+                assert_eq!(par_weigh.1, seq_weigh.1);
+                assert!(par_data == seq_data, "{threads} threads");
+                for (&(x, z), seq) in masks.iter().zip(&seq_inner) {
+                    let par = pauli_inner(&lambda, &psi, x, z, true);
+                    assert_eq!(par.re.to_bits(), seq.re.to_bits(), "{threads} threads");
+                    assert_eq!(par.im.to_bits(), seq.im.to_bits(), "{threads} threads");
+                }
+            });
+        }
     }
 }
