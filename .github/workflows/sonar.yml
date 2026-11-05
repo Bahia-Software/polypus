@@ -57,10 +57,13 @@ jobs:
           cargo llvm-cov --no-report --locked -p polypus-infrastructure --features qmio
           cargo llvm-cov --no-report --locked -p polypus --features qmio
           cargo llvm-cov report --lcov --output-path lcov.info
-      # Imported as external issues; lint failures are ci.yml's job, so no
-      # -D warnings here.
+      # Imported as external issues. This step is a report for Sonar, not a
+      # gate: lint failures are the `clippy` job's in ci.yml. `--cap-lints warn`
+      # is needed because the root Cargo.toml's `[workspace.lints]` table sets
+      # `clippy::all` and `unsafe_code` to deny, which would fail this step and
+      # skip the upload below.
       - name: Clippy report (JSON)
-        run: cargo clippy --locked --workspace --all-targets --message-format=json > clippy.json
+        run: cargo clippy --locked --workspace --all-targets --message-format=json -- --cap-lints warn > clippy.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonar-rust

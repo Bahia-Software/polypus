@@ -44,3 +44,6 @@ default  = []
 # The serde and fs4 deps are for the calibration cache, which only exists with
 # `parallel`.
 parallel = ["dep:rayon", "dep:serde", "dep:serde_json", "dep:fs4"]
+
+[lints]
+workspace = true

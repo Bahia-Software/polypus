@@ -36,6 +36,8 @@
 //! position `w - 1 - i` (equivalently `x_i = (state >> i) & 1`). Every evaluator
 //! here honours that convention; see [`QuboObservable`] for details.
 
+#![warn(missing_docs)]
+
 use std::collections::HashMap;
 
 mod error;

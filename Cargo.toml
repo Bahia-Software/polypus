@@ -112,6 +112,26 @@ ndarray            = "0.17"
 # (`chemistry::sto3g`); pure Rust port of musl's libm, no dependencies.
 libm               = "0.2.16"
 
+# Lint levels shared by every member crate (each opts in with `[lints] workspace = true`;
+# see "Lint policy" in docs/CONTRIBUTING.md). CI also runs clippy with `-D warnings`.
+#
+# `unsafe_code = "deny"` enforces docs/ENGINEERING.md §5: the only authorised `unsafe`
+# sites are the two blocks of `polypus-sim/src/kernels.rs` and the signed-off
+# `pre_exec` of `polypus-subprocess-backend`, each with its own block-scoped
+# `#[allow(unsafe_code)]`. A new `unsafe` anywhere else fails to compile until it gets
+# the same benchmark, `// SAFETY:` comment and maintainer sign-off.
+# `undocumented_unsafe_blocks` makes the `// SAFETY:` comment mandatory on those sites.
+#
+# `missing_docs` is deliberately NOT here: since CI denies warnings, a workspace-wide
+# `warn` would fail every crate that still has undocumented public items. It is turned
+# on per crate, with `#![warn(missing_docs)]` in `lib.rs`, once that crate is at zero.
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+
 # Release profile posture — set explicitly rather than left to Cargo's defaults.
 #
 # Memory safety must not depend on a debug build. Qubit-index and operand

@@ -97,6 +97,13 @@ Entries were curated from the Conventional Commits history. Releases before
   variants, `InvalidPauliSum`, `UnsupportedOperation`,
   `InvalidFermionOperator` and `InvalidIntegrals`, so an exhaustive `match`
   on it outside its crate must handle them (#529).
+- For contributors: every workspace crate inherits a `[workspace.lints]` table
+  from the root `Cargo.toml` that denies `unsafe_code` and
+  `clippy::undocumented_unsafe_blocks`, so the three `unsafe` sites
+  `docs/ENGINEERING.md` §5 authorises are the only ones that compile, each with
+  its own block-scoped `allow`. `missing_docs` is on in the crates that are
+  already fully documented, and `cargo deny` keeps `pyo3` out of the pure
+  crates (#408).
 
 ### Documentation
 - The documentation site (MkDocs Material) is published at the Pages root,

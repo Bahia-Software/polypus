@@ -4,10 +4,10 @@
 //! This file deliberately imports only `polypus_backend` (and `polypus_circuit`,
 //! for a native circuit to feed it): if the extraction ever re-introduced a PyO3
 //! leak into the contract, this integration test would fail to compile, because
-//! `polypus-backend`'s dependency tree carries no `pyo3` (verified in CI with
-//! `cargo tree`). It is the executable form of the Fase-3 acceptance criterion "a
-//! fifth impl that uses neither PyO3 nor Qiskit compiles against polypus-backend
-//! and runs".
+//! `polypus-backend`'s dependency tree carries no `pyo3` (enforced in CI by
+//! `cargo deny`, `deny.toml` `bans`). It is the executable form of the Fase-3
+//! acceptance criterion "a fifth impl that uses neither PyO3 nor Qiskit compiles
+//! against polypus-backend and runs".
 //!
 //! The backend itself is intentionally trivial — a deterministic "echo" QPU that
 //! returns a single all-zeros bitstring with the requested shot count — so the
