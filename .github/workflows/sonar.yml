@@ -57,6 +57,13 @@ jobs:
           cargo llvm-cov --no-report --locked -p polypus-infrastructure --features qmio
           cargo llvm-cov --no-report --locked -p polypus --features qmio
           cargo llvm-cov report --lcov --output-path lcov.info
+      # Line coverage per crate in the job summary, readable without SonarQube
+      # Cloud (and without its token). Report only: no threshold.
+      - name: Coverage per crate (job summary)
+        run: >-
+          python .github/scripts/coverage_summary.py lcov.info
+          --title "Rust line coverage per crate (the cargo test passes)"
+          >> "$GITHUB_STEP_SUMMARY"
       # Imported as external issues; lint failures are ci.yml's job, so no
       # -D warnings here.
       - name: Clippy report (JSON)
@@ -67,7 +74,7 @@ jobs:
           path: |
             lcov.info
             clippy.json
-          retention-days: 3
+          retention-days: 14
 
   # The pytest suite against the installed wheel, as in the 3.13 leg of
   # `python-tests` (ci.yml). Coverage maps site-packages back to python/
@@ -127,13 +134,19 @@ jobs:
           python -m coverage combine
           python -m coverage xml -o coverage.xml
           cargo llvm-cov report --release --lcov --output-path lcov-python.info
+      # The Rust the pytest suite reaches (the bindings above all), per crate.
+      - name: Coverage per crate (job summary)
+        run: >-
+          python .github/scripts/coverage_summary.py lcov-python.info
+          --title "Rust line coverage per crate (reached by the pytest suite)"
+          >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonar-python
           path: |
             coverage.xml
             lcov-python.info
-          retention-days: 3
+          retention-days: 14
 
   scan:
     name: SonarQube Cloud scan

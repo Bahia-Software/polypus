@@ -1277,6 +1277,260 @@ mod tests {
         assert_eq!(d.degeneration(0.5), None);
     }
 
+    /// What one [`Distribution::update`] changes, as plain numbers.
+    #[derive(Debug, Clone)]
+    struct State {
+        mean: Vec<f64>,
+        sigma: f64,
+        path_sigma: Vec<f64>,
+        path_c: Vec<f64>,
+        cov: Vec<Vec<f64>>,
+    }
+
+    impl State {
+        fn of(d: &Distribution) -> Self {
+            Self {
+                mean: d.mean.to_vec(),
+                sigma: d.sigma,
+                path_sigma: d.path_sigma.to_vec(),
+                path_c: d.path_c.to_vec(),
+                cov: d.cov.outer_iter().map(|row| row.to_vec()).collect(),
+            }
+        }
+
+        fn assert_close(&self, want: &Self) {
+            let close = |got: f64, want: f64| (got - want).abs() <= 1e-12 * want.abs().max(1.0);
+            let all = |got: &[f64], want: &[f64]| got.iter().zip(want).all(|(&g, &w)| close(g, w));
+            assert!(all(&self.mean, &want.mean), "mean {self:?}\nwant {want:?}");
+            assert!(
+                close(self.sigma, want.sigma),
+                "sigma {self:?}\nwant {want:?}"
+            );
+            assert!(
+                all(&self.path_sigma, &want.path_sigma),
+                "p_σ {self:?}\nwant {want:?}"
+            );
+            assert!(
+                all(&self.path_c, &want.path_c),
+                "p_c {self:?}\nwant {want:?}"
+            );
+            for (got, want_row) in self.cov.iter().zip(&want.cov) {
+                assert!(all(got, want_row), "C {self:?}\nwant {want:?}");
+            }
+        }
+    }
+
+    /// One generation of the tutorial (Fig. 6, eqs. 41–47), written out
+    /// coordinate by coordinate from `d`: the state `update` must reach, and
+    /// whether h_σ held. It assumes the σ cap does not bind (and checks it).
+    fn reference_update(
+        s: &Strategy,
+        d: &Distribution,
+        steps: &[Array1<f64>],
+        order: &[usize],
+    ) -> (State, bool) {
+        let n = d.mean.len();
+        let nf = n as f64;
+        let selected: Vec<(f64, &Array1<f64>)> = s
+            .weights
+            .iter()
+            .zip(order)
+            .map(|(&w, &k)| (w, &steps[k]))
+            .collect();
+        let mut s0 = State::of(d);
+        let yw: Vec<f64> = (0..n)
+            .map(|i| selected.iter().map(|(w, y)| w * y[i]).sum())
+            .collect();
+        for (m, y) in s0.mean.iter_mut().zip(&yw) {
+            *m += d.sigma * y;
+        }
+        let whitened: Vec<f64> = (0..n)
+            .map(|i| (0..n).map(|j| d.inv_sqrt[[i, j]] * yw[j]).sum())
+            .collect();
+        let ps_rate = (s.cs * (2.0 - s.cs) * s.mueff).sqrt();
+        for (p, z) in s0.path_sigma.iter_mut().zip(&whitened) {
+            *p = (1.0 - s.cs) * *p + ps_rate * z;
+        }
+        let norm = s0.path_sigma.iter().map(|p| p * p).sum::<f64>().sqrt();
+        let start_up = 1.0 - (1.0 - s.cs).powf(2.0 * (d.generation as f64 + 1.0));
+        let h_sigma = norm / start_up.sqrt() < (1.4 + 2.0 / (nf + 1.0)) * s.chi_n;
+        let pc_rate = if h_sigma {
+            (s.cc * (2.0 - s.cc) * s.mueff).sqrt()
+        } else {
+            0.0
+        };
+        for (p, y) in s0.path_c.iter_mut().zip(&yw) {
+            *p = (1.0 - s.cc) * *p + pc_rate * y;
+        }
+        let delta = if h_sigma { 0.0 } else { s.cc * (2.0 - s.cc) };
+        let decay = 1.0 + s.c1 * delta - s.c1 - s.cmu;
+        for i in 0..n {
+            for j in 0..n {
+                let rank_mu: f64 = selected.iter().map(|(w, y)| w * y[i] * y[j]).sum();
+                s0.cov[i][j] =
+                    decay * s0.cov[i][j] + s.c1 * s0.path_c[i] * s0.path_c[j] + s.cmu * rank_mu;
+            }
+        }
+        s0.sigma *= ((s.cs / s.ds) * (norm / s.chi_n - 1.0)).exp();
+        let widest = (0..n).map(|i| s0.cov[i][i]).fold(0.0_f64, f64::max).sqrt();
+        assert!(s0.sigma * widest < d.max_spread, "the cap binds");
+        (s0, h_sigma)
+    }
+
+    /// A two-parameter distribution in the middle of a run: generation 2, paths
+    /// and a covariance away from their initial values, so every term of the
+    /// update contributes. `inv_sqrt` need not be `C^(-1/2)` for the update's
+    /// arithmetic; a non-diagonal one mixes the coordinates.
+    fn mid_run(path_sigma: [f64; 2]) -> Distribution {
+        let mut d = Distribution::new(Array1::from(vec![1.0, 2.0]), 0.3);
+        d.generation = 2;
+        d.decomposed_at = 2;
+        d.path_sigma = Array1::from(path_sigma.to_vec());
+        d.path_c = Array1::from(vec![0.1, -0.2]);
+        d.cov = Array2::from_shape_vec((2, 2), vec![1.2, 0.3, 0.3, 0.8]).unwrap();
+        d.inv_sqrt = Array2::from_shape_vec((2, 2), vec![0.9, -0.1, -0.1, 1.1]).unwrap();
+        d
+    }
+
+    #[test]
+    fn update_follows_the_tutorial_equations() {
+        let s = Strategy::new(2, 6);
+        let steps: Vec<Array1<f64>> = [
+            [0.4, -0.1],
+            [-0.3, 0.2],
+            [0.1, 0.5],
+            [0.6, 0.3],
+            [-0.2, -0.4],
+            [0.05, 0.15],
+        ]
+        .iter()
+        .map(|y| Array1::from(y.to_vec()))
+        .collect();
+        let order = [3, 0, 5, 1, 4, 2];
+        let mut d = mid_run([0.05, -0.02]);
+        let (want, h_sigma) = reference_update(&s, &d, &steps, &order);
+        assert!(h_sigma, "a short p_σ keeps the rank-one path running");
+        d.update(&s, &steps, &order);
+        State::of(&d).assert_close(&want);
+        assert_eq!(d.generation, 3);
+    }
+
+    #[test]
+    fn h_sigma_switches_exactly_at_its_threshold() {
+        // With zero steps only the paths' decay and h_σ move the covariance:
+        // h_σ = 0 adds c₁·c_c(2 − c_c)·C back. ‖p_σ‖ after the update is
+        // (1 − c_σ)·‖p_σ‖ before, so the threshold can be approached from
+        // either side, and hit.
+        let s = Strategy::new(2, 6);
+        let steps = vec![Array1::<f64>::zeros(2); 6];
+        let order = [0, 1, 2, 3, 4, 5];
+        // The same expressions `update` evaluates, at generation 2 in 2-D.
+        let threshold = (1.4 + 2.0 / (2.0 + 1.0)) * s.chi_n;
+        let start_up = 1.0 - (1.0 - s.cs).powf(2.0 * (2.0 + 1.0));
+        let after = |p: [f64; 2]| {
+            let ps = Array1::from(p.to_vec()) * (1.0 - s.cs);
+            ps.dot(&ps).sqrt() / start_up.sqrt()
+        };
+        let on_threshold = threshold * start_up.sqrt() / (1.0 - s.cs);
+        for (factor, h_sigma) in [(1.0 - 1e-9, true), (1.0 + 1e-9, false)] {
+            let mut d = mid_run([on_threshold * factor, 0.0]);
+            let (want, h) = reference_update(&s, &d, &steps, &order);
+            assert_eq!(h, h_sigma, "factor {factor}");
+            d.update(&s, &steps, &order);
+            State::of(&d).assert_close(&want);
+        }
+        // At the threshold itself h_σ is 0: `<`, not `≤`. Search the floats
+        // around it for a p_σ that lands on it exactly.
+        let hit = (0..64u64)
+            .flat_map(|k| (0..256u64).map(move |j| (k, j)))
+            .map(|(k, j)| {
+                let a = f64::from_bits(on_threshold.to_bits() - 32 + k);
+                [a, j as f64 * 1e-10 * a]
+            })
+            .find(|&p| after(p) == threshold)
+            .expect("some p_σ lands exactly on the threshold");
+        let mut d = mid_run(hit);
+        let (want, h) = reference_update(&s, &d, &steps, &order);
+        assert!(!h);
+        d.update(&s, &steps, &order);
+        State::of(&d).assert_close(&want);
+    }
+
+    #[test]
+    fn the_eigensystem_is_refreshed_every_eigen_gap_generations() {
+        let s = Strategy {
+            eigen_gap: 3,
+            ..Strategy::new(2, 6)
+        };
+        let steps = vec![Array1::from(vec![0.2, -0.1]); 6];
+        let order = [0, 1, 2, 3, 4, 5];
+        let mut d = mid_run([0.0, 0.0]);
+        d.generation = 3;
+        d.decomposed_at = 2;
+        let inv_sqrt = d.inv_sqrt.clone();
+        // Generation 4: two since the last decomposition, fewer than three.
+        d.update(&s, &steps, &order);
+        assert_eq!((d.generation, d.decomposed_at), (4, 2));
+        assert_eq!(d.inv_sqrt, inv_sqrt, "no decomposition yet");
+        // Generation 5: three since the last one.
+        d.update(&s, &steps, &order);
+        assert_eq!((d.generation, d.decomposed_at), (5, 5));
+        assert_ne!(d.inv_sqrt, inv_sqrt);
+    }
+
+    #[test]
+    fn decomposition_rejects_a_covariance_that_is_not_positive_definite() {
+        for cov in [vec![0.0; 4], vec![1.0, 0.0, 0.0, -1e-3]] {
+            let mut dist = Distribution::new(Array1::zeros(2), 1.0);
+            dist.cov = Array2::from_shape_vec((2, 2), cov).unwrap();
+            dist.decompose();
+            assert_eq!(dist.ill_conditioned, Some(f64::INFINITY), "{:?}", dist.cov);
+            assert_eq!(dist.scales, Array1::<f64>::ones(2), "kept");
+            assert_eq!(dist.inv_sqrt, Array2::<f64>::eye(2), "kept");
+        }
+    }
+
+    #[test]
+    fn decomposition_accepts_a_condition_number_of_exactly_max_condition() {
+        let mut dist = Distribution::new(Array1::zeros(2), 1.0);
+        dist.cov = Array2::from_diag(&Array1::from(vec![MAX_CONDITION, 1.0]));
+        dist.decompose();
+        assert_eq!(dist.ill_conditioned, None);
+        assert_eq!(dist.scales, Array1::from(vec![1e7, 1.0]));
+    }
+
+    #[test]
+    fn degeneration_bounds_are_strict_and_scale_with_sigma0() {
+        // The identity covariance makes the spread σ itself.
+        let at = |sigma: f64, sigma0: f64| {
+            let mut d = Distribution::new(Array1::zeros(2), sigma0);
+            d.sigma = sigma;
+            d.degeneration(sigma0)
+        };
+        assert_eq!(at(TOL_X * 0.5, 0.5), None, "TolX is a strict bound");
+        assert!(matches!(
+            at(TOL_X * 0.5 * 0.99, 0.5),
+            Some(StopReason::Collapsed(_))
+        ));
+        assert_eq!(at(TOL_X_UP * 0.5, 0.5), None, "TolXUp is a strict bound");
+        assert!(matches!(
+            at(TOL_X_UP * 0.5 * 1.01, 0.5),
+            Some(StopReason::Diverged(_))
+        ));
+        // Both are relative to σ₀: 1e-12 is collapsed for σ₀ = 2, not for
+        // σ₀ = 0.5 (between TolX·σ₀ and TolX/σ₀).
+        assert_eq!(at(1e-12, 0.5), None);
+        assert!(matches!(at(1e-12, 2.0), Some(StopReason::Collapsed(_))));
+    }
+
+    #[test]
+    fn the_largest_population_that_fits_in_u32_is_valid() {
+        // IPOP doubling is checked against u32::MAX itself, which is reachable.
+        assert!(validate(1, Some(u32::MAX), 1, 1.0, 0).is_ok());
+        assert!(validate(1, Some(u32::MAX / 2 + 1), 1, 1.0, 1).is_err());
+        assert!(validate(1, Some(u32::MAX / 2), 1, 1.0, 1).is_ok());
+    }
+
     #[test]
     fn batch_schedule_bounds() {
         let s = CmaEsBatchSchedule::new(6, None, 5, 0);

@@ -742,6 +742,28 @@ mod tests {
         assert_eq!(parse_mem_budget("16777215T"), Ok(16_777_215 << 40));
     }
 
+    #[test]
+    fn every_parse_error_reads_as_its_reason() {
+        use MemBudgetParseError as E;
+        // These are the reasons the invalid-value warning quotes.
+        let cases = [
+            (E::Empty, "the value is empty"),
+            (
+                E::MissingNumber,
+                "the value must start with a positive integer",
+            ),
+            (
+                E::UnknownSuffix("X".to_string()),
+                "unknown unit suffix \"X\"",
+            ),
+            (E::Zero, "a budget of zero would forbid all work"),
+            (E::Overflow, "the value does not fit in 64 bits"),
+        ];
+        for (err, message) in cases {
+            assert_eq!(err.to_string(), message);
+        }
+    }
+
     // --- apply_reserve -----------------------------------------------------------
 
     #[test]
@@ -991,6 +1013,39 @@ mod tests {
     }
 
     #[test]
+    fn detection_drops_the_v1_unlimited_sentinel_and_limits_above_mem_total() {
+        // Without MemAvailable a v1 limit is the only candidate, so whether it is
+        // kept is visible in the result.
+        fn v1(meminfo: Option<&str>, limit: &str) -> impl Fn(&Path) -> Option<String> {
+            let mut files = vec![
+                ("/proc/self/cgroup", "4:memory:/slurm/job_9\n"),
+                (
+                    "/sys/fs/cgroup/memory/slurm/job_9/memory.limit_in_bytes",
+                    limit,
+                ),
+            ];
+            files.extend(meminfo.map(|text| ("/proc/meminfo", text)));
+            fs(&files)
+        }
+        // The sentinel itself (1 << 60) is "unlimited", even with no MemTotal to
+        // compare it against; one byte below it is a limit.
+        let sentinel = CGROUP_V1_UNLIMITED.to_string();
+        let below = (CGROUP_V1_UNLIMITED - 1).to_string();
+        assert_eq!(detect_memory_limit_with(v1(None, &sentinel)), None);
+        assert_eq!(
+            detect_memory_limit_with(v1(None, &below)),
+            Some(CGROUP_V1_UNLIMITED - 1)
+        );
+        // A limit above MemTotal is no limit either; at MemTotal it is one.
+        let total_only = Some("MemTotal:       1024 kB\n");
+        assert_eq!(detect_memory_limit_with(v1(total_only, "1048577")), None);
+        assert_eq!(
+            detect_memory_limit_with(v1(total_only, "1048576")),
+            Some(1024 * 1024)
+        );
+    }
+
+    #[test]
     fn detection_with_nothing_readable_is_none() {
         // No /proc at all (macOS, Windows).
         assert_eq!(detect_memory_limit_with(fs(&[])), None);
@@ -1075,6 +1130,69 @@ mod tests {
         assert!(detected.contains("100.00 GiB"), "{detected}");
         assert!(detected.contains("cgroup"), "{detected}");
         assert!(detected.contains("POLYPUS_MEM_BUDGET"), "{detected}");
+    }
+
+    // --- the wrappers over the active budget ---------------------------------------
+    //
+    // These read the process's real budget (POLYPUS_MEM_BUDGET if the test run
+    // sets it, else the limit detected from /proc and the cgroup files) and never
+    // write the environment (`set_var` is racy in a multithreaded test binary,
+    // §4). So they assert what holds whatever that budget is, plus what a Linux
+    // host, which always has /proc/meminfo, guarantees.
+
+    #[test]
+    fn the_detected_limit_is_read_from_this_host() {
+        let limit = detected_memory_limit();
+        if cfg!(target_os = "linux") {
+            // Some memory is available on any host that runs these tests.
+            let bytes = limit.expect(
+                "a Linux host has /proc/meminfo (ENGINEERING §4: the wrapper tests need it)",
+            );
+            assert!(bytes > 16 * MIB, "detected {bytes} bytes");
+        }
+        // Computed once per process: a second call cannot drift.
+        assert_eq!(detected_memory_limit(), limit);
+    }
+
+    #[test]
+    fn check_statevector_fits_checks_against_the_active_budget() {
+        let budget = active_budget();
+        // A 0-qubit statevector (16 bytes) fits any budget.
+        assert_eq!(check_statevector_fits(0), check_fits(0, budget));
+        assert!(check_statevector_fits(0).is_ok());
+        // 2^200 amplitudes fit no budget; only a fallback (a guess, no limit
+        // detected) lets it through.
+        let refused = check_statevector_fits(200);
+        assert_eq!(refused, check_fits(200, budget));
+        if budget.source == BudgetSource::Fallback {
+            assert!(refused.is_ok());
+        } else {
+            let err = refused.unwrap_err();
+            assert_eq!(err.num_qubits, 200);
+            assert_eq!(err.required_bytes, u64::MAX);
+            assert_eq!(err.source, budget.source);
+        }
+        if cfg!(target_os = "linux") {
+            // There the limit is detected (or set), never the fallback.
+            assert!(check_statevector_fits(200).is_err());
+        }
+    }
+
+    #[test]
+    fn max_statevector_concurrency_applies_the_active_budget() {
+        let bytes = active_budget().bytes;
+        for (qubits, threads) in [(1, 8), (4, 3), (200, 8)] {
+            assert_eq!(
+                max_statevector_concurrency(qubits, threads),
+                concurrency_for(bytes, qubits, threads),
+                "{qubits} qubits, {threads} threads"
+            );
+        }
+        // Any real budget holds eight 1-qubit (32-byte) statevectors, so the cap
+        // is the thread count; a 200-qubit one is still run one at a time.
+        assert!(bytes >= 8 * 32, "budget {bytes}");
+        assert_eq!(max_statevector_concurrency(1, 8), 8);
+        assert_eq!(max_statevector_concurrency(200, 8), 1);
     }
 
     #[test]
