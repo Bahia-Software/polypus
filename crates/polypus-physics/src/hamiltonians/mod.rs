@@ -21,7 +21,7 @@ pub mod pauli;
 pub mod photon_polarization;
 pub mod taper;
 
-pub use exact::{DenseMatrix, MAX_DENSE_QUBITS};
+pub use exact::{DenseMatrix, MAX_DENSE_QUBITS, SYMMETRY_TOLERANCE};
 pub use fermion::{
     FermionHamiltonian, FermionOperator, FermionTerm, Ladder, INTEGRAL_SYMMETRY_TOLERANCE,
 };
