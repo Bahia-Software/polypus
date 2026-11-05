@@ -12,6 +12,19 @@ Entries were curated from the Conventional Commits history. Releases before
 ## [Unreleased]
 
 ### Added
+- `polypus.qml.Ansatz.strongly_entangling(reps, ranges=None, entangler="cx")`,
+  PennyLane's `StronglyEntanglingLayers`: per layer, a general rotation on
+  every qubit, emitted as `Rz(φ)`, `Ry(θ)`, `Rz(ω)`, in that order, so the
+  exact parameter-shift gradient still applies, then an entangler (`"cx"` or
+  `"cz"`) from each qubit `i` to `(i + r) mod n`, with PennyLane's default
+  ranges or one per layer; `3·n·reps` parameters. A range outside `1..=n−1`
+  for the qubits active at that point is a `ValueError` at the call, and the
+  layer saves and loads with `TrainedModel.save`/`qml.load` (format version
+  still 1). In `polypus-qml`: `StronglyEntanglingAnsatz`,
+  `Layer::StronglyEntangling`, `QuantumModel::strongly_entangling` and the
+  `ValidationError` variants `StronglyEntanglingRangesLength` and
+  `StronglyEntanglingRangeOutOfBounds`. The QML guide shows how `EfficientSU2`
+  and `BasicEntanglerLayers` map onto `hardware_efficient` (#505).
 - `polypus.qml.expval(model, x, params, *, ...)` and
   `polypus.qml.jacobian(model, x, params, *, wrt="params", ...)` for a training
   loop of your own over a native `Model`: the expectation of every readout
@@ -64,6 +77,9 @@ Entries were curated from the Conventional Commits history. Releases before
   `libm` (`erf` for the Boys function).
 
 ### Changed
+- **BREAKING (Rust):** `polypus_qml::ValidationError` has two new variants,
+  `StronglyEntanglingRangesLength` and `StronglyEntanglingRangeOutOfBounds`,
+  so an exhaustive `match` on it outside its crate must handle them (#505).
 - **BREAKING (Rust):** `polypus_physics::hamiltonians::PauliTerm` is
   `{ coefficient, string: PauliString }` instead of a single Pauli on one
   qubit (`qubit`, `axis`), and `PauliSum`'s fields are private: build it with

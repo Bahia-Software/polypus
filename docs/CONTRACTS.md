@@ -2418,8 +2418,9 @@ that does not depend on the data is checked where it is written, as a plain
 `predict` and `run` below are `polypus.ConfigurationError`):
 
 - each `Encoder`/`Ansatz` builder call re-checks its layers (a misplaced
-  amplitude encoder, pooling below two active qubits) and leaves the object as
-  it was when it raises;
+  amplitude encoder, pooling below two active qubits, a
+  `strongly_entangling` range out of bounds) and leaves the object as it was
+  when it raises;
 - `Model` checks that the `Encoder` and the `Ansatz` have the same width, that
   some layer loads the data, that the layers reserve trainable parameters, and
   that the readout's positions exist among the qubits still active at the end;
@@ -2458,15 +2459,15 @@ inside one observable are `ValidationError::ObservableHasIncompatibleBases`; a
 readout needing more than one group is
 `ValidationError::ReadoutNeedsMultipleBasisGroups`: rejected, never mismeasured.
 
-**Options.** Every option is a string from a closed set, checked when it is
-given; any other value is a `ValueError` listing the valid ones. The typing
-stubs spell each set as a `Literal`.
+**Options.** Every option in the table below is a string from a closed set,
+checked when it is given; any other value is a `ValueError` listing the valid
+ones. The typing stubs spell each set as a `Literal`.
 
 | Option | Accepted values |
 | --- | --- |
 | `angle_encoder(axis=)`, `hardware_efficient(rotations=[…])` | `"rx"`, `"ry"`, `"rz"` |
 | `hardware_efficient(entanglement=)`, `iqp_encoder(entanglement=)` | `"linear"`, `"circular"`, `"full"` |
-| `hardware_efficient(entangler=)` | `"cx"`, `"cz"` |
+| `hardware_efficient(entangler=)`, `strongly_entangling(entangler=)` | `"cx"`, `"cz"` |
 | `conv(block=)` | `"basic"`, `"cartan"` |
 | `conv(pairing=)` | `"even_pairs"`, `"odd_pairs"`, `"alternating"` |
 | `pool(block=)` | `"basic"` |
@@ -2474,6 +2475,16 @@ stubs spell each set as a `Literal`.
 | `Readout(decision=)` | `"raw"`, `"sign"`, `"threshold"`, `"argmax"` |
 | `fit(loss=)` | `"squared_error"`, `"binary_cross_entropy"`, `"hinge"`, `"categorical_cross_entropy"`, `"expectation"` |
 | `qml.jacobian(wrt=)` | `"params"`, `"inputs"`, `"both"` (a `polypus.ConfigurationError`, like every check of the primitives) |
+
+The one option that is not a string is `strongly_entangling(ranges=)`: `None`
+(PennyLane's default, `r = (layer mod (n − 1)) + 1`) or one integer per layer,
+each in `1..=n−1` for the `n` qubits active where the layer sits (after any
+pooling). A count other than `reps`, or a range outside those bounds, is
+`ValidationError::StronglyEntanglingRangesLength` /
+`StronglyEntanglingRangeOutOfBounds`, a `ValueError` at the call; with one
+active qubit no entangler is emitted, so only the count is checked. A range
+is a count argument like `reps`: a negative one, or one larger than a `usize`
+holds, is the same `ValueError` at the call.
 
 **Training (`Model.fit`).** `fit(x, y=None, *, method, loss=None, …)`; every
 argument after `y` is keyword-only and `method` is required. It returns a
@@ -2672,8 +2683,13 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
 
 - Loading checks the format and the version, then rebuilds the model through the
   same checks as `Model` and `bind`, so a corrupt or edited file is a
-  `ValueError` and never an inconsistent model. Loading only parses JSON: it
+  `ValueError` and never an inconsistent model (an edited
+  `strongly_entangling` range included). Loading only parses JSON: it
   never runs code.
+- A new layer is a new variant of the `spec`'s layer list, which leaves every
+  existing file valid, so it keeps `version` 1 (`StronglyEntangling` was
+  added this way). The reverse does not hold: an older Polypus rejects, as a
+  `ValueError`, a file that uses a layer it does not know.
 - Every parameter reads back bit for bit (the file is written with
   `serde_json`'s round-trip float formatting), so a loaded model predicts
   exactly as the saved one.
