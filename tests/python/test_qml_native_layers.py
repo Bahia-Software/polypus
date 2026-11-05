@@ -132,6 +132,162 @@ class TestHardwareEfficientConfiguration:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Strongly entangling ansatz
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _strongly_entangling_circuit(sample, params, num_qubits, ranges, entangler="cx"):
+    """The bound circuit of an ``angle_encoder("ry")`` + ``strongly_entangling``
+    model, built gate by gate with ``polypus.Circuit``: per layer, ``rz(φ)``,
+    ``ry(θ)``, ``rz(ω)`` on every qubit (parameters in that order), then the
+    entangler from every qubit ``i`` to ``(i + r) mod n``."""
+    import polypus
+
+    qc = polypus.Circuit(num_qubits)
+    for qubit, x in enumerate(sample):
+        qc.ry(qubit, x)
+    angles = iter(params)
+    for r in ranges:
+        for qubit in range(num_qubits):
+            qc.rz(qubit, next(angles))
+            qc.ry(qubit, next(angles))
+            qc.rz(qubit, next(angles))
+        if num_qubits > 1:
+            for i in range(num_qubits):
+                getattr(qc, entangler)(i, (i + r) % num_qubits)
+    return qc.measure_all()
+
+
+class TestStronglyEntangling:
+    """``strongly_entangling`` is PennyLane's ``StronglyEntanglingLayers``:
+    ``3·n·reps`` parameters, a ``Rot`` per qubit and a ring of entanglers whose
+    range changes per layer."""
+
+    @pytest.mark.parametrize(
+        ("num_qubits", "reps", "kwargs", "ranges"),
+        [
+            # Default ranges: (l mod (n-1)) + 1.
+            (3, 2, {}, [1, 2]),
+            (4, 4, {}, [1, 2, 3, 1]),
+            (2, 1, {}, [1]),
+            # One qubit: rotations only.
+            (1, 2, {}, [None, None]),
+            (3, 2, {"ranges": [2, 1]}, [2, 1]),
+            (3, 1, {"entangler": "cz"}, [1]),
+        ],
+        ids=["n3-default", "n4-default", "n2", "n1", "explicit-ranges", "cz"],
+    )
+    def test_the_circuit_is_gate_for_gate(self, num_qubits, reps, kwargs, ranges):
+        sample = [0.1 * (j + 1) for j in range(num_qubits)]
+        model = _raw_model(
+            num_qubits,
+            lambda a: a.strongly_entangling(reps, **kwargs),
+            encoder=None,
+        )
+        params = [0.05 * (i + 1) for i in range(model.num_params)]
+        expected = _strongly_entangling_circuit(
+            sample, params, num_qubits, ranges, kwargs.get("entangler", "cx")
+        )
+        assert model.circuit(sample, params).to_qasm2() == expected.to_qasm2()
+
+    def test_the_count_is_three_per_qubit_per_layer(self):
+        from polypus.qml import Ansatz
+
+        _assert_param_count(_raw_model(3, lambda a: a.strongly_entangling(2)), 18)
+        _assert_param_count(_raw_model(1, lambda a: a.strongly_entangling(3)), 9)
+        # Explicit ranges change the circuit, not the count.
+        _assert_param_count(
+            _raw_model(4, lambda a: a.strongly_entangling(2, ranges=[3, 3])), 24
+        )
+        # After pooling, n is the qubits still active: 4 → 2.
+        assert Ansatz(4).pool("basic").strongly_entangling(2).num_params == 3 + 12
+        assert Ansatz(3).strongly_entangling(0).num_params == 0
+
+    def test_explicit_default_ranges_build_the_same_circuit(self):
+        theta = [0.1 * (i + 1) for i in range(36)]
+        implicit = _raw_model(4, lambda a: a.strongly_entangling(3))
+        explicit = _raw_model(
+            4, lambda a: a.strongly_entangling(3, ranges=[1, 2, 3], entangler="cx")
+        )
+        assert (
+            implicit.circuit(list(_SAMPLE_4F), theta).to_qasm2()
+            == explicit.circuit(list(_SAMPLE_4F), theta).to_qasm2()
+        )
+
+    @pytest.mark.parametrize(
+        ("build", "kwargs", "match"),
+        [
+            (lambda a: a, {"reps": 2, "ranges": [1]}, "1 value.*reps is 2"),
+            (lambda a: a, {"reps": 1, "ranges": [1, 1]}, "2 value.*reps is 1"),
+            (lambda a: a, {"reps": 2, "ranges": [1, 0]}, "range 0 of layer 1"),
+            (lambda a: a, {"reps": 1, "ranges": [4]}, r"range 4 .*1\.\.=3"),
+            # After pooling only 2 qubits are active, so 2 is out of bounds.
+            (
+                lambda a: a.pool("basic"),
+                {"reps": 1, "ranges": [2]},
+                r"2 active qubit\(s\)",
+            ),
+            (lambda a: a, {"reps": 1, "entangler": "cy"}, '"cx" or "cz"'),
+        ],
+        ids=["too-few", "too-many", "zero", "n", "after-pool", "entangler"],
+    )
+    def test_invalid_options_are_rejected_at_the_call(self, build, kwargs, match):
+        from polypus.qml import Ansatz
+
+        ansatz = build(Ansatz(4).conv("basic"))
+        before = (ansatz.num_layers, ansatz.num_params)
+        with pytest.raises(ValueError, match=match):
+            ansatz.strongly_entangling(**kwargs)
+        assert (ansatz.num_layers, ansatz.num_params) == before
+
+    def test_a_single_qubit_checks_only_the_count(self):
+        from polypus.qml import Ansatz
+
+        # No entangler on one qubit, so no range can be wrong; only one per
+        # layer is required.
+        assert Ansatz(1).strongly_entangling(2, ranges=[0, 5]).num_params == 6
+        with pytest.raises(ValueError, match="reps is 2"):
+            Ansatz(1).strongly_entangling(2, ranges=[1])
+
+    def test_negative_values_fail_like_a_negative_reps(self):
+        from polypus.qml import Ansatz
+
+        # A negative range is refused at the call, before the layer is checked,
+        # with the same `ValueError` as `hardware_efficient(-1)`.
+        for build in (
+            lambda a: a.hardware_efficient(-1),
+            lambda a: a.strongly_entangling(-1),
+            lambda a: a.strongly_entangling(1, ranges=[-1]),
+        ):
+            with pytest.raises(ValueError, match="non-negative integer, got -1"):
+                build(Ansatz(3))
+
+    def test_counts_that_do_not_fit_are_value_errors(self):
+        from polypus.qml import Ansatz
+
+        ansatz = Ansatz(2).real_amplitudes(1)
+        for build, match in (
+            (lambda a: a.strongly_entangling(2**70), f"got {2**70}"),
+            (lambda a: a.strongly_entangling(1, ranges=[2**70]), f"got {2**70}"),
+            # 3 × 2 qubits × 2**62 parameters do not fit in a usize.
+            (lambda a: a.strongly_entangling(2**62), "layer 1 needs more trainable"),
+        ):
+            with pytest.raises(ValueError, match=match):
+                build(ansatz)
+            assert (ansatz.num_layers, ansatz.num_params) == (1, 4)
+        # Another type keeps its `TypeError`.
+        with pytest.raises(TypeError):
+            ansatz.strongly_entangling("3")
+        with pytest.raises(TypeError):
+            ansatz.strongly_entangling(1, ranges=["1"])
+
+    def test_it_is_an_ansatz_layer_only(self):
+        from polypus.qml import Encoder
+
+        assert not hasattr(Encoder(2), "strongly_entangling")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Encoders
 # ─────────────────────────────────────────────────────────────────────────────
 

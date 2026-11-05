@@ -38,7 +38,7 @@ use crate::error::{QmlError, ValidationError};
 use crate::jacobian::{ExpectationJacobian, JacobianWrt};
 use crate::layers::{
     AmplitudeEncoder, AngleEncoder, BasisEncoder, ConvBlock, ConvLayer, HardwareEfficientAnsatz,
-    IqpEncoder, Layer, PoolBlock, PoolLayer, RotationAxis,
+    IqpEncoder, Layer, PoolBlock, PoolLayer, RotationAxis, StronglyEntanglingAnsatz,
 };
 use crate::observables::{BitstringWeight, Pauli, ResolvedObservable, ResolvedPauliString};
 use crate::readout::{Decision, Readout, ResolvedReadout};
@@ -265,6 +265,14 @@ impl QuantumModel {
     /// repetitions.
     pub fn hardware_efficient(self, reps: usize) -> Self {
         self.layer(Layer::HardwareEfficient(HardwareEfficientAnsatz::new(reps)))
+    }
+
+    /// Sugar for a default [`StronglyEntanglingAnsatz::new`] with `reps`
+    /// layers (PennyLane's default ranges, `Cx` entanglers).
+    pub fn strongly_entangling(self, reps: usize) -> Self {
+        self.layer(Layer::StronglyEntangling(StronglyEntanglingAnsatz::new(
+            reps,
+        )))
     }
 
     /// Sugar for `.layer(Layer::Conv(ConvLayer::new(block)))`, with the default
@@ -1441,10 +1449,10 @@ mod serde_tests {
     use crate::readout::{Decision, Readout};
 
     /// A model exercising the entire serializable type tree: angle encoder, IQP
-    /// encoder, convolution, pooling, a hardware-efficient ansatz, and a
-    /// multi-observable readout whose first observable is a weighted two-term sum
-    /// with a `Z₀Z₁` string (so coefficients ≠ 1 and multi-factor strings both
-    /// round-trip).
+    /// encoder, convolution, pooling, a hardware-efficient ansatz, a strongly
+    /// entangling ansatz with explicit ranges and `Cz`, and a multi-observable
+    /// readout whose first observable is a weighted two-term sum with a `Z₀Z₁`
+    /// string (so coefficients ≠ 1 and multi-factor strings both round-trip).
     fn full_model() -> CompiledModel {
         let readout = Readout::new(
             vec![
@@ -1470,6 +1478,11 @@ mod serde_tests {
             .conv(ConvBlock::Basic)
             .pool(PoolBlock::Basic)
             .hardware_efficient(1)
+            .layer(Layer::StronglyEntangling(StronglyEntanglingAnsatz {
+                reps: 2,
+                ranges: Some(vec![1, 1]),
+                entangler: crate::layers::Entangler::Cz,
+            }))
             .readout(readout)
             .compile(4)
             .unwrap()
@@ -1676,6 +1689,49 @@ mod serde_tests {
         })
         .unwrap_err();
         assert!(err.contains("params has"), "{err}");
+    }
+
+    /// The strongly entangling layer of a saved `full_trained`, as JSON.
+    fn strongly_entangling_entry(value: &mut serde_json::Value) -> &mut serde_json::Value {
+        value["spec"]["layers"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find_map(|layer| layer.get_mut("StronglyEntangling"))
+            .expect("full_model has a strongly entangling layer")
+    }
+
+    #[test]
+    fn the_strongly_entangling_layer_saves_its_fields() {
+        let mut value = serde_json::to_value(full_trained()).unwrap();
+        assert_eq!(value["version"], 1);
+        assert_eq!(
+            *strongly_entangling_entry(&mut value),
+            serde_json::json!({"reps": 2, "ranges": [1, 1], "entangler": "Cz"})
+        );
+    }
+
+    #[test]
+    fn loading_revalidates_the_strongly_entangling_ranges() {
+        // Pooling leaves 2 active qubits, so the only valid range is 1: an
+        // edited range of 2 would make a qubit its own target.
+        let err =
+            load_edited(|v| strongly_entangling_entry(v)["ranges"] = serde_json::json!([1, 2]))
+                .unwrap_err();
+        assert!(
+            err.contains("range 2 of layer 1") && err.contains("2 active"),
+            "{err}"
+        );
+        // One range per layer.
+        let err = load_edited(|v| strongly_entangling_entry(v)["ranges"] = serde_json::json!([1]))
+            .unwrap_err();
+        assert!(err.contains("reps is 2"), "{err}");
+        // Dropping `ranges` altogether is the default ranges, still valid.
+        let loaded = load_edited(|v| {
+            strongly_entangling_entry(v)["ranges"] = serde_json::Value::Null;
+        })
+        .unwrap();
+        assert_eq!(loaded.params(), full_trained().params());
     }
 
     #[test]

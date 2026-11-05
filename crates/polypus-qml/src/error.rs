@@ -150,6 +150,27 @@ pub enum ValidationError {
         /// The number of active qubits available at this position.
         active: usize,
     },
+    /// A [`StronglyEntanglingAnsatz`](crate::StronglyEntanglingAnsatz) was
+    /// given explicit `ranges` whose count is not its number of layers: there
+    /// must be exactly one range per layer. Raised by its `plan`.
+    StronglyEntanglingRangesLength {
+        /// The number of layers (`reps`).
+        reps: usize,
+        /// The number of ranges given.
+        got: usize,
+    },
+    /// A [`StronglyEntanglingAnsatz`](crate::StronglyEntanglingAnsatz) range
+    /// lies outside `1..=n-1` for the `n` active qubits at its position (a
+    /// range of `0` or `n` would entangle a qubit with itself). Raised by its
+    /// `plan`, and only for `n ≥ 2`: one active qubit gets no entanglers.
+    StronglyEntanglingRangeOutOfBounds {
+        /// The layer (0-based) the range belongs to.
+        layer: usize,
+        /// The offending range.
+        range: usize,
+        /// The number of active qubits at this position.
+        active: usize,
+    },
     /// An [`AmplitudeEncoder`](crate::AmplitudeEncoder) was placed anywhere but
     /// first in the model. It prepares a state from `|0…0⟩` rather than
     /// transforming an existing one, so it cannot compose on top of earlier
@@ -355,6 +376,19 @@ impl fmt::Display for ValidationError {
             ValidationError::PoolNeedsTwoQubits { active } => write!(
                 f,
                 "pooling layer needs at least 2 active qubit(s) but only {active} are available"
+            ),
+            ValidationError::StronglyEntanglingRangesLength { reps, got } => write!(
+                f,
+                "strongly entangling ranges has {got} value(s), but reps is {reps}: give one range per layer"
+            ),
+            ValidationError::StronglyEntanglingRangeOutOfBounds {
+                layer,
+                range,
+                active,
+            } => write!(
+                f,
+                "strongly entangling range {range} of layer {layer} is out of bounds: with {active} active qubit(s) every range must lie in 1..={}",
+                active.saturating_sub(1)
             ),
             ValidationError::AmplitudeEncoderNotFirst => write!(
                 f,
@@ -801,6 +835,25 @@ mod tests {
         assert!(ValidationError::PoolNeedsTwoQubits { active: 1 }
             .to_string()
             .contains('1'));
+    }
+
+    #[test]
+    fn strongly_entangling_variants_display_their_values() {
+        let s = ValidationError::StronglyEntanglingRangesLength { reps: 3, got: 2 }.to_string();
+        assert!(s.contains("reps is 3") && s.contains("2 value(s)"), "{s}");
+        let s = ValidationError::StronglyEntanglingRangeOutOfBounds {
+            layer: 1,
+            range: 4,
+            active: 4,
+        }
+        .to_string();
+        assert!(
+            s.contains("range 4")
+                && s.contains("layer 1")
+                && s.contains("4 active")
+                && s.contains("1..=3"),
+            "{s}"
+        );
     }
 
     #[test]

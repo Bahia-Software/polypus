@@ -3,8 +3,9 @@
 //! These assert the crate-level invariants that no single unit test covers,
 //! against a catalogue that varies the encoder, rotations, entangler,
 //! entanglement, the final rotation layer, and qubit counts (including the
-//! 1-qubit case where entanglement is a no-op, and a stack of two IQP encoders
-//! around an ansatz — the data re-uploading pattern):
+//! 1-qubit case where entanglement is a no-op, a stack of two IQP encoders
+//! around an ansatz — the data re-uploading pattern — and the strongly
+//! entangling ansatz, with default and explicit ranges):
 //!
 //! - **C-4** (terminal measurement): every emitted template is terminal.
 //! - **C-2** (gate vocabulary / QASM round-trip): a bound circuit's QASM is a
@@ -31,7 +32,7 @@ use std::collections::HashMap;
 use polypus_qml::{
     CompiledModel, Dataset, Decision, Entanglement, Entangler, HardwareEfficientAnsatz, IqpEncoder,
     Layer, Loss, Observable, Pauli, PauliString, QmlProblem, QuantumModel, Readout, RotationAxis,
-    ValidationError,
+    StronglyEntanglingAnsatz, ValidationError,
 };
 
 /// A minimal `⟨Z₀⟩` / `Sign` readout, valid for every catalogue model (all
@@ -147,6 +148,32 @@ fn catalogue() -> Vec<(CompiledModel, Vec<Vec<f64>>)> {
                 .hardware_efficient(1)
                 .layer(Layer::Iqp(IqpEncoder {
                     entanglement: Entanglement::Circular,
+                }))
+                .readout(z0_readout())
+                .compile(3)
+                .unwrap(),
+            samples(3),
+        ),
+        // 8. 4 qubits: Ry encoder + strongly_entangling(3) (default ranges
+        //    1, 2, 3; Rz·Ry·Rz per qubit, Cx ring).
+        (
+            QuantumModel::new(4)
+                .angle_encoder(RotationAxis::Ry)
+                .strongly_entangling(3)
+                .readout(z0_readout())
+                .compile(4)
+                .unwrap(),
+            samples(4),
+        ),
+        // 9. 3 qubits: Rx encoder + strongly entangling {reps 2, ranges [2, 1],
+        //    Cz}.
+        (
+            QuantumModel::new(3)
+                .angle_encoder(RotationAxis::Rx)
+                .layer(Layer::StronglyEntangling(StronglyEntanglingAnsatz {
+                    reps: 2,
+                    ranges: Some(vec![2, 1]),
+                    entangler: Entangler::Cz,
                 }))
                 .readout(z0_readout())
                 .compile(3)

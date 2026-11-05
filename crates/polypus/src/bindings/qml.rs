@@ -31,7 +31,7 @@ use polypus_qml::{
     AngleEncoder, CompiledModel, ConvBlock, ConvLayer, Decision, Entanglement, Entangler,
     ExpectationJacobian, HardwareEfficientAnsatz, IqpEncoder, JacobianWrt, KeepRule, Layer, Loss,
     Observable, Pairing, Pauli, PauliString, PoolBlock, PoolLayer, QmlError, QmlProblem,
-    QuantumModel, Readout, RotationAxis, ValidationError,
+    QuantumModel, Readout, RotationAxis, StronglyEntanglingAnsatz, ValidationError,
 };
 
 use super::callback::validate_callback;
@@ -662,6 +662,30 @@ impl Ansatz {
         Ok(slf)
     }
 
+    /// Append PennyLane's `StronglyEntanglingLayers`: `reps` layers, each a
+    /// general rotation `Rot(φ, θ, ω)`, applied as `Rz(φ)`, then `Ry(θ)`, then
+    /// `Rz(ω)`, on every active qubit (three parameters per qubit) followed by
+    /// an `entangler` (`"cx"`, the default, or `"cz"`) from every position `i`
+    /// to `(i + r) mod n`. `ranges` gives each layer's `r`, one per layer and
+    /// each in `1..=n-1` for the `n` qubits active at this point; `None` is
+    /// PennyLane's default, `r = (layer mod (n-1)) + 1`. A single active qubit
+    /// gets no entanglers.
+    #[pyo3(signature = (reps, ranges=None, entangler="cx"))]
+    fn strongly_entangling<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        reps: CountArg,
+        ranges: Option<Vec<CountArg>>,
+        entangler: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let layer = Layer::StronglyEntangling(StronglyEntanglingAnsatz {
+            reps: reps.0,
+            ranges: ranges.map(|ranges| ranges.into_iter().map(|range| range.0).collect()),
+            entangler: parse_entangler(entangler)?,
+        });
+        slf.stack.push(layer)?;
+        Ok(slf)
+    }
+
     /// Append a QCNN convolution: one `block` (`"basic"`, 4 parameters, or
     /// `"cartan"`, 3) shared by every pair of active qubits that `pairing`
     /// selects (`"even_pairs"`/`"odd_pairs"`/`"alternating"`, default
@@ -952,7 +976,10 @@ fn loads_data(layer: &Layer) -> bool {
         Layer::AngleEncoder(_) | Layer::AmplitudeEncoder(_) | Layer::Iqp(_) | Layer::Basis(_) => {
             true
         }
-        Layer::HardwareEfficient(_) | Layer::Conv(_) | Layer::Pool(_) => false,
+        Layer::HardwareEfficient(_)
+        | Layer::StronglyEntangling(_)
+        | Layer::Conv(_)
+        | Layer::Pool(_) => false,
     }
 }
 
@@ -2636,6 +2663,17 @@ mod tests {
             .unwrap(),
             4
         );
+        // Three per qubit per layer, after pooling too (4 → 2 qubits).
+        let strongly = || Layer::StronglyEntangling(StronglyEntanglingAnsatz::new(2));
+        assert_eq!(check_layers(3, &[strongly()]).unwrap(), 18);
+        assert_eq!(
+            check_layers(
+                4,
+                &[Layer::Pool(PoolLayer::new(PoolBlock::Basic)), strongly()]
+            )
+            .unwrap(),
+            3 + 12
+        );
     }
 
     #[test]
@@ -2688,6 +2726,9 @@ mod tests {
         assert!(!loads_data(&Layer::HardwareEfficient(
             HardwareEfficientAnsatz::new(1)
         )));
+        assert!(!loads_data(&Layer::StronglyEntangling(
+            StronglyEntanglingAnsatz::new(1)
+        )));
         assert!(!loads_data(&Layer::Conv(ConvLayer::new(ConvBlock::Basic))));
         assert!(!loads_data(&Layer::Pool(PoolLayer::new(PoolBlock::Basic))));
     }
@@ -2705,6 +2746,21 @@ mod tests {
         let pool = || Layer::Pool(PoolLayer::new(PoolBlock::Basic));
         assert!(check_layers(2, &[pool()]).is_ok());
         assert!(check_layers(2, &[pool(), pool()]).is_err());
+        // A strongly entangling range must lie in 1..=n-1 for the qubits still
+        // active: 3 is valid on 4 qubits, not on the 2 left after pooling.
+        let ranges = |ranges: Vec<usize>| {
+            Layer::StronglyEntangling(StronglyEntanglingAnsatz {
+                ranges: Some(ranges),
+                ..StronglyEntanglingAnsatz::new(1)
+            })
+        };
+        assert!(check_layers(4, &[ranges(vec![3])]).is_ok());
+        assert!(check_layers(4, &[pool(), ranges(vec![3])]).is_err());
+        assert!(check_layers(4, &[ranges(vec![0])]).is_err());
+        assert!(check_layers(4, &[ranges(vec![1, 1])]).is_err());
+        // 3 × 4 qubits × reps parameters that do not fit: an error, not a panic.
+        let huge = Layer::StronglyEntangling(StronglyEntanglingAnsatz::new(usize::MAX / 4));
+        assert!(check_layers(4, &[huge]).is_err());
     }
 
     #[test]

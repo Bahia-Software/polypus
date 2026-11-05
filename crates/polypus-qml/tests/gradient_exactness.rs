@@ -20,8 +20,9 @@ use std::collections::HashMap;
 
 use polypus_circuit::ConcreteCircuit;
 use polypus_qml::{
-    ConvBlock, Dataset, Decision, HardwareEfficientAnsatz, Layer, Loss, Observable, Pauli,
-    PauliString, PoolBlock, QmlProblem, QuantumModel, Readout, RotationAxis,
+    ConvBlock, Dataset, Decision, Entangler, HardwareEfficientAnsatz, Layer, Loss, Observable,
+    Pauli, PauliString, PoolBlock, QmlProblem, QuantumModel, Readout, RotationAxis,
+    StronglyEntanglingAnsatz,
 };
 use polypus_sim::{Simulator, StatevectorSimulator};
 
@@ -156,6 +157,33 @@ fn hardware_efficient_gradient_is_exact() {
     }
 }
 
+/// `Rot(φ, θ, ω)` is three Pauli rotations with a parameter each, so every
+/// parameter still enters once. The ring entanglers carry the rotations of
+/// every qubit into the `Z₁` light cone.
+#[test]
+fn strongly_entangling_gradient_is_exact() {
+    for readout in [raw_readout(&[1]), raw_readout(&[0, 1, 2, 3])] {
+        let model = encoded(4).strongly_entangling(3).readout(readout);
+        assert_gradient_is_exact(&problem(model, Loss::SquaredError, &REAL_LABELS));
+    }
+}
+
+#[test]
+fn strongly_entangling_with_explicit_ranges_and_cz_keeps_the_gradient_exact() {
+    for entangler in [Entangler::Cx, Entangler::Cz] {
+        for readout in [raw_readout(&[1]), raw_readout(&[0, 1, 2, 3])] {
+            let model = encoded(4)
+                .layer(Layer::StronglyEntangling(StronglyEntanglingAnsatz {
+                    reps: 2,
+                    ranges: Some(vec![3, 2]),
+                    entangler,
+                }))
+                .readout(readout);
+            assert_gradient_is_exact(&problem(model, Loss::SquaredError, &REAL_LABELS));
+        }
+    }
+}
+
 #[test]
 fn stacked_iqp_encoders_around_an_ansatz_keep_the_gradient_exact() {
     let model = QuantumModel::new(4)
@@ -208,6 +236,21 @@ fn pooling_gradient_is_exact() {
         let model = encoded(4)
             .conv(ConvBlock::Basic)
             .pool(PoolBlock::Basic)
+            .readout(readout);
+        assert_gradient_is_exact(&problem(model, Loss::SquaredError, &REAL_LABELS));
+    }
+}
+
+/// After pooling the layer runs over the two surviving qubits (logical
+/// positions 0 and 1 are physical 0 and 2), behind the shared convolution and
+/// pooling parameters.
+#[test]
+fn strongly_entangling_after_pooling_keeps_the_gradient_exact() {
+    for readout in [raw_readout(&[1]), raw_readout(&[0, 1])] {
+        let model = encoded(4)
+            .conv(ConvBlock::Basic)
+            .pool(PoolBlock::Basic)
+            .strongly_entangling(2)
             .readout(readout);
         assert_gradient_is_exact(&problem(model, Loss::SquaredError, &REAL_LABELS));
     }
