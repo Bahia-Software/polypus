@@ -4,7 +4,8 @@
 //! coefficients; a term is the product of its operators, expanded with
 //! [`PauliString::mul`]. The complex sum is accumulated and, since a
 //! Hermitian operator has real Pauli coefficients, every imaginary part must
-//! vanish to within [`HERMITICITY_TOLERANCE`].
+//! vanish to within [`HERMITICITY_TOLERANCE`] times the operator's scale
+//! `Σ_t |c_t|`.
 //!
 //! On `n` modes, with the sign convention of [`super::fermion`]:
 //!
@@ -23,9 +24,16 @@ use super::fermion::{FermionOperator, Ladder};
 use super::pauli::{PauliAxis, PauliString, PauliSum, PauliTerm};
 use crate::error::PhysicsError;
 
-/// Largest imaginary part accepted on a mapped Pauli coefficient. Above it
-/// the operator is not Hermitian and [`FermionOperator::to_qubits`] fails;
-/// below it the imaginary part is rounding noise and is dropped.
+/// Largest imaginary part accepted on a mapped Pauli coefficient, relative to
+/// the operator's scale `Σ_t |c_t|` (the sum of the absolute values of its
+/// term coefficients). Above it the operator is not Hermitian and
+/// [`FermionOperator::to_qubits`] fails; below it the imaginary part is
+/// rounding noise and is dropped.
+///
+/// Relative because rounding grows with the coefficients: with integrals of
+/// ~100 Ha (FCIDUMP inputs) an absolute bound could reject a valid
+/// Hamiltonian (#562). A non-Hermitian operator leaves imaginary parts of the
+/// order of its coefficients (`a†₀a₁` alone gives `±c/4`), far above it.
 pub const HERMITICITY_TOLERANCE: f64 = 1e-12;
 
 /// A complex number `(re, im)`.
@@ -142,8 +150,8 @@ impl FermionOperator {
     ///
     /// # Errors
     /// [`PhysicsError::UnsupportedOperation`] if a mapped coefficient has an
-    /// imaginary part above [`HERMITICITY_TOLERANCE`], i.e. the operator is
-    /// not Hermitian and has no real Pauli sum.
+    /// imaginary part above [`HERMITICITY_TOLERANCE`]` · Σ_t |c_t|`, i.e. the
+    /// operator is not Hermitian and has no real Pauli sum.
     pub fn to_qubits(&self, mapping: QubitMapping) -> Result<PauliSum, PhysicsError> {
         let n = self.num_modes();
         // The 2n distinct ladder operators, built once: ladders[p][0] is a†_p,
@@ -183,9 +191,11 @@ impl FermionOperator {
                 entry.1 += c.1;
             }
         }
+        let scale: f64 = self.terms().iter().map(|t| t.coefficient.abs()).sum();
+        let tolerance = HERMITICITY_TOLERANCE * scale;
         let mut terms = Vec::with_capacity(accumulated.len());
         for (string, (re, im)) in accumulated {
-            if im.abs() > HERMITICITY_TOLERANCE {
+            if im.abs() > tolerance {
                 return Err(PhysicsError::UnsupportedOperation {
                     message: format!(
                         "operator is not Hermitian: {string} has imaginary coefficient {im}"
@@ -385,6 +395,39 @@ mod tests {
                 .to_string(),
             "+0.5 X0 X1\n+0.5 Y0 Y1"
         );
+    }
+
+    #[test]
+    fn hermiticity_tolerance_scales_with_the_coefficients() {
+        // c a†₀a₁ + (c + δ) a†₁a₀ leaves an imaginary part ±δ/4 on X0 Y1 and
+        // Y0 X1. With c = 100, δ = 1e-11 is rounding at that scale: ±2.5e-12,
+        // which the old absolute bound of 1e-12 rejected (#562), but below
+        // 1e-12 · Σ|c| = 2e-10. δ = 1e-6 (±2.5e-7) is a non-Hermitian operator.
+        let hopping = |delta: f64| {
+            FermionOperator::new(
+                2,
+                vec![
+                    FermionTerm::new(100.0, vec![(0, Create), (1, Annihilate)]),
+                    FermionTerm::new(100.0 + delta, vec![(1, Create), (0, Annihilate)]),
+                ],
+            )
+            .unwrap()
+        };
+        for mapping in [QubitMapping::JordanWigner, QubitMapping::Parity] {
+            let h = hopping(1e-11).to_qubits(mapping).unwrap();
+            assert_eq!(h.terms().len(), 2, "{mapping:?}: {h}");
+            assert!(matches!(
+                hopping(1e-6).to_qubits(mapping),
+                Err(PhysicsError::UnsupportedOperation { .. })
+            ));
+        }
+        let jw = hopping(1e-11)
+            .to_qubits(QubitMapping::JordanWigner)
+            .unwrap();
+        // The real parts are the Hermitian average, (2c + δ)/4 each.
+        let expected = (200.0 + 1e-11) / 4.0;
+        assert!((coefficient(&jw, "X0 X1") - expected).abs() < 1e-13);
+        assert!((coefficient(&jw, "Y0 Y1") - expected).abs() < 1e-13);
     }
 
     #[test]

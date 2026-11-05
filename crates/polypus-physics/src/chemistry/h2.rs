@@ -141,16 +141,7 @@ fn molecular_hamiltonian(r: f64) -> Result<FermionHamiltonian, PhysicsError> {
     let (pa, pb) = ([0.0; 3], [0.0, 0.0, r]);
     let a = ContractedGaussian::sto3g_hydrogen_1s(pa)?;
     let b = ContractedGaussian::sto3g_hydrogen_1s(pb)?;
-    let nuclei = [
-        Nucleus {
-            position: pa,
-            charge: 1.0,
-        },
-        Nucleus {
-            position: pb,
-            charge: 1.0,
-        },
-    ];
+    let nuclei = [Nucleus::new(pa, 1.0)?, Nucleus::new(pb, 1.0)?];
     let ao = [&a, &b];
 
     let s = overlap(&a, &b);
@@ -330,7 +321,7 @@ mod tests {
         assert!((h2.bond_length_bohr() - 0.7414 / BOHR_RADIUS_ANGSTROM).abs() < 1e-15);
         assert_eq!(h2.encoding(), H2Encoding::JordanWigner);
         // σ–σ* one-body coupling vanishes by symmetry (up to rounding).
-        assert!(h2.fermion_hamiltonian().one_body(0, 1).abs() < 1e-15);
+        assert!(h2.fermion_hamiltonian().one_body(0, 1).unwrap().abs() < 1e-15);
     }
 
     /// Rows of a CSV file in `reference-data/h2-sto3g/` (generated with
@@ -374,7 +365,7 @@ mod tests {
             assert_eq!(ours_strings, expected_strings, "R = {r} Å: Pauli strings");
             for (s, c) in expected {
                 assert!(
-                    (ours[s] - c).abs() <= 1e-6,
+                    (ours[s] - c).abs() <= 1e-10,
                     "R = {r} Å, {s}: {} vs {c}",
                     ours[s]
                 );
@@ -392,7 +383,7 @@ mod tests {
             for encoding in ENCODINGS {
                 let e = ground(r, encoding);
                 assert!(
-                    (e - fci).abs() <= 1e-8,
+                    (e - fci).abs() <= 1e-10,
                     "R = {r} Å, {encoding:?}: {e} vs {fci}"
                 );
             }
@@ -402,7 +393,7 @@ mod tests {
     /// Closed-shell Hartree–Fock energy `2 h_σσ + (σσ|σσ) + E_nuc`.
     fn hartree_fock_energy(h2: &H2Molecule) -> f64 {
         let f = h2.fermion_hamiltonian();
-        2.0 * f.one_body(0, 0) + f.two_body(0, 0, 0, 0) + f.nuclear_repulsion()
+        2.0 * f.one_body(0, 0).unwrap() + f.two_body(0, 0, 0, 0).unwrap() + f.nuclear_repulsion()
     }
 
     #[test]
@@ -415,7 +406,7 @@ mod tests {
             let hf: f64 = row[1].parse().unwrap();
             let h2 = H2Molecule::new(r, H2Encoding::JordanWigner).unwrap();
             let e = hartree_fock_energy(&h2);
-            assert!((e - hf).abs() <= 1e-8, "R = {r} Å: {e} vs {hf}");
+            assert!((e - hf).abs() <= 1e-10, "R = {r} Å: {e} vs {hf}");
             // The same energy is the qubit Hamiltonian's diagonal at the
             // Hartree–Fock state |0101⟩ (σ↑ and σ↓ occupied, block order).
             let diagonal = h2

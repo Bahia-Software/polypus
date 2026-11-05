@@ -47,11 +47,13 @@ Entries were curated from the Conventional Commits history. Releases before
   `hamiltonians`: `PauliString` (text form `"X0 X1 Y2 Y3"`, product with a
   `Phase`), `PauliSum::new`/`simplified`/`chop`; `PauliSum::to_dense_real`,
   `eigenvalues` and `ground_energy` (little-endian basis, up to
-  `MAX_DENSE_QUBITS` = 10, real matrices only); `FermionOperator` and
+  `MAX_DENSE_QUBITS` = 10, real matrices only; symmetric to within
+  `SYMMETRY_TOLERANCE` relative to the largest entry); `FermionOperator` and
   `FermionHamiltonian` from spatial integrals (spin-orbitals in block order;
   integral symmetries checked to `INTEGRAL_SYMMETRY_TOLERANCE` and
   symmetrized); `FermionOperator::to_qubits` with `QubitMapping::JordanWigner`
-  or `Parity`; `PauliSum::taper` and `parity_reduction_qubits`, which fix the
+  or `Parity` (Hermitian to within `HERMITICITY_TOLERANCE` times the sum of
+  the operator's |coefficients|); `PauliSum::taper` and `parity_reduction_qubits`, which fix the
   parities of `N↑` and `N`, not their values (exact for H₂; sector
   diagonalization for larger molecules is #535). A new `chemistry` module:
   STO-3G integrals over normalized s-type contracted Gaussians and
@@ -67,6 +69,10 @@ Entries were curated from the Conventional Commits history. Releases before
   qubit (`qubit`, `axis`), and `PauliSum`'s fields are private: build it with
   `PauliSum::new`, which validates, and read it with `num_qubits()` and
   `terms()` (#529).
+- **BREAKING (Rust):** `PauliAxis`, `PauliTerm` and `PauliSum` moved from
+  `hamiltonians::photon_polarization` to `hamiltonians::pauli`; the old
+  paths `hamiltonians::photon_polarization::{PauliAxis, PauliTerm, PauliSum}`
+  no longer exist. Import them from `polypus_physics::hamiltonians` (#529).
 - **BREAKING (Rust):** `photon_polarization_hamiltonian` returns
   `Result<PauliSum, PhysicsError>`, rejecting non-finite parameters (#529).
 - **BREAKING (Rust):** `polypus_physics::error::PhysicsError` has new

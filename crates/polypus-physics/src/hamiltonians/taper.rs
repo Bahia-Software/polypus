@@ -133,8 +133,8 @@ impl PauliSum {
 /// ```
 ///
 /// # Errors
-/// [`PhysicsError::UnsupportedOperation`] if `num_spatial` is 0 or an
-/// electron count exceeds `num_spatial`.
+/// [`PhysicsError::UnsupportedOperation`] if `num_spatial` is 0 or so large
+/// that `2K` overflows `usize`, or an electron count exceeds `num_spatial`.
 pub fn parity_reduction_qubits(
     num_spatial: usize,
     n_up: usize,
@@ -148,10 +148,16 @@ pub fn parity_reduction_qubits(
             ),
         });
     }
+    let Some(num_modes) = num_spatial.checked_mul(2) else {
+        return Err(PhysicsError::UnsupportedOperation {
+            message: format!("{num_spatial} spatial orbitals: 2K spin-orbitals overflow usize"),
+        });
+    };
     let sign = |count: usize| if count % 2 == 0 { 1 } else { -1 };
+    // n_up, n_down ≤ K, so their sum cannot overflow once 2K does not.
     Ok(vec![
         (num_spatial - 1, sign(n_up)),
-        (2 * num_spatial - 1, sign(n_up + n_down)),
+        (num_modes - 1, sign(n_up + n_down)),
     ])
 }
 
@@ -286,5 +292,8 @@ mod tests {
         assert_eq!(parity_reduction_qubits(3, 2, 1).unwrap(), [(2, 1), (5, -1)]);
         assert!(parity_reduction_qubits(0, 0, 0).is_err());
         assert!(parity_reduction_qubits(2, 3, 0).is_err());
+        // 2K would overflow: an error, not a panic or a wrapped qubit index.
+        assert!(parity_reduction_qubits(usize::MAX / 2 + 1, 0, 0).is_err());
+        assert!(parity_reduction_qubits(usize::MAX / 2, 0, 0).is_ok());
     }
 }
