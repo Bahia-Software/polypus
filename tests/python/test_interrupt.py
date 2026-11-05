@@ -561,6 +561,56 @@ def test_native_qml_jacobian_responds_to_sigint_promptly(exact):
     )
 
 
+# The exact `qml.jacobian` runs a block as adjoint differentiations on rayon's
+# threads (#503), where a Ctrl+C cannot be seen; the calling thread watches for
+# one while they run and stops them in flight. Here the very first block is a
+# few 23-qubit rows, each an adjoint run of several seconds on its own, so only
+# a stop *inside* the block can answer within the deadline: the check between
+# blocks would come too late. The warm-up is a small model, so the native path
+# is loaded without paying for one of these rows.
+_ADJOINT_ONE_BLOCK_CHILD = r"""
+import sys, time
+import polypus
+from polypus import qml
+
+small = qml.Model(
+    qml.Encoder(2).angle_encoder("ry"),
+    qml.Ansatz(2).hardware_efficient(1),
+    qml.Readout([qml.Z(0)]),
+)
+qml.jacobian(small, [[0.1, 0.2]], [0.1] * small.num_params, exact=True)
+
+model = qml.Model(
+    qml.Encoder(23).angle_encoder("ry"),
+    qml.Ansatz(23).hardware_efficient(3),
+    qml.Readout([qml.Z(0)]),
+)
+params = [0.1 * (i % 5) for i in range(model.num_params)]
+x = [[0.1 * ((i + j) % 7) for j in range(23)] for i in range(64)]
+
+print("READY", flush=True)
+start = time.time()
+try:
+    qml.jacobian(model, x, params, exact=True)
+    print("COMPLETED", flush=True)
+except KeyboardInterrupt:
+    print(f"KEYBOARDINTERRUPT {time.time() - start:.3f}", flush=True)
+except BaseException as exc:
+    print(f"OTHER {type(exc).__name__}", flush=True)
+    sys.exit(1)
+"""
+
+
+def test_an_exact_adjoint_jacobian_stops_inside_a_block():
+    _assert_responds_to_sigint_promptly(
+        _ADJOINT_ONE_BLOCK_CHILD,
+        failure_hint=(
+            "qml.jacobian(exact=True) with long adjoint runs — the calling "
+            "thread is likely not watching for Ctrl+C while the block runs"
+        ),
+    )
+
+
 # After a minibatched run, the optimizer's `best_fitness` is re-scored on the
 # whole training set (C-5): one full-set evaluation after the loop, the heaviest
 # single step of such a run. It must run with the GIL released, like the rest of

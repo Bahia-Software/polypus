@@ -14,8 +14,9 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use numpy::ndarray::{Array2, Array3, ShapeError};
 use numpy::{IntoPyArray, PyArray2};
@@ -48,8 +49,8 @@ use crate::evaluation::{
 use crate::exceptions::configuration_error;
 use crate::infrastructure::execution_config::random_seed;
 use crate::infrastructure::{
-    BoundCircuit, CancelToken, Counts, ExecutionConfig, Infrastructure, InfrastructureError,
-    NativeStatevectorBackend, OptLevel, QuantumBackend, RunParams,
+    AdjointTask, BoundCircuit, CancelToken, Counts, ExecutionConfig, Infrastructure,
+    InfrastructureError, NativeStatevectorBackend, OptLevel, QuantumBackend, RunParams,
 };
 use crate::orchestration::{Resources, RunCircuitFlow, Scheduler, TrainFlow};
 
@@ -2020,6 +2021,18 @@ trait Primitive {
     fn circuits(&self, samples: Range<usize>) -> Result<Vec<ConcreteCircuit>, PrimitiveError>;
     /// Read the results of [`circuits`](Self::circuits)`(samples)`.
     fn read(&mut self, samples: Range<usize>, results: BlockResults) -> Result<(), PrimitiveError>;
+    /// Run the block `samples` on the exact native backend by another route
+    /// than [`circuits`](Self::circuits), reading its results as it goes, or
+    /// `None` to run the circuits (the default). The Jacobian's route is the
+    /// adjoint (#503); `cancel` must be honoured as between blocks.
+    fn run_exact_block(
+        &mut self,
+        _native: &NativeStatevectorBackend,
+        _samples: Range<usize>,
+        _cancel: &CancelToken,
+    ) -> Option<Result<(), PrimitiveError>> {
+        None
+    }
 }
 
 /// The detached part of a primitive call: create its one runner, size the
@@ -2063,6 +2076,13 @@ fn run_blocks_on(
             .poll_interrupt()
             .map_err(PrimitiveError::Infrastructure)?;
         let end = start.saturating_add(block).min(num_samples);
+        if let BlockRunner::Exact { native, .. } = runner {
+            if let Some(outcome) = primitive.run_exact_block(native, start..end, cancel) {
+                outcome?;
+                start = end;
+                continue;
+            }
+        }
         let circuits = primitive
             .circuits(start..end)?
             .into_iter()
@@ -2179,10 +2199,126 @@ impl Primitive for JacobianRun {
                 block.jacobian_from_probabilities(probabilities)?
             }
         };
+        self.keep(jacobian);
+        Ok(())
+    }
+
+    /// The exact Jacobian by adjoint differentiation (#503): one run per sample
+    /// and observable, two statevectors each, instead of `2 · shifts` circuits
+    /// per sample. When the memory budget holds one statevector of the width
+    /// but not two, `None`: the shifted circuits run instead (the backend logs
+    /// it). A Ctrl+C or a cancellation stops a run in flight ([`watched`]).
+    fn run_exact_block(
+        &mut self,
+        native: &NativeStatevectorBackend,
+        samples: Range<usize>,
+        cancel: &CancelToken,
+    ) -> Option<Result<(), PrimitiveError>> {
+        let Some(block) = self.plan.block(samples.clone()) else {
+            return Some(Err(PrimitiveError::block_out_of_range(
+                &samples,
+                self.plan.num_samples(),
+            )));
+        };
+        let runs = match block.adjoint_runs(&self.params) {
+            Ok(runs) => runs,
+            Err(e) => return Some(Err(e.into())),
+        };
+        let width = runs
+            .iter()
+            .map(|run| run.circuit.num_qubits())
+            .max()
+            .unwrap_or(0);
+        match native.adjoint_fits(width) {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(e) => return Some(Err(PrimitiveError::Infrastructure(e.into()))),
+        }
+        let tasks: Vec<AdjointTask<'_, _>> = runs
+            .iter()
+            .map(|run| AdjointTask {
+                circuit: &run.circuit,
+                wrt: &run.wrt,
+                weight: move |b: usize| run.observable.weight(b),
+            })
+            .collect();
+        let derivatives = watched(cancel, |stop| {
+            native.run_adjoint(&tasks, Some(&|| stop.load(Ordering::Relaxed)))
+        });
+        let derivatives = match derivatives {
+            Ok(Ok(derivatives)) => derivatives,
+            Ok(Err(e)) => return Some(Err(PrimitiveError::Infrastructure(e.into()))),
+            Err(e) => return Some(Err(e)),
+        };
+        Some(
+            block
+                .jacobian_from_adjoint(&derivatives)
+                .map(|jacobian| self.keep(jacobian))
+                .map_err(PrimitiveError::from),
+        )
+    }
+}
+
+impl JacobianRun {
+    /// Append a block's Jacobian, in sample order.
+    fn keep(&mut self, jacobian: polypus_qml::Jacobian) {
         let (by_params, by_inputs) = jacobian.into_parts();
         self.by_params.extend(by_params.unwrap_or_default());
         self.by_inputs.extend(by_inputs.unwrap_or_default());
-        Ok(())
+    }
+}
+
+/// How often [`watched`] looks for a cancellation or a Ctrl+C: the simulator's
+/// own floor between two calls of its cancellation hook, so a Ctrl+C is
+/// honoured within about a frame.
+const WATCH_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Run `work` on a scoped thread while this thread watches `cancel`: its
+/// cooperative cancellation and its interrupt guard (at the edge, a pending
+/// Ctrl+C: the guard attaches and calls `check_signals`, which only works on
+/// the thread that called into Polypus — this one — and is a no-op on the
+/// rayon threads an adjoint batch runs on). On either, `stop` is set for
+/// `work`'s cancellation hook to see, and once `work` returns, the reason is the
+/// result: the same `InfrastructureError` a check between blocks gives, so the
+/// edge raises the same `KeyboardInterrupt`. A signal the guard consumed is
+/// raised even if `work` finished meanwhile, since it cannot be raised again.
+///
+/// The watching costs nothing while `work` runs (a timed park) and nothing
+/// after: `work`'s thread unparks this one as it ends.
+fn watched<T: Send>(
+    cancel: &CancelToken,
+    work: impl FnOnce(&AtomicBool) -> T + Send,
+) -> Result<T, PrimitiveError> {
+    let stop = AtomicBool::new(false);
+    let watcher = std::thread::current();
+    let mut reason: Option<InfrastructureError> = None;
+    let outcome = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            let result = work(&stop);
+            watcher.unpark();
+            result
+        });
+        while !worker.is_finished() {
+            std::thread::park_timeout(WATCH_INTERVAL);
+            if reason.is_none() && !worker.is_finished() {
+                reason = if cancel.is_cancelled() {
+                    Some(InfrastructureError::Cancelled)
+                } else {
+                    cancel.poll_interrupt().err()
+                };
+                if reason.is_some() {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        worker.join()
+    });
+    match (reason, outcome) {
+        (Some(reason), _) => Err(PrimitiveError::Infrastructure(reason)),
+        (None, Ok(result)) => Ok(result),
+        (None, Err(_)) => Err(PrimitiveError::Internal(
+            "the adjoint gradient's thread panicked".to_string(),
+        )),
     }
 }
 
@@ -2874,12 +3010,17 @@ mod tests {
                 let probabilities = NativeStatevectorBackend::new(0)
                     .run_circuits_exact(&circuits, &run_params(0, 1))
                     .unwrap();
-                let expected = alone.jacobian_from_probabilities(&probabilities).unwrap();
+                let shift = alone.jacobian_from_probabilities(&probabilities).unwrap();
+                // #503: the exact Jacobian is the adjoint one; the row alone
+                // is still the reference bit for bit, and it is the shift's to
+                // 1e-9.
+                let got = &run.by_params[i * per_row..(i + 1) * per_row];
                 assert_eq!(
-                    Some(&run.by_params[i * per_row..(i + 1) * per_row]),
-                    expected.params(),
+                    Some(got),
+                    adjoint_jacobian(&alone, &theta).params(),
                     "block {block}, row {i}"
                 );
+                assert_close(got, shift.params().unwrap());
                 let bound = BoundCircuit::Native(compiled.bind(row, &theta).unwrap());
                 let probabilities = NativeStatevectorBackend::new(0)
                     .run_circuits_exact(&[bound], &run_params(0, 1))
@@ -3167,5 +3308,202 @@ mod tests {
             parameterized_from_concrete(invalid),
             Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
         ));
+    }
+
+    /// `jacobian`'s exact Jacobian by adjoint differentiation, computed apart
+    /// from the block runner: its adjoint runs on a fresh native backend.
+    fn adjoint_jacobian(jacobian: &ExpectationJacobian, theta: &[f64]) -> polypus_qml::Jacobian {
+        let runs = jacobian.adjoint_runs(theta).unwrap();
+        let tasks: Vec<AdjointTask<'_, _>> = runs
+            .iter()
+            .map(|run| AdjointTask {
+                circuit: &run.circuit,
+                wrt: &run.wrt,
+                weight: move |b: usize| run.observable.weight(b),
+            })
+            .collect();
+        let derivatives = NativeStatevectorBackend::new(0)
+            .run_adjoint(&tasks, None)
+            .unwrap();
+        jacobian.jacobian_from_adjoint(&derivatives).unwrap()
+    }
+
+    /// Two exact derivatives agree to rounding.
+    fn assert_close(got: &[f64], shift: &[f64]) {
+        assert_eq!(got.len(), shift.len());
+        for (k, (g, s)) in got.iter().zip(shift).enumerate() {
+            assert!((g - s).abs() < 1e-9, "entry {k}: {g} vs the shift's {s}");
+        }
+    }
+
+    /// `qml.jacobian(exact=True)` takes the adjoint (#503): with both parts,
+    /// the Jacobian is the parameter shift's to rounding, and the block size
+    /// changes nothing, bit for bit.
+    #[test]
+    fn the_exact_jacobian_is_the_adjoint_one_whatever_the_blocks() {
+        let (compiled, rows, theta) = primitive_model_and_rows();
+        let plan = compiled.jacobian(&rows, JacobianWrt::Both).unwrap();
+        let circuits: Vec<BoundCircuit> = plan
+            .circuits(&theta)
+            .unwrap()
+            .into_iter()
+            .map(BoundCircuit::Native)
+            .collect();
+        let probabilities = NativeStatevectorBackend::new(0)
+            .run_circuits_exact(&circuits, &run_params(0, 1))
+            .unwrap();
+        let shift = plan.jacobian_from_probabilities(&probabilities).unwrap();
+        let adjoint = adjoint_jacobian(&plan, &theta);
+        for block in [usize::MAX, 1, 2, 3] {
+            let mut run = jacobian_run(JacobianWrt::Both);
+            run.run_exact(block);
+            assert_eq!(
+                Some(run.by_params.as_slice()),
+                adjoint.params(),
+                "block {block}"
+            );
+            assert_eq!(
+                Some(run.by_inputs.as_slice()),
+                adjoint.inputs(),
+                "block {block}"
+            );
+            assert_close(&run.by_params, shift.params().unwrap());
+            assert_close(&run.by_inputs, shift.inputs().unwrap());
+        }
+    }
+
+    /// An interrupt guard that lets its first `ok` polls through and then
+    /// reports an interrupt, counting every poll.
+    struct InterruptAfter {
+        ok: usize,
+        polls: AtomicUsize,
+    }
+
+    impl crate::infrastructure::Interrupt for InterruptAfter {
+        fn poll(&self) -> Result<(), crate::infrastructure::BackendError> {
+            if self.polls.fetch_add(1, Ordering::SeqCst) < self.ok {
+                Ok(())
+            } else {
+                Err(crate::infrastructure::BackendError::Aborted(
+                    "test interrupt".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// A Ctrl+C (the edge's interrupt guard) stops an adjoint batch in flight,
+    /// with the error a check between blocks gives: one block, whose check
+    /// before it lets the run start, then the watcher's first look interrupts
+    /// it. The batch must outlive that first look (`WATCH_INTERVAL`, 25 ms), or
+    /// the watcher never asks and the call ends `Ok`: uninterrupted, this one (16
+    /// qubits, a 4-layer ansatz, 32 rows, both parts, one block) took 7.0 s in a
+    /// debug `cargo test` on a 16-CPU node, 280 times that, so the margin holds
+    /// on a much faster machine; interrupted, the test takes milliseconds.
+    #[test]
+    fn a_ctrl_c_stops_an_adjoint_jacobian_in_flight() {
+        let compiled = QuantumModel::new(16)
+            .layer(Layer::AngleEncoder(AngleEncoder::new(RotationAxis::Ry)))
+            .layer(Layer::HardwareEfficient(HardwareEfficientAnsatz::new(4)))
+            .readout(
+                Readout::new(
+                    vec![Observable::new(vec![(
+                        1.0,
+                        PauliString::new(vec![(0, Pauli::Z)]).unwrap(),
+                    )])
+                    .unwrap()],
+                    Decision::Raw,
+                )
+                .unwrap(),
+            )
+            .compile(16)
+            .unwrap();
+        let rows: Vec<Vec<f64>> = (0..32)
+            .map(|i| (0..16).map(|j| 0.1 * (i + j) as f64).collect())
+            .collect();
+        let theta: Vec<f64> = (0..compiled.num_params())
+            .map(|p| 0.01 * p as f64)
+            .collect();
+        let mut run = JacobianRun {
+            plan: compiled.jacobian(&rows, JacobianWrt::Both).unwrap(),
+            params: theta,
+            by_params: Vec::new(),
+            by_inputs: Vec::new(),
+        };
+        let guard = Arc::new(InterruptAfter {
+            ok: 1,
+            polls: AtomicUsize::new(0),
+        });
+        let token = CancelToken::with_interrupt(guard.clone());
+        let err = run_in_blocks(
+            &mut run,
+            || {
+                Ok(BlockRunner::Exact {
+                    native: NativeStatevectorBackend::new(0),
+                    params: run_params(0, 1),
+                })
+            },
+            |_| usize::MAX,
+            &token,
+        )
+        .unwrap_err();
+        match err {
+            PrimitiveError::Infrastructure(InfrastructureError::Backend(
+                crate::infrastructure::BackendError::Aborted(message),
+            )) => assert_eq!(message, "test interrupt"),
+            other => panic!("expected the interrupt, got {other:?}"),
+        }
+        assert_eq!(guard.polls.load(Ordering::SeqCst), 2);
+        assert!(run.by_params.is_empty() && run.by_inputs.is_empty());
+    }
+
+    /// `watched` hands the work its stop flag: an interrupt seen by the watcher
+    /// reaches a work that polls the flag, which returns early instead of
+    /// running out its (here 10 s) course, and the interrupt is the result.
+    #[test]
+    fn the_watcher_stops_the_work_it_watches() {
+        let guard = Arc::new(InterruptAfter {
+            ok: 0,
+            polls: AtomicUsize::new(0),
+        });
+        let token = CancelToken::with_interrupt(guard.clone());
+        let saw_stop = AtomicBool::new(false);
+        let start = Instant::now();
+        let outcome = watched(&token, |stop| {
+            while start.elapsed() < Duration::from_secs(10) {
+                if stop.load(Ordering::Relaxed) {
+                    saw_stop.store(true, Ordering::Relaxed);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        assert!(
+            saw_stop.load(Ordering::Relaxed),
+            "the work never saw the stop"
+        );
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(matches!(
+            outcome,
+            Err(PrimitiveError::Infrastructure(
+                InfrastructureError::Backend(_)
+            ))
+        ));
+        // A cooperative cancellation stops it the same way.
+        let token = CancelToken::default();
+        token.cancel();
+        let outcome = watched(&token, |stop| {
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        assert!(matches!(
+            outcome,
+            Err(PrimitiveError::Infrastructure(
+                InfrastructureError::Cancelled
+            ))
+        ));
+        // And a work that ends before the first look is just its result.
+        let quick = watched(&CancelToken::default(), |_| 7);
+        assert!(matches!(quick, Ok(7)));
     }
 }

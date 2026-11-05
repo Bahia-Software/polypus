@@ -8,7 +8,7 @@ The whole native ``polypus.qml`` workflow, start to finish: a ``Dataset`` split
 into train and test, both scaled with the train set's ranges only (no leakage
 from the test set), a ``Model`` (angle encoding, a hardware-efficient ansatz and
 a three-observable ``argmax`` readout), training with ``Adam`` on the exact
-parameter-shift gradient of ``categorical_cross_entropy``, computed from exact
+gradient of ``categorical_cross_entropy``, computed from exact
 probabilities, and accuracy on the held-out flowers. ``seed=42`` throughout makes every run identical (contract C-7).
 
 Run it directly::
