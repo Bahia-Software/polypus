@@ -11,6 +11,9 @@ __pycache__/
 *.pyd
 *.so
 
+# cargo-mutants output (`cargo mutants`; .github/workflows/mutation.yml)
+mutants.out*/
+
 # Benchmark results (generated at runtime)
 benchmarks/bench_*.csv
 benchmarks/bench_*/
