@@ -14,3 +14,7 @@ name = "polypus_circuit"
 # Intentionally dependency-free: this crate must stay lightweight and usable
 # from any Rust project without pulling in PyO3, Qiskit or async runtimes.
 [dependencies]
+
+[dev-dependencies]
+# Property tests of the OpenQASM round trip (`tests/properties.rs`).
+proptest = { workspace = true }

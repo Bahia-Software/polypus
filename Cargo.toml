@@ -111,6 +111,11 @@ ndarray            = "0.17"
 # `erf` for the Boys function F0 of the STO-3G integrals in `polypus-physics`
 # (`chemistry::sto3g`); pure Rust port of musl's libm, no dependencies.
 libm               = "0.2.16"
+# Property tests (dev-dependency only, #409): the OpenQASM round trip of
+# `polypus-circuit` and parallel == sequential in `polypus-sim`. 1.11: 1.12
+# needs Rust 1.88, above the MSRV. Without default features: no `fork`/`timeout`
+# (no tempfile, no rusty-fork), and nothing beyond what `std` needs.
+proptest           = { version = "1.11", default-features = false, features = ["std"] }
 
 # Release profile posture — set explicitly rather than left to Cargo's defaults.
 #
