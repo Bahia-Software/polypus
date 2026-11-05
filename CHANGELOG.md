@@ -73,6 +73,14 @@ Entries were curated from the Conventional Commits history. Releases before
   variants, `InvalidPauliSum`, `UnsupportedOperation`,
   `InvalidFermionOperator` and `InvalidIntegrals`, so an exhaustive `match`
   on it outside its crate must handle them (#529).
+- CI reports how well the tests check the code, not only what they run: the
+  SonarQube Cloud workflow's coverage jobs write Rust line coverage per crate
+  in their summary, and a weekly `mutation.yml` runs `cargo mutants` over the
+  pure-Rust crates (report only) and comments the score per crate on a
+  tracking issue. New tests catch the mutants that survived in
+  `polypus-observable`, CMA-ES and SHADE, and `polypus-backend`'s memory guard
+  and planner, and property tests check the OpenQASM round trip and that the
+  parallel kernels match the sequential ones on random circuits (#409).
 
 ### Documentation
 - The documentation site (MkDocs Material) is published at the Pages root,
