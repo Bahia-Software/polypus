@@ -332,6 +332,22 @@ mod tests {
     }
 
     #[test]
+    fn the_registry_lists_exactly_what_was_registered() {
+        // The registry is process-global and other tests register into it, so
+        // only names unique to this test are asserted on.
+        assert!(!is_registered("echo-test-listed"));
+        assert!(!registered_names().contains(&"echo-test-listed".to_string()));
+        register_backend("echo-test-listed", |_: &BackendBuildContext| {
+            Ok(Arc::new(EchoBackend { width: 1 }) as Arc<dyn QuantumBackend>)
+        });
+        assert!(is_registered("echo-test-listed"));
+        assert!(!is_registered("echo-test-never-registered"));
+        let names = registered_names();
+        assert!(names.contains(&"echo-test-listed".to_string()), "{names:?}");
+        assert!(names.iter().all(|n| is_registered(n)), "{names:?}");
+    }
+
+    #[test]
     fn unknown_name_is_unknown_infrastructure() {
         // `Arc<dyn QuantumBackend>` is not `Debug`, so match on the `Result` rather
         // than `unwrap_err()`.

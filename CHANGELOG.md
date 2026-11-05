@@ -51,6 +51,24 @@ Entries were curated from the Conventional Commits history. Releases before
   from a `TrainedModel`. PyTorch is the new optional extra
   `pip install "polypus-quantum[torch]"` (`torch>=2.14.1,<3`); `import polypus`
   does not import it (#502). See `examples/qml_torch_hybrid.py`.
+- Exact gradients of native QML by adjoint differentiation (#503): with
+  `exact=True` on the native backend, `Model.fit`'s Adam gradient,
+  `qml.jacobian` and `polypus.torch.QuantumLayer`'s backward pass take about
+  three simulations per row (and observable) whatever the number of
+  parameters, instead of two circuits per trainable gate; no API changes.
+  The result is the parameter-shift gradient to rounding; shots keep the
+  parameter shift, and so does exact mode when the memory budget holds one
+  statevector of the model's width but not the two the adjoint needs (logged
+  at `info` once per fit or `qml.jacobian` call). A Ctrl+C now also stops an
+  exact `qml.jacobian` inside a block. In `polypus-sim`:
+  `StatevectorSimulator::adjoint_gradient`, `AdjointGradient`,
+  `ADJOINT_STATEVECTORS` and four `SimError` variants (`GateIndexOutOfRange`,
+  `NotDifferentiable`, `PartialMeasurement`, `NonFiniteWeight`). In
+  `polypus-qml`: `QmlProblem::adjoint_runs`/`gradient_from_adjoint`,
+  `JacobianBlock::adjoint_runs`/`num_adjoint_runs`/`jacobian_from_adjoint` (and
+  `ExpectationJacobian`'s), `AdjointRun` and `DiagonalObservable`. In
+  `polypus-infrastructure`: `NativeStatevectorBackend::adjoint_fits`/
+  `run_adjoint` and `AdjointTask`. `benchmarks/bench_adjoint.py` measures it.
 - `polypus.qml.Model.num_observables`, the readout's observables (the columns
   of `qml.expval`), and pickling of `Model`, so `copy.deepcopy` works: it
   travels as the JSON of its spec, rebuilt through the checks of `qml.load`
@@ -98,6 +116,14 @@ Entries were curated from the Conventional Commits history. Releases before
 - **BREAKING (Rust):** `polypus_qml::ValidationError` has a new variant,
   `TooManyParams`, so an exhaustive `match` on it outside its crate must
   handle it (#505).
+- CI reports how well the tests check the code, not only what they run: the
+  SonarQube Cloud workflow's coverage jobs write Rust line coverage per crate
+  in their summary, and a weekly `mutation.yml` runs `cargo mutants` over the
+  pure-Rust crates (report only) and comments the score per crate on a
+  tracking issue. New tests catch the mutants that survived in
+  `polypus-observable`, CMA-ES and SHADE, and `polypus-backend`'s memory guard
+  and planner, and property tests check the OpenQASM round trip and that the
+  parallel kernels match the sequential ones on random circuits (#409).
 
 ### Fixed
 - `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a

@@ -5,7 +5,7 @@ feature map and ansatz scored by your own ``expectation_function``). This script
 is its counterpart for **native models**, ``polypus.qml.Model``: all four
 encoders (angle, amplitude, IQP and computational basis), data re-uploading
 between trainable layers, the QCNN layers, every optimizer (DE, PSO, CMA-ES,
-QNG, Adam with its exact parameter-shift gradient and its momentum rule, SPSA,
+QNG, Adam with its exact gradient and its momentum rule, SPSA,
 Rotosolve, and an optimizer of your own through ``External``), readouts in the
 X, Y and Z bases, all four decisions (sign, threshold, argmax and raw), all five
 losses (hinge, binary and categorical cross-entropy, squared error and the
@@ -824,7 +824,7 @@ def scenario_12_unsupervised_ground_state():
     that a variational eigensolver: the optimum is ``−E₀ = 1.5``, reached only in
     the basis state ``|q₁q₀⟩ = |10⟩``. The one sample is the zero vector, so the
     ``ry`` encoder is the identity and the ansatz alone prepares the state. Adam
-    follows the exact parameter-shift gradient for its whole budget.
+    follows the exact gradient for its whole budget.
     """
     hamiltonian = qml.Observable([(-1.0, Z(0) @ Z(1)), (-0.5, Z(1))])
     model = qml.Model(

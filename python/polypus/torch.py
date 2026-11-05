@@ -34,8 +34,10 @@ PyTorch: import it as ``polypus.torch``.
   what needs a gradient: the parameters, the inputs (an angle or IQP encoder;
   an amplitude or basis encoder has no input gradient and raises
   ``polypus.ConfigurationError``), or both. The gradients are the
-  vector-Jacobian products of the incoming gradient with the parameter-shift
-  Jacobian: exact with ``exact=True``, unbiased estimates with shots.
+  vector-Jacobian products of the incoming gradient with that Jacobian: exact
+  with ``exact=True`` (by adjoint differentiation on the native simulator, or
+  the parameter shift when only one statevector fits in memory), unbiased
+  parameter-shift estimates with shots.
 - **dtype and device.** The quantum computation runs in ``float64`` on the CPU.
   The input is converted there at the boundary, and the output comes back in
   the input's dtype and device (``float64`` for a non-floating input), each

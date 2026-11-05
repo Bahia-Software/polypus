@@ -65,6 +65,17 @@
 //! cannot handle has no exact gradient ([`QmlError::NoExactGradient`]) but
 //! still trains with gradient-free optimizers.
 //!
+//! **Adjoint differentiation.** A caller that holds the exact statevector can
+//! get the same gradient without the shifted circuits:
+//! [`QmlProblem::adjoint_runs`] gives one [`AdjointRun`] per sample — the
+//! untied circuit, the gates to differentiate and a [`DiagonalObservable`]
+//! with the loss's chain rule folded in — for a simulator to differentiate
+//! (`polypus_sim::StatevectorSimulator::adjoint_gradient`), and
+//! [`QmlProblem::gradient_from_adjoint`] reads the derivatives back. The
+//! expectation Jacobian has the same pair
+//! ([`JacobianBlock::adjoint_runs`], [`JacobianBlock::jacobian_from_adjoint`]),
+//! one run per sample and observable. This crate still executes nothing.
+//!
 //! ## Expectations and their Jacobian
 //!
 //! Beneath the fitness, a [`CompiledModel`] also gives the loss-free values a
@@ -78,6 +89,7 @@
 //! ([`JacobianBlock`]). It costs `2 · shifts` circuits per sample, with no
 //! unshifted one.
 
+mod adjoint;
 mod dataset;
 mod error;
 mod jacobian;
@@ -89,6 +101,7 @@ mod problem;
 mod readout;
 mod rng;
 
+pub use adjoint::{AdjointRun, DiagonalObservable};
 pub use dataset::Dataset;
 pub use error::{QmlError, ValidationError};
 pub use jacobian::{ExpectationJacobian, Jacobian, JacobianBlock, JacobianWrt};

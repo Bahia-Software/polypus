@@ -86,10 +86,43 @@ pub enum SimError {
     },
     /// The caller asked for the simulation to stop before it finished, through
     /// the cancellation hook passed to
-    /// [`Simulator::run_cancellable`](crate::Simulator::run_cancellable). The
-    /// partially evolved statevector is discarded: a run that stopped part-way
-    /// through the gate sequence is not a state any circuit describes.
+    /// [`Simulator::run_cancellable`](crate::Simulator::run_cancellable) (or to
+    /// [`StatevectorSimulator::adjoint_gradient`](crate::StatevectorSimulator::adjoint_gradient)).
+    /// The partially evolved statevector is discarded: a run that stopped
+    /// part-way through the gate sequence is not a state any circuit describes.
     Cancelled,
+    /// A gate to differentiate is named by a position past the end of the
+    /// circuit's instruction list
+    /// ([`StatevectorSimulator::adjoint_gradient`](crate::StatevectorSimulator::adjoint_gradient)).
+    GateIndexOutOfRange {
+        /// The offending position.
+        index: usize,
+        /// The circuit's instruction count; valid positions are `0..num_gates`.
+        num_gates: usize,
+    },
+    /// A gate to differentiate is not a Pauli rotation `exp(−iθP/2)` —
+    /// `Rx`, `Ry`, `Rz`, `Rxx` or `Rzz` — the only gates whose derivative
+    /// [`StatevectorSimulator::adjoint_gradient`](crate::StatevectorSimulator::adjoint_gradient)
+    /// takes.
+    NotDifferentiable {
+        /// The gate's position in the circuit.
+        index: usize,
+        /// The gate's `Debug` rendering.
+        instruction: String,
+    },
+    /// A circuit given to
+    /// [`StatevectorSimulator::adjoint_gradient`](crate::StatevectorSimulator::adjoint_gradient)
+    /// measures an individual qubit. The expectation is read on the full
+    /// register (a terminal `MeasureAll`, or no measurement), as the exact
+    /// probabilities are.
+    PartialMeasurement {
+        /// The measured qubit.
+        qubit: usize,
+    },
+    /// The observable's weight of some basis state is `NaN` or infinite
+    /// ([`StatevectorSimulator::adjoint_gradient`](crate::StatevectorSimulator::adjoint_gradient)),
+    /// which would make the expectation and every derivative non-finite.
+    NonFiniteWeight,
 }
 
 impl fmt::Display for SimError {
@@ -133,6 +166,22 @@ impl fmt::Display for SimError {
             SimError::Cancelled => {
                 write!(f, "the simulation was cancelled before it completed")
             }
+            SimError::GateIndexOutOfRange { index, num_gates } => write!(
+                f,
+                "gate position {index} is out of range for a circuit of {num_gates} instruction(s) (valid positions are 0..{num_gates})"
+            ),
+            SimError::NotDifferentiable { index, instruction } => write!(
+                f,
+                "the gate at position {index} ({instruction}) is not a Pauli rotation (rx, ry, rz, rxx, rzz); the adjoint gradient differentiates only those"
+            ),
+            SimError::PartialMeasurement { qubit } => write!(
+                f,
+                "the circuit measures qubit {qubit} on its own; the adjoint gradient reads the full register (measure_all, or no measurement)"
+            ),
+            SimError::NonFiniteWeight => write!(
+                f,
+                "the observable's weight of a basis state is not finite (NaN or infinity)"
+            ),
         }
     }
 }
