@@ -60,6 +60,18 @@ Entries were curated from the Conventional Commits history. Releases before
   of `qml.expval`), and pickling of `Model`, so `copy.deepcopy` works: it
   travels as the JSON of its spec, rebuilt through the checks of `qml.load`
   (#502).
+- A call trace for `polypus.train` and `polypus.run_quantum_circuit`
+  (contract C-12): the keyword-only `trace=` (a path to a new file) or
+  `POLYPUS_CALL_TRACE=<directory>` writes one JSON Lines line per planner
+  batch, backend wave, optimizer iteration and QNG metric call, with sizes and
+  times only, capped by `POLYPUS_CALL_TRACE_MAX_MB` (512 MiB by default). It
+  never changes a result.
+- The call trace in Rust: the `trace` module of `polypus-orchestration`, with
+  `CallTracer`, which writes, caps and closes a trace, the types of its lines
+  (`TraceHeader`, `TraceEvent`, `RunStatus`, …), `DEFAULT_MAX_BYTES`, and four
+  decorators, `TracingPlanner`, `TracingBackend`, `TracingObserver` and
+  `TracingVariance`, which record the calls they forward; and
+  `Method::name()`, the optimizer's name that a trace's header records.
 - Multi-qubit Pauli sums and an exact H₂ Hamiltonian in `polypus-physics`
   (#529), the reference for molecular simulation (#528). In
   `hamiltonians`: `PauliString` (text form `"X0 X1 Y2 Y3"`, product with a
@@ -82,6 +94,10 @@ Entries were curated from the Conventional Commits history. Releases before
   `libm` (`erf` for the Boys function).
 
 ### Changed
+- **BREAKING:** for Rust users, `TrainFlow` and `RunCircuitFlow`
+  (`polypus-orchestration`) have a new public field,
+  `trace: Option<Arc<CallTracer>>`, so a struct literal must set it;
+  `trace: None` keeps today's behaviour.
 - **BREAKING (Rust):** `polypus_physics::hamiltonians::PauliTerm` is
   `{ coefficient, string: PauliString }` instead of a single Pauli on one
   qubit (`qubit`, `axis`), and `PauliSum`'s fields are private: build it with
