@@ -346,10 +346,10 @@ fn build(num_qubits: usize, ops: &[Op], ending: &Ending) -> ParameterizedCircuit
 /// (`barrier q[0],q[1];`, one `measure` per qubit), and the importer reads
 /// them back in canonical form (`barrier q;`, `measure q -> c;`), which the
 /// next export writes. The OpenQASM 3 exporter writes the canonical form
-/// (`normalized` in `qasm_import.rs`); the 2.0 one does not (reported as a
-/// follow-up of #409). Until it does, the generator builds those two shapes in
-/// their canonical form directly; everything else, every other operand list
-/// and order included, is drawn as is.
+/// (`normalized` in `qasm_import.rs`); the 2.0 one does not (#568). Until it
+/// does, the generator builds those two shapes in their canonical form
+/// directly; everything else, every other operand list and order included, is
+/// drawn as is.
 fn lists_every_qubit_in_order(qubits: &[usize], num_qubits: usize) -> bool {
     qubits.len() == num_qubits && qubits.iter().enumerate().all(|(i, &q)| i == q)
 }
