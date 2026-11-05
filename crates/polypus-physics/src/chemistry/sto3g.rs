@@ -110,10 +110,43 @@ impl ContractedGaussian {
 /// A point nucleus: position (bohr) and charge (units of `e`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Nucleus {
+    position: [f64; 3],
+    charge: f64,
+}
+
+impl Nucleus {
+    /// A nucleus of charge `Z = charge` at `position` (bohr).
+    ///
+    /// A zero charge is allowed: a ghost atom, which carries basis functions
+    /// but does not attract electrons.
+    ///
+    /// # Errors
+    /// [`PhysicsError::InvalidIntegrals`] if a coordinate is not finite, or the
+    /// charge is not finite or is negative.
+    pub fn new(position: [f64; 3], charge: f64) -> Result<Self, PhysicsError> {
+        let invalid = |message: String| PhysicsError::InvalidIntegrals { message };
+        if position.iter().any(|x| !x.is_finite()) {
+            return Err(invalid(format!(
+                "nucleus position is not finite: {position:?}"
+            )));
+        }
+        if !(charge.is_finite() && charge >= 0.0) {
+            return Err(invalid(format!(
+                "nuclear charge must be finite and non-negative, got {charge}"
+            )));
+        }
+        Ok(Self { position, charge })
+    }
+
     /// Position (bohr).
-    pub position: [f64; 3],
-    /// Charge `Z`.
-    pub charge: f64,
+    pub fn position(&self) -> [f64; 3] {
+        self.position
+    }
+
+    /// Charge `Z` (units of `e`).
+    pub fn charge(&self) -> f64 {
+        self.charge
+    }
 }
 
 fn distance_sq(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -225,14 +258,8 @@ mod tests {
             ContractedGaussian::sto3g_hydrogen_1s(ra).unwrap(),
             ContractedGaussian::sto3g_hydrogen_1s(rb).unwrap(),
             [
-                Nucleus {
-                    position: ra,
-                    charge: 1.0,
-                },
-                Nucleus {
-                    position: rb,
-                    charge: 1.0,
-                },
+                Nucleus::new(ra, 1.0).unwrap(),
+                Nucleus::new(rb, 1.0).unwrap(),
             ],
         )
     }
@@ -326,10 +353,7 @@ mod tests {
         let r = 50.0;
         let a = ContractedGaussian::sto3g_hydrogen_1s([0.0; 3]).unwrap();
         let b = ContractedGaussian::sto3g_hydrogen_1s([0.0, 0.0, r]).unwrap();
-        let far = Nucleus {
-            position: [0.0, 0.0, r],
-            charge: 2.0,
-        };
+        let far = Nucleus::new([0.0, 0.0, r], 2.0).unwrap();
         assert!(overlap(&a, &b) < 1e-90);
         assert!((electron_repulsion(&a, &a, &b, &b) * r - 1.0).abs() < 1e-13);
         assert!((nuclear_attraction(&a, &a, &[far]) * r + 2.0).abs() < 1e-13);
@@ -349,5 +373,30 @@ mod tests {
         for r in bad {
             assert!(matches!(r, Err(PhysicsError::InvalidIntegrals { .. })));
         }
+    }
+
+    #[test]
+    fn invalid_nuclei_are_rejected() {
+        // A NaN charge or position used to turn every nuclear attraction NaN.
+        let bad = [
+            Nucleus::new([f64::NAN, 0.0, 0.0], 1.0),
+            Nucleus::new([0.0, f64::INFINITY, 0.0], 1.0),
+            Nucleus::new([0.0; 3], f64::NAN),
+            Nucleus::new([0.0; 3], f64::INFINITY),
+            Nucleus::new([0.0; 3], -1.0),
+        ];
+        for r in bad {
+            assert!(matches!(r, Err(PhysicsError::InvalidIntegrals { .. })));
+        }
+    }
+
+    #[test]
+    fn ghost_nucleus_attracts_nothing() {
+        // Z = 0 is accepted (a ghost atom) and contributes no attraction.
+        let a = ContractedGaussian::sto3g_hydrogen_1s([0.0; 3]).unwrap();
+        let ghost = Nucleus::new([0.0, 0.0, 1.4], 0.0).unwrap();
+        assert_eq!(ghost.charge(), 0.0);
+        assert_eq!(ghost.position(), [0.0, 0.0, 1.4]);
+        assert_eq!(nuclear_attraction(&a, &a, &[ghost]), 0.0);
     }
 }
