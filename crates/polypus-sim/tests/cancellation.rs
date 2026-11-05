@@ -154,3 +154,60 @@ fn no_hook_is_exactly_run() {
     // with no hook, so the two share one gate loop.
     assert_eq!(with_none.amplitudes(), plain.amplitudes());
 }
+
+// ── Adjoint differentiation (#503) ──────────────────────────────────────────
+//
+// `adjoint_gradient` polls the same throttled hook through its forward and its
+// backward sweep (the backward one is covered on its own by the unit test
+// `the_backward_sweep_is_cancellable` in `src/adjoint.rs`).
+
+/// `z` on qubit 0, the observable of these runs.
+fn z0(b: usize) -> f64 {
+    if b & 1 == 0 {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+#[test]
+fn adjoint_gradient_honours_a_request_to_stop() {
+    let circuit = nan_terminated_circuit(LONG);
+    let mut calls = 0usize;
+    let err = {
+        let mut cancel = || {
+            calls += 1;
+            true
+        };
+        sequential_sim()
+            .adjoint_gradient(&circuit, &[0], z0, Some(&mut cancel))
+            .unwrap_err()
+    };
+    // `Cancelled`, not `NonFiniteAmplitude`: the forward sweep never reached
+    // the poisoned last gate.
+    assert_eq!(err, SimError::Cancelled);
+    assert_eq!(calls, 1);
+}
+
+#[test]
+fn adjoint_gradient_with_a_hook_that_never_cancels_matches_no_hook() {
+    // The poisoned gate dropped: this run must complete, both sweeps.
+    let mut gates = nan_terminated_circuit(SHORT).gates().to_vec();
+    gates.pop();
+    let circuit = ConcreteCircuit::new_unchecked(N, gates);
+    let mut calls = 0usize;
+    let with_hook = {
+        let mut never = || {
+            calls += 1;
+            false
+        };
+        sequential_sim()
+            .adjoint_gradient(&circuit, &[0, 2], z0, Some(&mut never))
+            .unwrap()
+    };
+    assert!(calls >= 1, "the hook was never polled");
+    let without = sequential_sim()
+        .adjoint_gradient(&circuit, &[0, 2], z0, None)
+        .unwrap();
+    assert_eq!(with_hook, without);
+}
