@@ -208,6 +208,25 @@ class TestSaveLoad:
             trained.save(tmp_path / "no_such_dir" / "model.json")
         assert list(tmp_path.iterdir()) == []
 
+    def test_an_edited_huge_reps_is_a_value_error(self, trained, tmp_path):
+        import json
+
+        from polypus.qml import load
+
+        path = tmp_path / "model.json"
+        trained.save(path)
+        saved = json.loads(path.read_text())
+        # `real_amplitudes` (layer 1): reps + the final rotation layer overflow.
+        (entry,) = [
+            layer["HardwareEfficient"]
+            for layer in saved["spec"]["layers"]
+            if "HardwareEfficient" in layer
+        ]
+        entry["reps"] = 2**64 - 1
+        path.write_text(json.dumps(saved))
+        with pytest.raises(ValueError, match="layer 1 needs more trainable parameters"):
+            load(path)
+
     @pytest.mark.parametrize(
         "edit",
         [

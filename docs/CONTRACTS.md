@@ -2422,7 +2422,12 @@ that does not depend on the data is checked where it is written, as a plain
   it was when it raises;
 - `Model` checks that the `Encoder` and the `Ansatz` have the same width, that
   some layer loads the data, that the layers reserve trainable parameters, and
-  that the readout's positions exist among the qubits still active at the end.
+  that the readout's positions exist among the qubits still active at the end;
+- a count argument (`reps`) that is negative or larger than a `usize` holds is
+  refused at the call, before the layer is checked, and a parameter count that
+  does not fit in a `usize` (a huge `reps`, or any layer after one) is
+  `ValidationError::TooManyParams`; both are a `ValueError` that leaves the
+  object as it was, never PyO3's `OverflowError` or a panic.
 
 What depends on the data — how many features the encoders can carry — is
 checked when the model meets a dataset. `num_params` and `num_observables` (the

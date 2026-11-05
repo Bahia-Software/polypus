@@ -113,6 +113,13 @@ pub enum ValidationError {
     /// is rejected at compile time rather than discovered as an optimizer that
     /// "converges" trivially.
     NoTrainableParams,
+    /// A layer reserves more trainable parameters than fit in a `usize`, on
+    /// its own or after those of the layers before it (only a huge `reps` gets
+    /// there). Raised by the layer's `plan`, which then reserves nothing.
+    TooManyParams {
+        /// The layer (0-based, in the model) whose parameters do not fit.
+        layer: usize,
+    },
     /// A layer needs more active qubits than are available at its position in
     /// the model. Raised by an encoder whose feature count exceeds the number
     /// of active qubits.
@@ -325,6 +332,10 @@ impl fmt::Display for ValidationError {
             ValidationError::NoTrainableParams => write!(
                 f,
                 "model has no trainable parameters: add at least one ansatz layer"
+            ),
+            ValidationError::TooManyParams { layer } => write!(
+                f,
+                "layer {layer} needs more trainable parameters than fit in a usize (reduce reps)"
             ),
             ValidationError::NotEnoughQubits { needed, active } => write!(
                 f,
@@ -777,6 +788,12 @@ mod tests {
         }
         .to_string();
         assert!(s.contains('4') && s.contains('3'));
+    }
+
+    #[test]
+    fn too_many_params_displays_its_layer() {
+        let s = ValidationError::TooManyParams { layer: 3 }.to_string();
+        assert!(s.contains("layer 3") && s.contains("usize"), "{s}");
     }
 
     #[test]

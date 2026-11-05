@@ -79,6 +79,19 @@ Entries were curated from the Conventional Commits history. Releases before
   variants, `InvalidPauliSum`, `UnsupportedOperation`,
   `InvalidFermionOperator` and `InvalidIntegrals`, so an exhaustive `match`
   on it outside its crate must handle them (#529).
+- **BREAKING (Rust):** `polypus_qml::ValidationError` has a new variant,
+  `TooManyParams`, so an exhaustive `match` on it outside its crate must
+  handle it (#505).
+
+### Fixed
+- `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a
+  negative `reps` raised `OverflowError`, and with a `reps` whose parameter
+  count does not fit in 64 bits a `PanicException` (which `except Exception`
+  does not catch); both, and any integer too large for a count, are now a
+  `ValueError` at the call that leaves the `Ansatz` as it was. A layer added
+  after such a parameter count, and a saved file edited to one, fail the same
+  way. In `polypus-qml`, `QuantumModel::compile` returns the new
+  `ValidationError::TooManyParams` instead of panicking (#505).
 
 ### Documentation
 - The documentation site (MkDocs Material) is published at the Pages root,

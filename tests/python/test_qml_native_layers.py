@@ -281,6 +281,84 @@ class TestConvAndPool:
         )
 
 
+_COUNT_IDS = ["hardware-efficient", "real-amplitudes"]
+
+
+class TestCountArguments:
+    """``reps`` is a count. A negative or oversized one, and a layer whose
+    parameter count does not fit, are a ``ValueError`` at the call that leaves
+    the ``Ansatz`` unchanged, never an ``OverflowError`` or a panic (contract
+    C-11)."""
+
+    @pytest.mark.parametrize(
+        "build",
+        [lambda a: a.hardware_efficient(-1), lambda a: a.real_amplitudes(-1)],
+        ids=_COUNT_IDS,
+    )
+    def test_a_negative_reps_is_a_value_error(self, build):
+        from polypus.qml import Ansatz
+
+        ansatz = Ansatz(2).real_amplitudes(1)
+        with pytest.raises(ValueError, match="non-negative integer, got -1"):
+            build(ansatz)
+        assert (ansatz.num_layers, ansatz.num_params) == (1, 4)
+
+    @pytest.mark.parametrize(
+        "build",
+        [lambda a: a.hardware_efficient(2**70), lambda a: a.real_amplitudes(2**70)],
+        ids=_COUNT_IDS,
+    )
+    def test_an_integer_beyond_any_count_is_a_value_error(self, build):
+        from polypus.qml import Ansatz
+
+        ansatz = Ansatz(2).real_amplitudes(1)
+        with pytest.raises(ValueError, match=f"got {2**70}"):
+            build(ansatz)
+        assert (ansatz.num_layers, ansatz.num_params) == (1, 4)
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            # (2**63 + 1) rotation blocks × 2 axes × 2 qubits.
+            lambda a: a.hardware_efficient(2**63),
+            # (2**63 + 1) rotation blocks × 2 qubits.
+            lambda a: a.real_amplitudes(2**63),
+        ],
+        ids=_COUNT_IDS,
+    )
+    def test_a_parameter_count_that_does_not_fit_is_a_value_error(self, build):
+        from polypus.qml import Ansatz
+
+        ansatz = Ansatz(2).real_amplitudes(1)
+        with pytest.raises(ValueError, match="layer 1 needs more trainable parameters"):
+            build(ansatz)
+        assert (ansatz.num_layers, ansatz.num_params) == (1, 4)
+
+    def test_a_layer_after_a_full_parameter_space_is_a_value_error(self):
+        from polypus.qml import Ansatz
+
+        # 2·(2**63 − 1) = 2**64 − 2 parameters still fit in a usize; the four
+        # of the convolution after them do not.
+        ansatz = Ansatz(2).hardware_efficient(
+            2**63 - 1, rotations=["rx"], final_rotation_layer=False
+        )
+        assert ansatz.num_params == 2**64 - 2
+        with pytest.raises(ValueError, match="layer 1 needs more trainable parameters"):
+            ansatz.conv("basic")
+        assert (ansatz.num_layers, ansatz.num_params) == (1, 2**64 - 2)
+
+    @pytest.mark.parametrize(
+        "build",
+        [lambda a: a.hardware_efficient("3"), lambda a: a.real_amplitudes("3")],
+        ids=_COUNT_IDS,
+    )
+    def test_a_reps_of_another_type_is_still_a_type_error(self, build):
+        from polypus.qml import Ansatz
+
+        with pytest.raises(TypeError):
+            build(Ansatz(2))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Readout observables, against closed forms
 # ─────────────────────────────────────────────────────────────────────────────

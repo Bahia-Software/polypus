@@ -80,12 +80,17 @@ impl LayerOps for HardwareEfficientAnsatz {
     fn plan(&self, ctx: &mut LayerContext) -> Result<LayerAllocation, ValidationError> {
         // One fresh θ per (rotation-block, axis, active qubit). Blocks =
         // `reps` + one more if a final rotation layer is requested. The
-        // num_params == 0 case is caught model-wide by NoTrainableParams, so
-        // there is nothing to validate here.
-        let blocks = self.reps + self.final_rotation_layer as usize;
-        let count = ctx.active.len() * self.rotations.len() * blocks;
-        let params = ctx.param_cursor..ctx.param_cursor + count;
-        ctx.param_cursor += count;
+        // num_params == 0 case is caught model-wide by NoTrainableParams; the
+        // only check here is that a huge `reps` still gives a countable total.
+        let count = self
+            .reps
+            .checked_add(self.final_rotation_layer as usize)
+            .and_then(|blocks| blocks.checked_mul(ctx.active.len()))
+            .and_then(|per_axis| per_axis.checked_mul(self.rotations.len()))
+            .ok_or(ValidationError::TooManyParams {
+                layer: ctx.layers_planned,
+            })?;
+        let params = ctx.reserve(count)?;
         Ok(LayerAllocation {
             params,
             active: ctx.active.clone(),
@@ -313,6 +318,40 @@ mod tests {
             assert_eq!(alloc.params.end - alloc.params.start, expected);
             assert_eq!(c.param_cursor, expected);
         }
+    }
+
+    #[test]
+    fn plan_rejects_a_param_count_that_does_not_fit() {
+        let unbounded = |final_rotation_layer| HardwareEfficientAnsatz {
+            final_rotation_layer,
+            ..HardwareEfficientAnsatz::new(usize::MAX)
+        };
+        // reps × 2 axes × 2 qubits overflows; with the final layer, so does
+        // reps + 1 alone.
+        for final_layer in [false, true] {
+            let mut c = LayerContext {
+                param_cursor: 7,
+                layers_planned: 3,
+                ..ctx(2)
+            };
+            assert_eq!(
+                unbounded(final_layer).plan(&mut c).unwrap_err(),
+                ValidationError::TooManyParams { layer: 3 }
+            );
+            // A rejected layer reserves nothing.
+            assert_eq!(c.param_cursor, 7);
+        }
+        // A count that fits on its own but not after the earlier layers'.
+        let mut c = LayerContext {
+            param_cursor: usize::MAX - 2,
+            layers_planned: 1,
+            ..ctx(3)
+        };
+        assert_eq!(
+            linear_ansatz().plan(&mut c).unwrap_err(),
+            ValidationError::TooManyParams { layer: 1 }
+        );
+        assert_eq!(c.param_cursor, usize::MAX - 2);
     }
 
     #[test]

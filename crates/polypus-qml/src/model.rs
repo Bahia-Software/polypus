@@ -12,7 +12,7 @@
 //!
 //! 1. [`plan`](LayerOps::plan) runs during `compile`, *without* data. It
 //!    validates precondition (enough active qubits?), reserves its slice of the
-//!    global `θ` index space by advancing [`LayerContext::param_cursor`], and
+//!    global `θ` index space with [`LayerContext::reserve`], and
 //!    records the [`LayerAllocation`] — the single source of truth for its `θ`
 //!    range and the qubits it works on.
 //! 2. [`emit_traced`](LayerOps::emit_traced) runs during `template_for(x)`. It
@@ -61,6 +61,25 @@ pub(crate) struct LayerContext {
     /// compose on top of earlier gates). `compile` bumps it after every
     /// [`plan`](LayerOps::plan).
     pub(crate) layers_planned: usize,
+}
+
+impl LayerContext {
+    /// Reserve the next `count` global `θ` indices for the layer being planned:
+    /// advance [`param_cursor`](Self::param_cursor) past them and return their
+    /// range. If they do not fit in a `usize`, return
+    /// [`ValidationError::TooManyParams`] for that layer and leave the cursor
+    /// as it was.
+    pub(crate) fn reserve(&mut self, count: usize) -> Result<Range<usize>, ValidationError> {
+        let end = self
+            .param_cursor
+            .checked_add(count)
+            .ok_or(ValidationError::TooManyParams {
+                layer: self.layers_planned,
+            })?;
+        let params = self.param_cursor..end;
+        self.param_cursor = end;
+        Ok(params)
+    }
 }
 
 /// What a layer records in `plan` and consumes in `emit_traced`: the half-open
@@ -960,6 +979,48 @@ mod tests {
     }
 
     #[test]
+    fn reserve_hands_out_consecutive_ranges_until_they_overflow() {
+        let mut ctx = LayerContext {
+            active: vec![0, 1],
+            num_features: 0,
+            param_cursor: 0,
+            layers_planned: 2,
+        };
+        assert_eq!(ctx.reserve(3), Ok(0..3));
+        assert_eq!(ctx.reserve(0), Ok(3..3));
+        assert_eq!(ctx.reserve(usize::MAX - 3), Ok(3..usize::MAX));
+        assert_eq!(ctx.param_cursor, usize::MAX);
+        // Full: one more does not fit, and the error names the layer being
+        // planned and leaves the cursor where it was.
+        assert_eq!(
+            ctx.reserve(1),
+            Err(ValidationError::TooManyParams { layer: 2 })
+        );
+        assert_eq!(ctx.param_cursor, usize::MAX);
+        assert_eq!(ctx.reserve(0), Ok(usize::MAX..usize::MAX));
+    }
+
+    #[test]
+    fn compile_rejects_a_layer_whose_parameters_no_longer_fit() {
+        // 2 qubits × (2^63 − 1) blocks of one `Rx` = usize::MAX − 1 parameters,
+        // which still fit; the 4 of the convolution after them do not.
+        let ansatz = HardwareEfficientAnsatz {
+            rotations: vec![RotationAxis::Rx],
+            final_rotation_layer: false,
+            ..HardwareEfficientAnsatz::new(usize::MAX / 2)
+        };
+        let fits = QuantumModel::new(2)
+            .layer(Layer::HardwareEfficient(ansatz))
+            .readout(z0_readout());
+        assert_eq!(
+            fits.clone().compile(0).unwrap().num_params(),
+            usize::MAX - 1
+        );
+        let err = fits.conv(ConvBlock::Basic).compile(0).unwrap_err();
+        assert_eq!(err, ValidationError::TooManyParams { layer: 1 });
+    }
+
+    #[test]
     fn template_for_rejects_wrong_feature_count() {
         let model = QuantumModel::new(2)
             .angle_encoder(RotationAxis::Ry)
@@ -1626,6 +1687,26 @@ mod serde_tests {
         })
         .unwrap_err();
         assert!(err.contains("99"), "{err}");
+    }
+
+    #[test]
+    fn loading_rejects_a_reps_too_large_to_count() {
+        // full_model's hardware-efficient layer (index 4) runs on the 2 qubits
+        // left after pooling: 2 axes × 2 qubits × (2^63 + 1) blocks overflow.
+        let err = load_edited(|v| {
+            let layer = v["spec"]["layers"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find_map(|layer| layer.get_mut("HardwareEfficient"))
+                .expect("full_model has a hardware-efficient layer");
+            layer["reps"] = serde_json::json!(usize::MAX / 2 + 1);
+        })
+        .unwrap_err();
+        assert!(
+            err.contains("layer 4 needs more trainable parameters"),
+            "{err}"
+        );
     }
 }
 
