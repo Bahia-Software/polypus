@@ -21,7 +21,7 @@ Rules of the road:
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`, `test_cunqa_contract.py`) | ✅ present | the CUNQA seal sent `cores` to `qraise`, which CUNQA renamed `cores_per_qpu` in 2.4.0, so every reservation raised `TypeError` on CUNQA ≥ 2.4 (#204, fixed: `cores_per_qpu` goes through unchanged; **CUNQA 2.3 is no longer supported**); `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` received `backend` and `id` and CUNQA `run_qcs` received `backend`, none of them read (LOCAL-2, #230, fixed: Rust no longer sends them); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
-| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings; `polypus-qml`'s `every_instruction_kind_is_classified` in `src/problem.rs` for the gradient's gate classification; `polypus-sim`'s `apply_inverse_undoes_every_instruction_kind` in `src/statevector.rs` and `every_instruction_kind_is_differentiated_through` in `tests/adjoint.rs` for the adjoint gradient) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
+| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ both crates' `tests/inverse.rs` for `ConcreteCircuit::inverse`; `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings; `polypus-qml`'s `every_instruction_kind_is_classified` in `src/problem.rs` for the gradient's gate classification; `polypus-sim`'s `apply_inverse_undoes_every_instruction_kind` in `src/statevector.rs` and `every_instruction_kind_is_differentiated_through` in `tests/adjoint.rs` for the adjoint gradient) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed); CUNQA 3.0.0 failed such a job (`key 'counts' not found`) and split the key of a circuit with several classical registers with spaces (#253, #304, fixed in the seal); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` (+ `crates/polypus-optimizers/tests/initial_point.rs` and `tests/python/test_initial_point.py` for `initial_point`, `tests/python/test_final_shots.py` for `final_shots`, and `tests/python/test_qml_native_initial_point_final_shots.py` for both through `qml.Model.fit`; `crates/polypus-optimizers/tests/observer.rs` and `tests/python/test_callback.py` for `callback`) | ✅ present | DE `best_fitness` mismatch (C4) |
@@ -30,7 +30,7 @@ Rules of the road:
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 | C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
-| C-11 | Native QML (problem ↔ oracle, expectation Jacobian, `polypus.qml.Model`, `qml.expval`/`qml.jacobian`, `polypus.torch.QuantumLayer`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `tests/jacobian.rs` + `tests/adjoint.rs` + `src/model.rs` serde tests + `polypus-sim` `tests/adjoint.rs` + `polypus-infrastructure` `native.rs` adjoint tests + `polypus-evaluation` `qml_oracle.rs` + the primitive tests in `crates/polypus/src/bindings/qml.rs` + `tests/python/test_qml_native*.py` + `tests/python/test_qml_adjoint.py` + `tests/python/test_torch_*.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
+| C-11 | Native QML (problem ↔ oracle, expectation Jacobian, quantum kernel, `polypus.qml.Model`, `qml.expval`/`qml.jacobian`, `qml.kernel_matrix`, `polypus.torch.QuantumLayer`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `tests/jacobian.rs` + `tests/adjoint.rs` + `tests/kernel.rs` + `src/kernel.rs` + `src/model.rs` serde tests + `polypus-sim` `tests/adjoint.rs` + `polypus-infrastructure` `native.rs` adjoint and fidelity tests + `polypus-evaluation` `qml_oracle.rs` + the primitive tests in `crates/polypus/src/bindings/qml.rs` + `tests/python/test_qml_native*.py` + `tests/python/test_qml_adjoint.py` + `tests/python/test_torch_*.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
 | C-12 | Call trace (`trace=` / `POLYPUS_CALL_TRACE`, JSON Lines v1) | `polypus-orchestration` `src/trace.rs`, `src/trace/decorators.rs`, `src/flow/trace_tests.rs`, `tests/conformance_with_trace.rs` + `polypus` `src/bindings/call_trace.rs` + `tests/python/test_call_trace*.py` (+ `tests/python/test_interrupt.py` `test_trace_on_interrupt` for Ctrl+C, and `tests/python/test_typing_stubs.py` `TestTraceType` for the stub type and the guide's example) | ✅ present | — |
 
 ✅ means the listed test enforces the contract; a ⏳ contract would be
@@ -249,6 +249,11 @@ The Rust orchestration layer now returns a typed `Result` on every path:
     `polypus.InsufficientMemoryError`, which crosses back through `seam_error` /
     `external_to_pyerr` verbatim, keeping its class.
 
+  The exact quantum kernel (`qml.kernel_matrix(exact=True)`, C-11 (h)) is
+  refused the same way when the matrix it keeps beside its statevectors leaves
+  no room for two of them; its message names the matrix, its bytes and the
+  statevectors instead of a circuit.
+
   The message names the circuit (qubit count, or its index for Aer), the required
   and budgeted sizes, where the budget came from, and how to override it with
   `POLYPUS_MEM_BUDGET`. It is never raised against the blind 16 GiB fallback used
@@ -333,9 +338,11 @@ is pinned by `test_local_run_qcs_kwargs_*` in the same file.
 class hierarchy; subprocess runs with `POLYPUS_MEM_BUDGET` set on the native
 backend, `polypus.statevector` and Aer — `statevector`, `automatic` non-Clifford
 and `density_matrix` refused, a 26-qubit Clifford GHZ on `automatic` still run;
-`local.py` consuming `max_memory_mb`; and the "insufficient memory" status text of
-the installed Aer) and by `assert_maps_to` in `crates/polypus/src/exceptions.rs`
-(the Rust → Python class mapping).
+`qml.kernel_matrix(exact=True)` with a matrix that leaves no room for its
+statevectors; `local.py` consuming `max_memory_mb`; and the "insufficient memory"
+status text of the installed Aer) and by `assert_maps_to` in
+`crates/polypus/src/exceptions.rs` (the Rust → Python class mapping, for both
+refusals).
 
 ---
 
@@ -450,6 +457,26 @@ instruction is added for it); `apply_inverse_undoes_every_instruction_kind`
 and `every_instruction_kind_is_differentiated_through` fail until a new
 instruction has its inverse.
 
+**The inverse of a circuit.** `ConcreteCircuit::inverse` (what the quantum
+kernel uncomputes an encoder with, C-11 (h)) is an operation over the whole
+vocabulary, with no new instruction: the instructions in reverse order, each
+replaced by its exact inverse (global phase included) in the vocabulary — a
+self-inverse gate kept, `s`↔`sdg`, `t`↔`tdg`, `sx`↔`sxdg`, every angle negated
+(`u3(θ, φ, λ)† = u3(−θ, −λ, −φ)` under each spelling, `cu`'s `γ` too), `u2(φ,
+λ)` as `u3(−π/2, −λ, −φ)`, and `csx`, `rc3x` and `c3sqrtx`, of order 4 with no
+inverse among the instructions, repeated three times — on the same qubits and
+classical width. A barrier is kept in its reversed place. A measurement
+(`measure`, `measure_all`) and a call of a declared gate are refused with
+`CircuitError::NotInvertible`, naming the first; a free parameter or an
+expression, which a concrete circuit cannot hold, is the error `try_new` gives
+it. Its match is exhaustive, so a new instruction does not build until it is
+inverted; `c2_every_instruction_kind_is_inverted_or_refused` fails until the
+vocabulary list covers it, and `polypus-sim`'s `tests/inverse.rs` checks every
+inverse against the simulator (`U` then `U†`, and `U†` then `U`, leave a
+generic state where it was). The simulator's `apply_inverse` keeps its own
+table for the adjoint (it undoes `csx` and the composite gates part by part
+instead).
+
 Corollaries:
 
 - **Canonical QASM form.** The exporter emits a single canonical form (fixed
@@ -555,7 +582,12 @@ circuit, bounds), the calls-with-free-parameters tests in
 tests of `crates/polypus-circuit/tests/contracts.rs` (the whole vocabulary,
 gate by gate, `stdgates.inc` statements byte-identical, the fuzz corpus), and
 `crates/polypus-sim/tests/qasm3_semantics.rs` (every definition the export
-writes, against its instruction, as full matrices).
+writes, against its instruction, as full matrices). For the inverse:
+`c2_every_instruction_kind_is_inverted_or_refused` in
+`crates/polypus-circuit/tests/contracts.rs`, `crates/polypus-circuit/tests/inverse.rs`
+(each kind's inverse, the order, the angles, barriers, the errors, what the
+inverse keeps) and `crates/polypus-sim/tests/inverse.rs` (each inverse against
+the simulator).
 The Aer lowering boundary is enforced in Python by
 `tests/python/test_local_aer_lowering.py` (every out-of-basis gate and a
 declared gate run on Aer with the transpiled reference's counts and the native
@@ -2308,9 +2340,10 @@ C-8, whose circuits are opaque and scored by the caller's cost. The two forms
 are separate entry points that share the oracle, the scheduler and the
 optimizers underneath (`docs/adr/0007-native-qml.md`). The contract has a
 Rust half — the seam between a `QmlProblem` and the oracle that scores it, a
-Rust-to-Rust contract like C-5, and the loss-free expectation Jacobian beneath
-it — and a Python half, the `polypus.qml.Model` API built on it and the
-`qml.expval`/`qml.jacobian` primitives.
+Rust-to-Rust contract like C-5, the loss-free expectation Jacobian beneath
+it, and the quantum kernel of an encoder — and a Python half, the
+`polypus.qml.Model` API built on it, the `qml.expval`/`qml.jacobian`
+primitives and `qml.kernel_matrix`.
 
 ### The problem ↔ oracle seam (Rust)
 
@@ -2444,6 +2477,50 @@ batching and distribution are the oracle's concern.
     derivative in the sample, is `QmlError::NoInputGradient` naming it;
     samples that read their parameters or features through different gates are
     `QmlError::NoExactGradient`, never a silently wrong Jacobian.
+- **(h) The quantum kernel.** `FeatureMap::compile(num_qubits, layers,
+  num_features)` compiles encoders alone (no ansatz, no readout) through the
+  layers' own `plan` (`plan_layers`, shared with `QuantumModel::compile`), so a
+  stack raises the errors it raises in a model (`AmplitudeEncoderNotFirst`,
+  `TooManyFeatures`, `NotEnoughQubits`, …); a layer that reserves parameters is
+  `ValidationError::TrainableLayerInFeatureMap`. Its `circuit(x)` is `U(x)`:
+  gate for gate what a model's template emits for those layers, unmeasured, and
+  a sample they reject is that `QmlError`. A `FidelityKernel` over the states of
+  `x` (rows) and `y` (columns, or `x` again for the symmetric kernel) numbers
+  its pairs row-major — every `(i, j)`, or only `j >= i`, diagonal included,
+  `n(n+1)/2` of them — and gives, per pair, the compute-uncompute circuit
+  `U(x_i)`, then `U(y_j)†` (`ConcreteCircuit::inverse`, C-2, built for every
+  column once, by the first request for a pair's circuit, never by a caller that
+  only takes the states), then one `measure_all` (C-4, C-2 by construction), and
+  reads its counts as `counts["0"·n] / Σ counts` (`n` the encoder's qubits, C-3;
+  an absent key is `0`, an empty or zero total `QmlError::EmptyCounts`, a key of
+  another width `QmlError::CountsWidthMismatch`, never `NaN`), or its exact
+  probabilities as `P(0…0)` clamped to `[0, 1]`. `matrix(values)` assembles one
+  value per pair into the `rows × columns` matrix, a symmetric kernel's lower
+  half the mirror of its upper one, bit for bit. A matrix whose entries are not
+  addressable is `QmlError::KernelTooLarge`: `FidelityKernel::new` checks it
+  before it encodes any sample, `from_states` when it is built, over states
+  already encoded (the order `qml.kernel_matrix` keeps, every check of `x1`
+  before those of `x2`); states of different widths are
+  `QmlError::StateWidthMismatch`. The circuits can be taken in blocks
+  (`circuits(range)`), and the states themselves (`row_states`, `column_states`)
+  serve a caller that takes inner products instead:
+  `NativeStatevectorBackend::fidelity_matrix` gives `|⟨a_i|b_j⟩|²` from the
+  statevectors, each simulated once when they all fit in the memory budget
+  beside the result (in tiles otherwise), each entry one inner product summed
+  sequentially in basis-state order, so the matrix is the same `f64`s for every
+  budget, tile and thread count, and the compute-uncompute probabilities to
+  rounding. The result counts against the budget: its `rows × columns × 8` bytes
+  come off it before the statevectors are sized, and a known budget (never the
+  blind fallback) that does not leave room for two statevectors beside it is
+  `InsufficientMemoryForResult` (a `BackendError` variant) naming the matrix,
+  the statevectors and the budget, before anything is allocated or simulated. It
+  holds two statevectors at once at least: `fidelity_fits` says whether two fit,
+  one (the caller runs the circuits on `run_circuits_exact` instead, logged at
+  `info` once per backend — a route that, like the other exact paths, does not
+  count its results against the budget), or none (`InsufficientMemory`, the
+  exact path's own refusal). A circuit that measures individual qubits, or
+  states of different widths, are `UnsupportedCircuit`; `should_cancel` stops it
+  with `Aborted`.
 
 ### The Python API (`polypus.qml`)
 
@@ -2667,6 +2744,62 @@ for a training loop of the caller's own:
   model and rows against `wrt` ((g)'s errors); a `seed` on `qmio`. The
   `TypeError` for `model` comes first.
 
+**Quantum kernels.** `qml.kernel_matrix(encoder, x1, x2=None, *, shots=1024,
+infrastructure="local", n_qpus=1, nodes=1, cores_per_qpu=2, walltime=None,
+options=None, sim_method="automatic", noise_model=None, backend=None,
+seed=None, exact=False)` exposes (h) to Python:
+
+- **Result.** `K[i, j] = |⟨φ(x1_i)|φ(x2_j)⟩|²`, `|φ(x)⟩ = U(x)|0…0⟩` for the
+  `Encoder`'s layers, as a `float64` `numpy.ndarray`, C-contiguous, of shape
+  `(len(x1), len(x2))` — `(len(x1), len(x1))` without `x2` — with every entry
+  in `[0, 1]`. No manifest: the seed and `id` are logged.
+- **Arguments.** `encoder` is a `polypus.qml.Encoder`; anything else (an
+  `Ansatz`, a `Model`, a `TrainedModel`, a `Circuit`) is a `TypeError` naming
+  what it takes (trainable kernels are not supported). `x1` and `x2` are rows
+  or `Dataset`s (labels are not used). The execution arguments are
+  `qml.expval`'s, with its rules: `exact` needs `infrastructure="local"` and
+  `backend="polypus"`, `backend=None` goes by infrastructure, `seed` is drawn
+  when omitted and refused on `qmio` (C-7).
+- **Symmetry and diagonal.** Without `x2`, the `N(N+1)/2` pairs of the upper
+  triangle, diagonal included, run, and the lower triangle is their mirror, so
+  `K == K.T` bit for bit. The diagonal is executed like any entry, never set to
+  `1`: it is `1` to rounding exactly, and below it under noise. With `x2`, all
+  `N·M` entries run, even for an `x2` equal to `x1` (no symmetry is detected).
+- **Exact and shots.** With `exact=True`, the inner products of
+  `fidelity_matrix` ((h)), unless the memory budget holds one statevector of
+  the encoder's width but not two: then the compute-uncompute circuits on
+  `run_circuits_exact`, logged at `info`; the two are the same to rounding.
+  The inner products count the matrix itself against the budget: when its
+  `len(x1) × len(x2) × 8` bytes leave no room for the two statevectors an
+  inner product needs, the call raises `polypus.InsufficientMemoryError` (a
+  `polypus.BackendError`, the class a statevector that does not fit raises,
+  C-1) naming the matrix and the budget, before anything runs; a call on fewer
+  rows of `x1` gives those rows of the whole matrix, bit for bit. The exact
+  Gram matrix is positive semi-definite to rounding. With shots, each
+  entry is the `0…0` frequency of one compute-uncompute circuit, an unbiased
+  estimator of `K`; the matrix may not be positive semi-definite, and it is
+  returned as measured, never projected.
+- **Execution.** One backend and one scheduler per call — one connection, one
+  `qraise` on CUNQA — closed on every way out, errors and Ctrl+C included. The
+  pairs run in sequential blocks sized like `qml.expval`'s rows
+  (`candidate_window_size`, one circuit per pair), with the GIL released for
+  the whole loop; Ctrl+C raises `KeyboardInterrupt` between blocks and waves.
+  The exact inner products are one call that bounds its own memory (no
+  blocks), watched from the calling thread like an exact `qml.jacobian` block,
+  so Ctrl+C stops it in flight with the same `KeyboardInterrupt`. With shots
+  and a seed, the result does not depend on the blocks (every circuit's seed is
+  its position in the call); exactly, a call on some rows of `x1` equals those
+  rows of the call on all of them, bit for bit (not with shots, whose seeds
+  follow the pairs' global positions).
+- **Checks.** The `TypeError` for `encoder` comes first. Then each of these is
+  a `polypus.ConfigurationError` raised before a backend exists, in order:
+  `shots` and `n_qpus`, the CUNQA allocation and `exact`; the rows of `x1`
+  (empty, ragged, non-finite), an `Encoder` with no layers, the feature count
+  against the encoder and every sample the encoders reject (a zero sample for
+  amplitude encoding, a non-binary one for basis encoding); the same for `x2`,
+  whose rows must be as wide as `x1`'s; a matrix too large; a `seed` on
+  `qmio`. The messages name `x1` or `x2`.
+
 **The PyTorch layer (`polypus.torch`).** `polypus.torch.QuantumLayer(model, *,
 initial_params=None, <qml.expval's execution arguments>)` is a
 `torch.nn.Module` over a native `Model`, and `polypus.torch.from_trained(trained,
@@ -2756,6 +2889,13 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     `the_adjoint_gradient_needs_an_exact_gradient_too` in `src/problem.rs`,
     with `crates/polypus-sim/tests/adjoint.rs` for the simulator's derivative:
     (e)'s adjoint differentiation;
+  - `crates/polypus-qml/tests/kernel.rs` (every encoder against its closed
+    form, the two exact routes, the diagonal, symmetry and the gates of a
+    model's encoders) and the tests in `src/kernel.rs` (pairs, circuits,
+    readers, assembly, the layer checks, the size and width errors), with the
+    `fidelit*` tests in `crates/polypus-infrastructure/src/native.rs` (the
+    naive inner products, the tiling, the memory refusal and its fallback,
+    rejections, cancellation) and `ConcreteCircuit::inverse`'s (C-2): (h);
   - `crates/polypus-qml/tests/jacobian.rs`, the `untie_traced_*` tests in
     `src/problem.rs`, the tests in `src/jacobian.rs` (a structure other than
     sample 0's, an angle gate that is not a Pauli rotation, an opaque encoder
@@ -2781,10 +2921,13 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     once, a cancellation or an error between blocks, a backend closed when no
     scheduler can be built over it, the array conversion, the exact Jacobian
     by the adjoint whatever the blocks, a Ctrl+C inside an exact block and the
-    watcher that stops it), with the window
+    watcher that stops it), and their kernel twins (`a_seeded_kernel_*`,
+    `the_exact_kernel_*`, `exact_rows_in_chunks_*`, `a_kernel_*`,
+    `a_ctrl_c_stops_an_exact_kernel_in_flight`), with the window
     tests in `crates/polypus-evaluation/src/qml_oracle.rs`
     (`a_backend_*`, `the_lift_*`, `many_circuits_per_item_*`,
-    `the_window_is_never_zero`): `qml.expval`/`qml.jacobian`'s execution.
+    `the_window_is_never_zero`): `qml.expval`/`qml.jacobian`/`qml.kernel_matrix`'s
+    execution.
 - **Python:** `tests/python/test_qml_native.py` (construction, the option
   sets, every construction check, `Dataset` splits and scaling, the
   `qml.train`/`qml.predict` rejection), `test_qml_native_layers.py` (what each
@@ -2802,6 +2945,11 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   types, shapes and contiguity, `expval` against `run`/`predict`, the Jacobian
   against finite differences for every layer and readout and against the
   chain rule of a loss, chunks, seeds, shots, every rejection),
+  `test_qml_native_kernel.py` (`qml.kernel_matrix`: types, shape and
+  contiguity, every encoder against a NumPy closed form and Qiskit's own
+  statevectors, symmetry bit for bit, the executed diagonal, PSD, the circuits
+  counted at the CUNQA seam, shots against exact and unbiased, seeds, chunks,
+  every rejection and their order),
   `test_torch_quantum_layer.py` (the PyTorch layer: forward bit for bit
   `expval` in one call per batch, `gradcheck` with default tolerances for the
   parameters and the inputs, the backward pass the same by the adjoint and by
@@ -2819,18 +2967,21 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   every sample, minibatches included, with its shots and every sample at the
   seam), `test_typing_stubs.py`'s
   `TestFitTypes` (the stub types of both), `TestPrimitiveTypes` (each
-  `wrt`'s result type) and `TestTorchTypes` (the layer's inline types), the native
+  `wrt`'s result type), `TestKernelTypes` (`kernel_matrix`'s) and
+  `TestTorchTypes` (the layer's inline types), the native
   QML cases of `test_interrupt.py` (Ctrl+C during `fit`, with and without a
-  `callback`, and during `qml.jacobian`, exact and sampled, and inside one
-  long exact block; the minibatch rescore runs with the GIL released),
+  `callback`, during `qml.jacobian`, exact and sampled, and inside one
+  long exact block, and during `qml.kernel_matrix`, exact and sampled; the
+  minibatch rescore runs with the GIL released),
   `test_qml_adjoint.py` (the adjoint and the parameter-shift fallback give the
   same `qml.jacobian` and `fit` with Adam, the fallback logged, and no memory
   for one statevector the exact path's error; the same comparison for the
   `QuantumLayer` backward is in `test_torch_quantum_layer.py`),
   `TestNativeQmlChecksRaiseIt` in `test_configuration_errors.py` (every check
-  of `fit`, `predict`, `run`, `qml.expval` and `qml.jacobian` is a
-  `polypus.ConfigurationError` raised before any CUNQA call, and a primitive
-  runs every block on one allocation), and the `Model.fit` cases of `test_callback.py` (its
+  of `fit`, `predict`, `run`, `qml.expval`, `qml.jacobian` and
+  `qml.kernel_matrix` is a `polypus.ConfigurationError` raised before any
+  CUNQA call, and a primitive, the kernel included, runs every block on one
+  allocation), and the `Model.fit` cases of `test_callback.py` (its
   `callback`'s `TypeError` before the CUNQA seam and after `final_shots`, one
   call per iteration for every optimizer, Adam's `evaluations`, a stop that
   still sends the final batch, an exception raised as itself, with no call or

@@ -12,6 +12,29 @@ Entries were curated from the Conventional Commits history. Releases before
 ## [Unreleased]
 
 ### Added
+- `polypus.qml.kernel_matrix(encoder, x1, x2=None, *, ...)`, the fidelity
+  quantum kernel `K[i, j] = |⟨φ(x1_i)|φ(x2_j)⟩|²` of a native `Encoder` as a
+  `float64` NumPy array, ready for scikit-learn's
+  `SVC(kernel="precomputed")`. With `exact=True` it takes the inner products of
+  the native simulator's statevectors, each state simulated once when they fit
+  in the memory budget; with shots, the `0…0` frequency of one
+  compute-uncompute circuit (`U(x1_i)` then `U(x2_j)†`) per entry. Without
+  `x2` only the upper triangle, diagonal included, runs (`N(N+1)/2` circuits)
+  and the matrix is symmetric bit for bit; the diagonal is executed, not set
+  to 1. It takes `qml.expval`'s execution arguments and rules, checks
+  everything before a backend exists, and runs the pairs in blocks over one
+  backend per call. In `polypus-circuit`: `ConcreteCircuit::inverse` and
+  `CircuitError::NotInvertible`. In `polypus-qml`: `FeatureMap`,
+  `FeatureStates` and `FidelityKernel`, and the variants
+  `ValidationError::TrainableLayerInFeatureMap`, `QmlError::KernelTooLarge`
+  and `QmlError::StateWidthMismatch`. In `polypus-infrastructure`:
+  `NativeStatevectorBackend::fidelity_matrix` and `fidelity_fits`; the exact
+  kernel counts its matrix against the memory budget. In `polypus-backend`:
+  `InsufficientMemoryForResult` and the
+  `BackendError::InsufficientMemoryForResult` variant (`BackendError` is
+  `#[non_exhaustive]`), raised in Python as
+  `polypus.InsufficientMemoryError` when a result leaves no room for its
+  statevectors. See `examples/qml_kernel_svc.py` (#504).
 - `polypus.qml.Ansatz.strongly_entangling(reps, ranges=None, entangler="cx")`,
   PennyLane's `StronglyEntanglingLayers`: per layer, a general rotation on
   every qubit, emitted as `Rz(φ)`, `Ry(θ)`, `Rz(ω)`, in that order, so the
@@ -95,6 +118,12 @@ Entries were curated from the Conventional Commits history. Releases before
   `libm` (`erf` for the Boys function).
 
 ### Changed
+- **BREAKING (Rust):** `polypus_qml::ValidationError` has a new variant,
+  `TrainableLayerInFeatureMap`, so an exhaustive `match` on it outside its
+  crate must handle it (#504).
+- **BREAKING (Rust):** `polypus_qml::QmlError` has two new variants,
+  `KernelTooLarge` and `StateWidthMismatch`, so an exhaustive `match` on it
+  outside its crate must handle them (#504).
 - **BREAKING (Rust):** `polypus_qml::ValidationError` has two new variants,
   `StronglyEntanglingRangesLength` and `StronglyEntanglingRangeOutOfBounds`,
   so an exhaustive `match` on it outside its crate must handle them (#505).

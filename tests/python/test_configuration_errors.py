@@ -187,6 +187,21 @@ def _primitive(entry_point, x=_UNSET, params=_UNSET, model=None, **kwargs):
     )
 
 
+def _kernel(x1=_UNSET, x2=None, encoder=None, **kwargs):
+    from qml_native_helpers import X
+
+    kwargs.setdefault("infrastructure", "cunqa")
+    kwargs.setdefault("shots", 16)
+    return polypus.qml.kernel_matrix(
+        encoder or polypus.qml.Encoder(1).angle_encoder("ry"),
+        X if x1 is _UNSET else x1,
+        x2,
+        nodes=1,
+        cores_per_qpu=1,
+        **kwargs,
+    )
+
+
 def _amplitude_model():
     from qml_native_helpers import make_model
 
@@ -306,6 +321,43 @@ class TestNativeQmlChecksRaiseIt:
                 "amplitude encoder",
                 id="jacobian-amplitude-inputs",
             ),
+            pytest.param(lambda: _kernel(shots=0), "shots", id="kernel-shots"),
+            pytest.param(lambda: _kernel(exact=True), "exact=True", id="kernel-exact"),
+            pytest.param(
+                lambda: _kernel(x1=[]), "x1: dataset is empty", id="kernel-x1"
+            ),
+            pytest.param(
+                lambda: _kernel(x1=[[0.1, 0.2]]),
+                "x1: layer needs 2 active qubit",
+                id="kernel-too-many-features",
+            ),
+            pytest.param(
+                lambda: _kernel(
+                    x1=[[0.0, 0.0]],
+                    encoder=polypus.qml.Encoder(1).amplitude_encoder(),
+                ),
+                "x1: amplitude encoding",
+                id="kernel-zero-sample",
+            ),
+            pytest.param(
+                lambda: _kernel(x2=[[0.1], [0.2, 0.3]]),
+                "x2: ragged",
+                id="kernel-x2-ragged",
+            ),
+            pytest.param(
+                lambda: _kernel(
+                    x1=[[0.1, 0.2]],
+                    x2=[[0.1]],
+                    encoder=polypus.qml.Encoder(2).angle_encoder("ry"),
+                ),
+                "x2 has 1 feature",
+                id="kernel-x2-width",
+            ),
+            pytest.param(
+                lambda: _kernel(infrastructure="qmio", seed=1),
+                "seed is not supported",
+                id="kernel-seed-on-qmio",
+            ),
         ],
     )
     def test_before_any_cunqa_call(self, monkeypatch, call, match):
@@ -326,6 +378,9 @@ class TestNativeQmlChecksRaiseIt:
             fake = FakeCunqa().install(monkeypatch)
             _primitive(entry)
             assert fake.names()[0] == "qraise"
+        fake = FakeCunqa().install(monkeypatch)
+        _kernel()
+        assert fake.names()[0] == "qraise"
 
     @pytest.mark.parametrize("entry", ["expval", "jacobian"])
     def test_a_primitive_runs_every_block_on_one_allocation(self, monkeypatch, entry):
@@ -337,6 +392,21 @@ class TestNativeQmlChecksRaiseIt:
         rows = [[0.1 * (i % 30)] for i in range(6 * len(os.sched_getaffinity(0)) + 1)]
         values = _primitive(entry, x=rows)
         assert len(values) == len(rows)
+        names = fake.names()
+        assert names.count("qraise") == 1 and names[0] == "qraise", names
+        assert names.count("qdrop") == 1 and names[-1] == "qdrop", names
+
+    def test_a_kernel_runs_every_block_on_one_allocation(self, monkeypatch):
+        # More pairs than one block holds on this host (2 × cores pairs each):
+        # one `qraise`, the N(N+1)/2 circuits on that family, one `qdrop`.
+        import os
+
+        fake = FakeCunqa().install(monkeypatch)
+        n = 2 * len(os.sched_getaffinity(0)) + 3
+        rows = [[0.1 * (i % 30)] for i in range(n)]
+        k = _kernel(x1=rows)
+        assert k.shape == (n, n)
+        assert len(fake.runs) == n * (n + 1) // 2
         names = fake.names()
         assert names.count("qraise") == 1 and names[0] == "qraise", names
         assert names.count("qdrop") == 1 and names[-1] == "qdrop", names

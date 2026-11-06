@@ -310,19 +310,7 @@ impl QuantumModel {
             None => return Err(ValidationError::MissingReadout),
         };
 
-        let mut ctx = LayerContext {
-            active: (0..self.num_qubits).collect(),
-            num_features,
-            param_cursor: 0,
-            layers_planned: 0,
-        };
-        let mut allocations = Vec::with_capacity(self.layers.len());
-        for layer in &self.layers {
-            allocations.push(layer.plan(&mut ctx)?);
-            // Track position so a later layer can tell it is *not* first (the
-            // amplitude encoder rejects any position but the first).
-            ctx.layers_planned += 1;
-        }
+        let (allocations, ctx) = plan_layers(self.num_qubits, &self.layers, num_features)?;
 
         if ctx.param_cursor == 0 {
             return Err(ValidationError::NoTrainableParams);
@@ -353,6 +341,52 @@ impl QuantumModel {
             basis_change,
         })
     }
+}
+
+/// Run every layer's [`plan`](LayerOps::plan) over `num_qubits` qubits and
+/// `num_features` features, in order: one allocation per layer, and the
+/// context as the last layer left it (its active qubits and its parameter
+/// cursor). The checks of [`QuantumModel::compile`] that belong to the layers,
+/// shared with the kernel's [`FeatureMap`](crate::FeatureMap), so the two
+/// plan a layer stack identically.
+pub(crate) fn plan_layers(
+    num_qubits: usize,
+    layers: &[Layer],
+    num_features: usize,
+) -> Result<(Vec<LayerAllocation>, LayerContext), ValidationError> {
+    let mut ctx = LayerContext {
+        active: (0..num_qubits).collect(),
+        num_features,
+        param_cursor: 0,
+        layers_planned: 0,
+    };
+    let mut allocations = Vec::with_capacity(layers.len());
+    for layer in layers {
+        allocations.push(layer.plan(&mut ctx)?);
+        // Track position so a later layer can tell it is *not* first (the
+        // amplitude encoder rejects any position but the first).
+        ctx.layers_planned += 1;
+    }
+    Ok((allocations, ctx))
+}
+
+/// Emit every layer's gates for the sample `x` onto a new circuit of
+/// `num_qubits` qubits, with the allocations [`plan_layers`] recorded, and the
+/// trace of how their angles read `x`. No readout and no measurement: what
+/// [`CompiledModel::traced_template_for`] and the kernel's
+/// [`FeatureMap`](crate::FeatureMap) both start from.
+pub(crate) fn emit_layers(
+    num_qubits: usize,
+    layers: &[Layer],
+    allocations: &[LayerAllocation],
+    x: &[f64],
+) -> Result<(ParameterizedCircuit, InputTrace), QmlError> {
+    let mut qc = ParameterizedCircuit::new(num_qubits);
+    let mut trace = InputTrace::default();
+    for (layer, alloc) in layers.iter().zip(allocations) {
+        layer.emit_traced(&mut qc, alloc, x, &mut trace)?;
+    }
+    Ok((qc, trace))
 }
 
 /// Resolve a [`Readout`]'s logical qubit positions to physical indices against
@@ -547,11 +581,12 @@ impl CompiledModel {
             });
         }
 
-        let mut qc = ParameterizedCircuit::new(self.spec.num_qubits);
-        let mut trace = InputTrace::default();
-        for (layer, alloc) in self.spec.layers.iter().zip(self.allocations.iter()) {
-            layer.emit_traced(&mut qc, alloc, x, &mut trace)?;
-        }
+        let (mut qc, trace) = emit_layers(
+            self.spec.num_qubits,
+            &self.spec.layers,
+            &self.allocations,
+            x,
+        )?;
         // Rotate each non-`Z` qubit into the computational basis before the
         // terminal measurement (design doc §7.2): `H` measures `X`; `Sdg` then
         // `H` measures `Y`. `basis_change` is sorted by physical index, so the

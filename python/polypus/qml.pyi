@@ -49,6 +49,7 @@ __all__ = [
     "load",
     "expval",
     "jacobian",
+    "kernel_matrix",
     "Dataset",
     "PauliTerm",
     "Observable",
@@ -384,6 +385,28 @@ def jacobian(
 ) -> Union[
     npt.NDArray[np.float64], tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]
 ]: ...
+
+# The fidelity kernel |<phi(x1_i)|phi(x2_j)>|^2 of an Encoder's states: shape
+# (len(x1), len(x2)), or (len(x1), len(x1)) and symmetric for x2=None.
+def kernel_matrix(
+    encoder: Encoder,
+    x1: Union[_DatasetRows, Dataset],
+    x2: Optional[Union[_DatasetRows, Dataset]] = None,
+    *,
+    shots: int = 1024,
+    infrastructure: str = "local",
+    n_qpus: int = 1,
+    nodes: int = 1,
+    cores_per_qpu: int = 2,
+    walltime: Optional[str] = None,
+    options: Optional[dict[str, str]] = None,
+    sim_method: str = "automatic",
+    noise_model: Optional[NoiseModel] = None,
+    backend: Optional[str] = None,
+    # Omitted: drawn and logged, not returned; must be omitted on "qmio".
+    seed: Optional[int] = None,
+    exact: bool = False,
+) -> npt.NDArray[np.float64]: ...
 
 @final
 class ExactResult:
