@@ -937,7 +937,9 @@ fn fidelity(a: &Statevector, b: &Statevector) -> f64 {
 /// Write `fidelity(held[i], others[j])` at row `row0 + i`, column `col0 + j`
 /// of the `width`-column `matrix`, the rows in parallel; with `upper`, only
 /// where the column is at least the row. `cancelled` is polled before each
-/// row.
+/// row; once it says so, the rows not yet started are skipped and the result
+/// is [`BackendError::Aborted`]. A flag rather than rayon's `try_for_each`,
+/// which the oldest rayon the manifest allows (1.0) does not offer here.
 fn fill_fidelities(
     matrix: &mut [f64],
     width: usize,
@@ -948,15 +950,18 @@ fn fill_fidelities(
     upper: bool,
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), BackendError> {
+    let aborted = AtomicBool::new(false);
     let rows = &mut matrix[row0 * width..(row0 + held.len()) * width];
     rows.par_chunks_mut(width)
         .zip(held.par_iter())
         .enumerate()
-        .try_for_each(|(i, (row, a))| {
+        .for_each(|(i, (row, a))| {
+            if aborted.load(Ordering::Relaxed) {
+                return;
+            }
             if cancelled() {
-                return Err(BackendError::Aborted(
-                    "the fidelity matrix was cancelled".to_string(),
-                ));
+                aborted.store(true, Ordering::Relaxed);
+                return;
             }
             for (j, b) in others.iter().enumerate() {
                 let column = col0 + j;
@@ -964,8 +969,13 @@ fn fill_fidelities(
                     row[column] = fidelity(a, b);
                 }
             }
-            Ok(())
-        })
+        });
+    if aborted.load(Ordering::Relaxed) {
+        return Err(BackendError::Aborted(
+            "the fidelity matrix was cancelled".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// One adjoint differentiation for
