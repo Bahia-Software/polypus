@@ -92,6 +92,38 @@ def test_a_circuit_over_an_explicit_budget_is_refused_with_a_typed_error(tmp_pat
         assert f"refused: {label}" in result.stdout
 
 
+def test_a_result_that_leaves_no_room_for_its_statevectors_is_refused_alike(tmp_path):
+    # The exact quantum kernel keeps its matrix beside the statevectors whose
+    # inner products fill it, and counts it against the same budget: 1-qubit
+    # states take 32 B, so in 1 KiB a 12 x 12 matrix (1152 B) leaves no room
+    # for the two it needs. The same exception as a statevector that does not
+    # fit, with the same override.
+    code = """
+    import polypus
+    from polypus import qml
+    encoder = qml.Encoder(1).angle_encoder("ry")
+    rows = [[0.3 * i] for i in range(12)]
+    try:
+        qml.kernel_matrix(encoder, rows, exact=True)
+    except polypus.PolypusError as exc:  # C-1: catchable at the base class
+        assert type(exc) is polypus.InsufficientMemoryError, type(exc)
+        message = str(exc)
+        for needle in ("12 x 12 fidelity matrix", "2 1-qubit statevectors", "1.00 KiB",
+                       "set by POLYPUS_MEM_BUDGET", "POLYPUS_MEM_BUDGET=64G"):
+            assert needle in message, (needle, message)
+        print("refused: kernel")
+    else:
+        raise AssertionError("expected InsufficientMemoryError")
+    # Fewer rows at a time fit.
+    assert qml.kernel_matrix(encoder, rows[:10], exact=True).shape == (10, 10)
+    print("fits: kernel")
+    """
+    result = _run_child(code, "1K", tmp_path)
+    _assert_ok(result)
+    assert "refused: kernel" in result.stdout
+    assert "fits: kernel" in result.stdout
+
+
 def test_the_qubit_ceiling_value_error_still_comes_first(tmp_path):
     # Above `MAX_QUBITS` the ceiling's ValueError is unchanged, even under a budget
     # that would also refuse the circuit.
