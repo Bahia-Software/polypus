@@ -1321,6 +1321,57 @@ impl ConcreteCircuit {
         self.declared_clbits
     }
 
+    /// The inverse circuit `U†`: the instructions in reverse order, each
+    /// replaced by its inverse in the vocabulary, on the same qubits and with
+    /// the same classical width. Exact, global phase included, so `c`
+    /// followed by `c.inverse()` is the identity:
+    ///
+    /// - a gate that is its own inverse is kept, and so is a barrier;
+    /// - `s`↔`sdg`, `t`↔`tdg`, `sx`↔`sxdg`;
+    /// - every angle is negated: a rotation or phase by `−θ`, and
+    ///   `u3(θ, φ, λ)† = u3(−θ, −λ, −φ)` under each spelling (`u`, `u3`, and the
+    ///   controlled `cu3` and `cu`, whose phase `γ` is negated too);
+    /// - `u2(φ, λ)` becomes `u3(−π/2, −λ, −φ)`, its inverse having no `u2`
+    ///   spelling;
+    /// - `csx`, `rc3x` and `c3sqrtx`, whose inverses are not instructions of the
+    ///   vocabulary, are repeated three times (each is of order 4, so `U³ = U†`).
+    ///
+    /// So `c.inverse()?.inverse()? == c` for a circuit without `u2`, `csx`,
+    /// `rc3x` or `c3sqrtx`; for those it is the same operator, not the same
+    /// instructions.
+    ///
+    /// ```
+    /// use polypus_circuit::{GateInstruction, ParameterizedCircuit};
+    ///
+    /// let u = ParameterizedCircuit::new(2).h(0).s(0).rzz(0, 1, 0.5);
+    /// let inverse = u.assign_parameters(&[]).unwrap().inverse().unwrap();
+    /// assert_eq!(
+    ///     inverse.gates()[0],
+    ///     GateInstruction::Rzz { q0: 0, q1: 1, theta: (-0.5).into() }
+    /// );
+    /// assert_eq!(inverse.gates()[1], GateInstruction::Sdg(0));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`CircuitError::NotInvertible`] for the first measurement (`measure`,
+    ///   `measure_all`), which is not unitary, or call of a declared gate,
+    ///   whose inverse is not an instruction of the vocabulary;
+    /// - the errors of [`try_new`](Self::try_new) for a circuit built with
+    ///   `new_unchecked` that it would reject (a free parameter, an
+    ///   expression, an operand out of range).
+    pub fn inverse(&self) -> Result<Self, CircuitError> {
+        let mut gates = Vec::with_capacity(self.gates.len());
+        for (position, gate) in self.gates.iter().enumerate() {
+            gate.push_inverse(position, &mut gates)?;
+        }
+        // Each instruction's inverse is one instruction or three equal ones, so
+        // reversing the whole sequence reverses the circuit's order and leaves
+        // every inverse as it was.
+        gates.reverse();
+        self.try_with_gates(gates)
+    }
+
     /// Serialize to OpenQASM 2.0.
     ///
     /// # Panics

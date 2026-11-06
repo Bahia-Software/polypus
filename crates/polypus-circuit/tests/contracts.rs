@@ -135,6 +135,51 @@ fn c2_full_vocabulary_roundtrip_is_byte_stable() {
     assert_eq!(imported.gates(), bound.gates());
 }
 
+/// `ConcreteCircuit::inverse` is an operation over the whole vocabulary: every
+/// instruction kind is either inverted into instructions of the vocabulary
+/// (which export and read back as themselves) or refused with the typed
+/// `NotInvertible` — exactly the measurements and the calls of declared gates.
+/// The kinds are counted, so a new instruction fails here until
+/// `full_vocabulary` exercises it; `push_inverse`'s exhaustive match fails the
+/// build until it says how it is inverted. That each inverse undoes its gate is
+/// `polypus-sim`'s `tests/inverse.rs`, against the reference simulator.
+#[test]
+fn c2_every_instruction_kind_is_inverted_or_refused() {
+    let refused = [
+        GateInstruction::Measure { qubit: 0, cbit: 0 }.kind_index(),
+        GateInstruction::MeasureAll.kind_index(),
+        declared_gate_call().kind_index(),
+    ];
+    let mut seen = [false; GateInstruction::KINDS];
+    let bound = full_vocabulary().assign_parameters(&[0.4, -0.9]).unwrap();
+    for gate in bound.gates().iter().chain([&GateInstruction::MeasureAll]) {
+        seen[gate.kind_index()] = true;
+        let single = bound.try_with_gates(vec![gate.clone()]).unwrap();
+        match single.inverse() {
+            Ok(inverse) => {
+                assert!(
+                    !refused.contains(&gate.kind_index()),
+                    "{gate:?} must be refused"
+                );
+                assert!(!inverse.gates().is_empty(), "{gate:?}: empty inverse");
+                let qasm = inverse.try_to_qasm2().unwrap();
+                let back = ParameterizedCircuit::from_qasm2(&qasm).unwrap();
+                assert_eq!(back.gates(), inverse.gates(), "{gate:?}: {qasm}");
+            }
+            Err(CircuitError::NotInvertible { position: 0, .. }) => assert!(
+                refused.contains(&gate.kind_index()),
+                "{gate:?} must be inverted"
+            ),
+            Err(e) => panic!("{gate:?}: {e}"),
+        }
+    }
+    let missing: Vec<usize> = (0..GateInstruction::KINDS).filter(|&k| !seen[k]).collect();
+    assert!(
+        missing.is_empty(),
+        "instruction kinds not inverted: {missing:?}"
+    );
+}
+
 /// The whole vocabulary, gate by gate: each single-gate circuit is a fixed
 /// point under export → import → export. This is the "for each gate in the set"
 /// half of the C-2 round-trip guarantee.
