@@ -85,9 +85,7 @@ impl LayerOps for PoolLayer {
             return Err(ValidationError::PoolNeedsTwoQubits { active });
         }
         // Parameter sharing: reserve the block's θ once for the whole layer.
-        let count = self.param_count();
-        let params = ctx.param_cursor..ctx.param_cursor + count;
-        ctx.param_cursor += count;
+        let params = ctx.reserve(self.param_count())?;
 
         // The allocation snapshots the active set *before* pooling — `emit`
         // needs it to map every logical position to its physical qubit.
@@ -263,6 +261,22 @@ mod tests {
         // 2 pairs × 4 gates.
         assert_eq!(qc.gates().len(), 8);
         assert_eq!(qc.num_params(), 3);
+    }
+
+    #[test]
+    fn plan_rejects_parameters_that_do_not_fit_after_the_earlier_ones() {
+        let mut c = LayerContext {
+            param_cursor: usize::MAX - 1,
+            layers_planned: 4,
+            ..ctx(4)
+        };
+        assert_eq!(
+            PoolLayer::new(PoolBlock::Basic).plan(&mut c).unwrap_err(),
+            ValidationError::TooManyParams { layer: 4 }
+        );
+        // Neither the cursor nor the active qubits change.
+        assert_eq!(c.param_cursor, usize::MAX - 1);
+        assert_eq!(c.active, vec![0, 1, 2, 3]);
     }
 
     #[test]

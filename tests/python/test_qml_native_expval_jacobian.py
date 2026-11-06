@@ -84,6 +84,14 @@ def layers():
             qml.Encoder(4).iqp_encoder(),
             qml.Ansatz(4).real_amplitudes(1).iqp_encoder("linear"),
         ),
+        "strongly-entangling": (
+            qml.Encoder(4).angle_encoder("ry"),
+            qml.Ansatz(4).strongly_entangling(2),
+        ),
+        "strongly-entangling-cz": (
+            qml.Encoder(4).angle_encoder("rx"),
+            qml.Ansatz(4).strongly_entangling(2, ranges=[3, 2], entangler="cz"),
+        ),
     }
 
 
@@ -284,6 +292,21 @@ class TestJacobianIsExact:
         model = qml.Model(
             qml.Encoder(4).angle_encoder("ry"),
             qml.Ansatz(4).conv("basic").pool("basic"),
+            readout,
+        )
+        params = point(model, offset=-1.1)
+        assert_close(
+            qml.jacobian(model, ROWS, params, exact=True),
+            fd_params(model, ROWS, params),
+        )
+
+    def test_strongly_entangling_after_pooling(self):
+        # Pooling leaves 2 of the 4 qubits; the layer's rotations follow the
+        # shared convolution and pooling parameters.
+        readout = qml.Readout([qml.Z(0), qml.Z(1)], decision="argmax")
+        model = qml.Model(
+            qml.Encoder(4).angle_encoder("ry"),
+            qml.Ansatz(4).conv("basic").pool("basic").strongly_entangling(2),
             readout,
         )
         params = point(model, offset=-1.1)
