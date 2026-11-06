@@ -11,12 +11,14 @@
 use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::{
-    max_statevector_concurrency, BackendCapabilities, BoundCircuit, CircuitTask,
-    InfrastructureError, MemBudget, QuantumBackend, RunParams,
+    max_statevector_concurrency, BackendCapabilities, BoundCircuit, BudgetSource, CircuitTask,
+    InfrastructureError, InsufficientMemoryForResult, MemBudget, QuantumBackend, RunParams,
 };
 use polypus_backend::mem_budget::{active_budget, check_fits};
 use polypus_circuit::{ConcreteCircuit, GateInstruction, ParameterizedCircuit};
-use polypus_sim::{sample_projected, SimError, Simulator, StatevectorSimulator, MAX_CLBITS};
+use polypus_sim::{
+    sample_projected, SimError, Simulator, Statevector, StatevectorSimulator, C64, MAX_CLBITS,
+};
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -55,6 +57,9 @@ pub struct NativeStatevectorBackend {
     /// the parameter shift ([`adjoint_fits`](Self::adjoint_fits)): it says so
     /// once, not on every gradient of a long fit.
     shift_fallback_logged: AtomicBool,
+    /// The same for a fidelity matrix that fell back to compute-uncompute
+    /// circuits ([`fidelity_fits`](Self::fidelity_fits)).
+    fidelity_fallback_logged: AtomicBool,
 }
 
 impl NativeStatevectorBackend {
@@ -76,6 +81,7 @@ impl NativeStatevectorBackend {
             base_seed: seed,
             counter: AtomicU64::new(0),
             shift_fallback_logged: AtomicBool::new(false),
+            fidelity_fallback_logged: AtomicBool::new(false),
         }
     }
 
@@ -453,21 +459,268 @@ impl NativeStatevectorBackend {
         num_qubits: usize,
         budget: MemBudget,
     ) -> Result<bool, BackendError> {
-        self.check_memory_against(num_qubits, budget)?;
-        if num_qubits > self.simulator.max_qubits
-            || check_fits(adjoint_width(num_qubits), budget).is_ok()
-        {
-            return Ok(true);
-        }
-        if !self.shift_fallback_logged.swap(true, Ordering::Relaxed) {
+        self.two_fit_against(num_qubits, budget, &self.shift_fallback_logged, || {
             log::info!(
                 "the exact gradient of a {num_qubits}-qubit circuit falls back to the parameter-shift \
                  rule: the adjoint gradient needs {} statevectors at once and the memory budget \
                  holds one",
                 polypus_sim::ADJOINT_STATEVECTORS
             );
+        })
+    }
+
+    /// Whether two `num_qubits`-qubit statevectors fit in `budget` at once:
+    /// `Ok(true)` when they do (or the width is above the qubit ceiling, left
+    /// to the simulator's error, or the budget is the blind fallback),
+    /// `Ok(false)` when one fits but not two — `log` runs the first time, as
+    /// `logged` records — and the exact path's
+    /// [`BackendError::InsufficientMemory`] when not even one fits. Shared by
+    /// [`adjoint_fits`](Self::adjoint_fits) and
+    /// [`fidelity_fits`](Self::fidelity_fits).
+    fn two_fit_against(
+        &self,
+        num_qubits: usize,
+        budget: MemBudget,
+        logged: &AtomicBool,
+        log: impl FnOnce(),
+    ) -> Result<bool, BackendError> {
+        self.check_memory_against(num_qubits, budget)?;
+        if num_qubits > self.simulator.max_qubits
+            || check_fits(adjoint_width(num_qubits), budget).is_ok()
+        {
+            return Ok(true);
+        }
+        if !logged.swap(true, Ordering::Relaxed) {
+            log();
         }
         Ok(false)
+    }
+
+    /// Whether [`fidelity_matrix`](Self::fidelity_matrix) can run on
+    /// `num_qubits`-qubit states in the memory budget: an inner product holds
+    /// two statevectors at once. `Ok(true)` when two fit; `Ok(false)` when one
+    /// fits but not two — the caller then runs the compute-uncompute circuits
+    /// on [`run_circuits_exact`](Self::run_circuits_exact), which hold one, and
+    /// this logs that at `info` level the first time it happens on this backend
+    /// — and [`BackendError::InsufficientMemory`] when not even one fits, the
+    /// error `run_circuits_exact` refuses the same width with. The decision of
+    /// [`adjoint_fits`](Self::adjoint_fits), for the same two statevectors.
+    pub fn fidelity_fits(&self, num_qubits: usize) -> Result<bool, BackendError> {
+        self.fidelity_fits_against(num_qubits, active_budget())
+    }
+
+    /// [`fidelity_fits`](Self::fidelity_fits) against an explicit `budget`.
+    fn fidelity_fits_against(
+        &self,
+        num_qubits: usize,
+        budget: MemBudget,
+    ) -> Result<bool, BackendError> {
+        self.two_fit_against(num_qubits, budget, &self.fidelity_fallback_logged, || {
+            log::info!(
+                "the exact kernel of {num_qubits}-qubit states falls back to compute-uncompute \
+                 circuits: an inner product needs two statevectors at once and the memory budget \
+                 holds one"
+            );
+        })
+    }
+
+    /// The fidelities `|⟨a_i|b_j⟩|²` of the states the circuits prepare from
+    /// `|0…0⟩` (`|a_i⟩ = rows[i]|0…0⟩`, `|b_j⟩ = columns[j]|0…0⟩`), as the
+    /// `rows × columns` matrix, row-major: the exact quantum kernel, by inner
+    /// products of statevectors rather than one compute-uncompute circuit per
+    /// entry. With `columns` `None` the matrix is `rows` against themselves:
+    /// only the upper triangle, diagonal included, is computed, and the lower
+    /// one is its mirror, the same `f64` bit for bit.
+    ///
+    /// An **inherent** method like [`run_circuits_exact`](Self::run_circuits_exact),
+    /// not part of [`QuantumBackend`]: inner products of states exist only for
+    /// this noiseless statevector backend.
+    ///
+    /// - **As written.** The circuits are simulated as given (no transpiler),
+    ///   ending in `measure_all` or in no measurement — a terminal read-out does
+    ///   not change the state. All must be as wide; a circuit that measures
+    ///   individual qubits, or one of another width, is
+    ///   [`BackendError::UnsupportedCircuit`].
+    /// - **Each state simulated once** when every distinct one (`rows +
+    ///   columns`, or `rows` alone) fits in the memory budget at once, beside
+    ///   the result. Otherwise in tiles: a tile of rows is held while the
+    ///   columns stream past it in windows, so the columns (and, for the
+    ///   symmetric matrix, the rows past the tile) are simulated again for each
+    ///   tile.
+    /// - **Bounded memory, result included.** The `rows × columns` matrix
+    ///   (8 bytes an entry) counts against the memory budget, and the
+    ///   statevectors share what it leaves: at most as many are alive at once
+    ///   as fit there. When the budget does not hold two statevectors at all,
+    ///   the error is [`BackendError::InsufficientMemory`] (check
+    ///   [`fidelity_fits`](Self::fidelity_fits) first); when it holds two but
+    ///   not beside the matrix, [`BackendError::InsufficientMemoryForResult`]
+    ///   naming both — compute fewer rows at a time, whose results are those
+    ///   rows of the whole matrix bit for bit. Both are refused before anything is
+    ///   allocated or simulated, and only against a known budget (a blind
+    ///   fallback never refuses, as [`check_fits`] does not).
+    /// - **Bit for bit, whatever the tiling.** Each entry is one inner product
+    ///   summed sequentially in basis-state order, `|⟨a|b⟩|²` clamped to at
+    ///   most `1` (rounding can take it a few ulps past), so the result is the
+    ///   same for every budget, tile, window and thread count.
+    /// - **Cancellable.** `should_cancel` is polled inside every simulation, on
+    ///   the simulator's throttled cadence, and between the rows of a tile;
+    ///   `true` abandons the computation with [`BackendError::Aborted`]. It must
+    ///   be cheap and callable from any thread.
+    ///
+    /// A matrix whose entries do not fit in memory's address space is
+    /// [`BackendError::UnsupportedCircuit`], before anything runs.
+    pub fn fidelity_matrix(
+        &self,
+        rows: &[ConcreteCircuit],
+        columns: Option<&[ConcreteCircuit]>,
+        should_cancel: Option<&(dyn Fn() -> bool + Sync)>,
+    ) -> Result<Vec<f64>, BackendError> {
+        self.fidelity_matrix_against(rows, columns, should_cancel, active_budget())
+    }
+
+    /// [`fidelity_matrix`](Self::fidelity_matrix) against an explicit
+    /// `budget`, which both refuses and sizes the tiles, so a test controls
+    /// both without touching the process environment.
+    fn fidelity_matrix_against(
+        &self,
+        rows: &[ConcreteCircuit],
+        columns: Option<&[ConcreteCircuit]>,
+        should_cancel: Option<&(dyn Fn() -> bool + Sync)>,
+        budget: MemBudget,
+    ) -> Result<Vec<f64>, BackendError> {
+        let width = fidelity_width(rows, columns)?;
+        let (n1, n2) = (rows.len(), columns.map_or(rows.len(), <[_]>::len));
+        // A width above the qubit ceiling is left to the simulator's error, as
+        // `check_memory` leaves it.
+        let cap = if width <= self.simulator.max_qubits {
+            check_fits(adjoint_width(width), budget).map_err(|e| {
+                log::error!("native backend refused a fidelity matrix: {e}");
+                BackendError::from(e)
+            })?;
+            fidelity_cap(width, n1, n2, fidelity_entries(n1, n2)?, budget).inspect_err(|e| {
+                log::error!("native backend refused a fidelity matrix: {e}");
+            })?
+        } else {
+            2
+        };
+        self.fidelity_with_cap(rows, columns, should_cancel, cap)
+    }
+
+    /// [`fidelity_matrix`](Self::fidelity_matrix) holding at most `cap`
+    /// statevectors at once (at least two). A pure resource bound: the result
+    /// is the same for every `cap`.
+    fn fidelity_with_cap(
+        &self,
+        rows: &[ConcreteCircuit],
+        columns: Option<&[ConcreteCircuit]>,
+        should_cancel: Option<&(dyn Fn() -> bool + Sync)>,
+        cap: usize,
+    ) -> Result<Vec<f64>, BackendError> {
+        fidelity_width(rows, columns)?;
+        let symmetric = columns.is_none();
+        let columns = columns.unwrap_or(rows);
+        let (n1, n2) = (rows.len(), columns.len());
+        let entries = fidelity_entries(n1, n2)?;
+        let mut matrix = Vec::new();
+        matrix
+            .try_reserve_exact(entries)
+            .map_err(|_| matrix_too_large(n1, n2))?;
+        matrix.resize(entries, 0.0);
+        if entries == 0 {
+            return Ok(matrix);
+        }
+        let cap = cap.max(2);
+        let cancelled = || should_cancel.is_some_and(|cancel| cancel());
+        let distinct = if symmetric { n1 } else { n1.saturating_add(n2) };
+        if distinct <= cap {
+            let held = self.simulate_states(rows, should_cancel)?;
+            let others = if symmetric {
+                None
+            } else {
+                Some(self.simulate_states(columns, should_cancel)?)
+            };
+            let others = others.as_deref().unwrap_or(&held);
+            fill_fidelities(&mut matrix, n2, 0, &held, 0, others, symmetric, &cancelled)?;
+        } else {
+            // A tile of rows is held while the columns stream past in windows;
+            // the two together never exceed `cap`.
+            let window = (cap / 2).min(rayon::current_num_threads()).max(1);
+            let tile = cap - window;
+            let mut r0 = 0;
+            while r0 < n1 {
+                let r1 = r0.saturating_add(tile).min(n1);
+                let held = self.simulate_states(&rows[r0..r1], should_cancel)?;
+                // The symmetric matrix's pairs inside the tile use the held
+                // states; its columns start at the tile.
+                let mut c0 = if symmetric {
+                    fill_fidelities(&mut matrix, n2, r0, &held, r0, &held, true, &cancelled)?;
+                    r1
+                } else {
+                    0
+                };
+                while c0 < n2 {
+                    let c1 = c0.saturating_add(window).min(n2);
+                    let streamed = self.simulate_states(&columns[c0..c1], should_cancel)?;
+                    fill_fidelities(
+                        &mut matrix,
+                        n2,
+                        r0,
+                        &held,
+                        c0,
+                        &streamed,
+                        symmetric,
+                        &cancelled,
+                    )?;
+                    c0 = c1;
+                }
+                r0 = r1;
+            }
+        }
+        if symmetric {
+            for i in 1..n1 {
+                for j in 0..i {
+                    matrix[i * n2 + j] = matrix[j * n2 + i];
+                }
+            }
+        }
+        Ok(matrix)
+    }
+
+    /// The final states of `circuits`, in parallel across them (the exact
+    /// path's gate-parallel threshold), each run with `should_cancel` as its
+    /// cancellation hook.
+    fn simulate_states(
+        &self,
+        circuits: &[ConcreteCircuit],
+        should_cancel: Option<&(dyn Fn() -> bool + Sync)>,
+    ) -> Result<Vec<Statevector>, BackendError> {
+        let simulator = StatevectorSimulator {
+            max_qubits: self.simulator.max_qubits,
+            parallel_threshold: self
+                .gate_parallel_threshold(circuits.len(), rayon::current_num_threads()),
+            fusion: self.simulator.fusion,
+        };
+        circuits
+            .par_iter()
+            .map(|circuit| {
+                let mut hook = || should_cancel.is_some_and(|cancel| cancel());
+                let hook: Option<&mut dyn FnMut() -> bool> = match should_cancel {
+                    Some(_) => Some(&mut hook),
+                    None => None,
+                };
+                simulator
+                    .run_cancellable(circuit, hook)
+                    .map_err(|e| match e {
+                        SimError::Cancelled => {
+                            BackendError::Aborted("the fidelity matrix was cancelled".to_string())
+                        }
+                        e => {
+                            log::error!("native statevector simulation failed: {e}");
+                            simulation_failed(&e)
+                        }
+                    })
+            })
+            .collect()
     }
 
     /// Run adjoint differentiations: for each task, the derivatives of
@@ -572,6 +825,147 @@ impl NativeStatevectorBackend {
         }
         Ok(out)
     }
+}
+
+/// The common width of the circuits of a fidelity matrix (`0` for none), or
+/// [`BackendError::UnsupportedCircuit`] for one of another width or one that
+/// measures individual qubits (its state would be a measured, not a prepared,
+/// one).
+fn fidelity_width(
+    rows: &[ConcreteCircuit],
+    columns: Option<&[ConcreteCircuit]>,
+) -> Result<usize, BackendError> {
+    let mut circuits = rows.iter().chain(columns.unwrap_or_default());
+    let Some(first) = circuits.next() else {
+        return Ok(0);
+    };
+    let width = first.num_qubits();
+    for circuit in std::iter::once(first).chain(circuits) {
+        if circuit.num_qubits() != width {
+            return Err(BackendError::UnsupportedCircuit(format!(
+                "the states of a fidelity matrix must be equally wide; got {width} and {} qubits",
+                circuit.num_qubits()
+            )));
+        }
+        if circuit
+            .gates()
+            .iter()
+            .any(|gate| matches!(gate, GateInstruction::Measure { .. }))
+        {
+            return Err(BackendError::UnsupportedCircuit(
+                "a fidelity matrix needs the states the circuits prepare; this circuit \
+                 measures individual qubits"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(width)
+}
+
+/// A fidelity matrix of `n1 × n2` entries that cannot be held at all.
+fn matrix_too_large(n1: usize, n2: usize) -> BackendError {
+    BackendError::UnsupportedCircuit(format!(
+        "a {n1} x {n2} fidelity matrix does not fit in memory"
+    ))
+}
+
+/// The entries of an `n1 × n2` fidelity matrix, once they are known to be
+/// addressable (`n1 · n2` f64s, at most `isize::MAX` bytes), or the
+/// [`matrix_too_large`] error. Pure, so the overflow is testable without the
+/// `2^33` circuits it would take to reach it through a run.
+fn fidelity_entries(n1: usize, n2: usize) -> Result<usize, BackendError> {
+    n1.checked_mul(n2)
+        .filter(|&n| {
+            n.checked_mul(std::mem::size_of::<f64>())
+                .is_some_and(|bytes| bytes <= isize::MAX as usize)
+        })
+        .ok_or_else(|| matrix_too_large(n1, n2))
+}
+
+/// How many `width`-qubit statevectors a fidelity matrix of `entries` f64s
+/// (`n1 × n2`) may hold at once under `budget`: the budget minus the matrix's
+/// bytes, over one statevector's (`16 · 2^width`), at least two. When a known
+/// budget (not the blind [`BudgetSource::Fallback`], which never refuses) does
+/// not leave room for two beside the matrix,
+/// [`BackendError::InsufficientMemoryForResult`] naming the matrix, the
+/// statevectors and the budget. Pure and saturating: no width or entry count
+/// overflows it.
+fn fidelity_cap(
+    width: usize,
+    n1: usize,
+    n2: usize,
+    entries: usize,
+    budget: MemBudget,
+) -> Result<usize, BackendError> {
+    let matrix_bytes = u64::try_from(entries)
+        .ok()
+        .and_then(|entries| entries.checked_mul(std::mem::size_of::<f64>() as u64))
+        .unwrap_or(u64::MAX);
+    let statevector_bytes = u32::try_from(width)
+        .ok()
+        .and_then(|width| 1u64.checked_shl(width))
+        .and_then(|amplitudes| amplitudes.checked_mul(16))
+        .unwrap_or(u64::MAX);
+    let fit = budget.bytes.saturating_sub(matrix_bytes) / statevector_bytes;
+    if budget.source != BudgetSource::Fallback && fit < 2 {
+        return Err(BackendError::InsufficientMemoryForResult(
+            InsufficientMemoryForResult {
+                result: format!("a {n1} x {n2} fidelity matrix"),
+                result_bytes: matrix_bytes,
+                num_qubits: width,
+                statevectors: 2,
+                statevector_bytes,
+                budget_bytes: budget.bytes,
+                source: budget.source,
+            },
+        ));
+    }
+    Ok(usize::try_from(fit).unwrap_or(usize::MAX).max(2))
+}
+
+/// `|⟨a|b⟩|²`, the inner product summed sequentially in basis-state order (so
+/// the same two states always give the same `f64`), clamped to at most `1`.
+fn fidelity(a: &Statevector, b: &Statevector) -> f64 {
+    let overlap = a
+        .amplitudes()
+        .iter()
+        .zip(b.amplitudes())
+        .fold(C64::new(0.0, 0.0), |sum, (x, y)| sum + x.conj() * y);
+    overlap.norm_sqr().min(1.0)
+}
+
+/// Write `fidelity(held[i], others[j])` at row `row0 + i`, column `col0 + j`
+/// of the `width`-column `matrix`, the rows in parallel; with `upper`, only
+/// where the column is at least the row. `cancelled` is polled before each
+/// row.
+fn fill_fidelities(
+    matrix: &mut [f64],
+    width: usize,
+    row0: usize,
+    held: &[Statevector],
+    col0: usize,
+    others: &[Statevector],
+    upper: bool,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(), BackendError> {
+    let rows = &mut matrix[row0 * width..(row0 + held.len()) * width];
+    rows.par_chunks_mut(width)
+        .zip(held.par_iter())
+        .enumerate()
+        .try_for_each(|(i, (row, a))| {
+            if cancelled() {
+                return Err(BackendError::Aborted(
+                    "the fidelity matrix was cancelled".to_string(),
+                ));
+            }
+            for (j, b) in others.iter().enumerate() {
+                let column = col0 + j;
+                if !upper || column >= row0 + i {
+                    row[column] = fidelity(a, b);
+                }
+            }
+            Ok(())
+        })
 }
 
 /// One adjoint differentiation for
@@ -2390,6 +2784,460 @@ mod tests {
                 assert!(message.contains("not a Pauli rotation"), "{message}")
             }
             other => panic!("expected NativeCircuit, got {other:?}"),
+        }
+    }
+
+    // ── Fidelity matrix (fidelity_matrix, fidelity_fits) ─────────────────────
+
+    /// Distinct, entangled 3-qubit states: rows `0..n` of a kernel.
+    fn state_circuits(n: usize, shift: f64) -> Vec<ConcreteCircuit> {
+        (0..n)
+            .map(|k| {
+                let t = 0.37 * k as f64 + shift;
+                ParameterizedCircuit::new(3)
+                    .h(0)
+                    .ry(1, t)
+                    .rzz(0, 1, 0.5 * t)
+                    .cx(1, 2)
+                    .rx(2, -t)
+                    .rz(0, t * t)
+                    .assign_parameters(&[])
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    /// The naive reference: every state from `simulator.run`, every entry an
+    /// inner product.
+    fn naive_fidelities(rows: &[ConcreteCircuit], columns: &[ConcreteCircuit]) -> Vec<f64> {
+        let run = |c: &ConcreteCircuit| StatevectorSimulator::new().run(c).unwrap();
+        let a: Vec<_> = rows.iter().map(run).collect();
+        let b: Vec<_> = columns.iter().map(run).collect();
+        a.iter()
+            .flat_map(|x| {
+                b.iter().map(move |y| {
+                    x.amplitudes()
+                        .iter()
+                        .zip(y.amplitudes())
+                        .map(|(p, q)| p.conj() * q)
+                        .sum::<C64>()
+                        .norm_sqr()
+                })
+            })
+            .collect()
+    }
+
+    fn assert_close_to(got: &[f64], want: &[f64]) {
+        assert_eq!(got.len(), want.len());
+        for (k, (g, w)) in got.iter().zip(want).enumerate() {
+            // Both are a few dozen roundings of `f64` arithmetic; `1e-12` is
+            // four orders of magnitude above that and far below any real error.
+            assert!((g - w).abs() < 1e-12, "entry {k}: {g} != {w}");
+        }
+    }
+
+    #[test]
+    fn fidelities_are_the_inner_products_of_the_simulators_states() {
+        let backend = NativeStatevectorBackend::new(0);
+        let (rows, columns) = (state_circuits(4, 0.1), state_circuits(3, -0.8));
+        let full = backend
+            .fidelity_matrix(&rows, Some(&columns), None)
+            .unwrap();
+        assert_close_to(&full, &naive_fidelities(&rows, &columns));
+        let symmetric = backend.fidelity_matrix(&rows, None, None).unwrap();
+        assert_close_to(&symmetric, &naive_fidelities(&rows, &rows));
+        for i in 0..4 {
+            assert!((symmetric[i * 4 + i] - 1.0).abs() < 1e-12);
+            for j in 0..4 {
+                assert_eq!(
+                    symmetric[i * 4 + j].to_bits(),
+                    symmetric[j * 4 + i].to_bits()
+                );
+                assert!((0.0..=1.0).contains(&symmetric[i * 4 + j]));
+            }
+        }
+        // A terminal `measure_all` does not change the state.
+        let measured: Vec<ConcreteCircuit> = rows
+            .iter()
+            .map(|c| {
+                let mut gates = c.gates().to_vec();
+                gates.push(GateInstruction::MeasureAll);
+                ConcreteCircuit::new(3, gates)
+            })
+            .collect();
+        assert_eq!(
+            backend.fidelity_matrix(&measured, None, None).unwrap(),
+            symmetric
+        );
+    }
+
+    /// The tiling is a pure resource bound: every cap from the smallest (two
+    /// statevectors, one row held and one column streamed) up gives the same
+    /// matrix, bit for bit, for both shapes; and the symmetric matrix is the
+    /// full one of the rows against themselves, its upper triangle bit for bit.
+    #[test]
+    fn fidelities_do_not_depend_on_the_tiling_and_the_triangle_is_the_full_matrix() {
+        let backend = NativeStatevectorBackend::new(0);
+        let (rows, columns) = (state_circuits(5, 0.2), state_circuits(4, 1.3));
+        let full = backend
+            .fidelity_with_cap(&rows, Some(&columns), None, usize::MAX)
+            .unwrap();
+        let symmetric = backend
+            .fidelity_with_cap(&rows, None, None, usize::MAX)
+            .unwrap();
+        for cap in [0, 1, 2, 3, 4, 5, 7, 9, 10, 64] {
+            let got = backend
+                .fidelity_with_cap(&rows, Some(&columns), None, cap)
+                .unwrap();
+            assert!(
+                got.iter()
+                    .zip(&full)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "cap {cap}"
+            );
+            let got = backend.fidelity_with_cap(&rows, None, None, cap).unwrap();
+            assert!(
+                got.iter()
+                    .zip(&symmetric)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "symmetric, cap {cap}"
+            );
+        }
+        let against_themselves = backend.fidelity_matrix(&rows, Some(&rows), None).unwrap();
+        for i in 0..5 {
+            for j in i..5 {
+                assert_eq!(
+                    symmetric[i * 5 + j].to_bits(),
+                    against_themselves[i * 5 + j].to_bits()
+                );
+            }
+        }
+        assert_close_to(&symmetric, &against_themselves);
+    }
+
+    #[test]
+    fn a_fidelity_matrix_refuses_what_it_cannot_hold_before_simulating() {
+        use polypus_backend::BudgetSource;
+        let backend = NativeStatevectorBackend::new(0);
+        // 29 qubits: 8 GiB a statevector. Refused at once against a 1 KiB
+        // budget, so nothing was simulated.
+        let wide = vec![ParameterizedCircuit::new(29)
+            .h(0)
+            .assign_parameters(&[])
+            .unwrap()];
+        let budget = MemBudget {
+            bytes: 1 << 10,
+            source: BudgetSource::Explicit,
+        };
+        let refused = backend
+            .fidelity_matrix_against(&wide, None, None, budget)
+            .unwrap_err();
+        assert!(
+            matches!(&refused, BackendError::InsufficientMemory(e) if e.num_qubits == 30),
+            "two 29-qubit statevectors take the memory of one of 30: {refused:?}"
+        );
+    }
+
+    /// Two statevectors or the fallback, decided like the adjoint's: two fit →
+    /// the inner products; one → the compute-uncompute circuits, logged once
+    /// per backend; none → the exact path's own refusal.
+    #[test]
+    fn the_fidelity_needs_two_statevectors_and_falls_back_with_one() {
+        use polypus_backend::BudgetSource;
+        let backend = NativeStatevectorBackend::new(0);
+        let n = 15;
+        let one = 16u64 << n;
+        let budget = |bytes| MemBudget {
+            bytes,
+            source: BudgetSource::Explicit,
+        };
+        captured_fallbacks(n);
+        let needle = format!("kernel of {n}-qubit states falls back");
+        let logged = || {
+            CAPTURE
+                .0
+                .lock()
+                .expect("the capture lock is never poisoned")
+                .iter()
+                .filter(|(level, message)| *level == log::Level::Info && message.contains(&needle))
+                .count()
+        };
+        assert!(backend.fidelity_fits_against(n, budget(2 * one)).unwrap());
+        assert_eq!(logged(), 0);
+        assert!(!backend
+            .fidelity_fits_against(n, budget(2 * one - 1))
+            .unwrap());
+        assert!(!backend.fidelity_fits_against(n, budget(one)).unwrap());
+        assert_eq!(logged(), 1, "logged once per backend, at info");
+        assert!(matches!(
+            backend.fidelity_fits_against(n, budget(one - 1)),
+            Err(BackendError::InsufficientMemory(_))
+        ));
+        // The adjoint's own record is separate: this backend may still log it.
+        assert!(!backend.adjoint_fits_against(n, budget(one)).unwrap());
+        assert_eq!(captured_fallbacks(n), 1);
+    }
+
+    #[test]
+    fn a_fidelity_matrix_rejects_measured_or_mismatched_states() {
+        let backend = NativeStatevectorBackend::new(0);
+        let measured = vec![ParameterizedCircuit::new(2)
+            .h(0)
+            .measure(0, 0)
+            .assign_parameters(&[])
+            .unwrap()];
+        assert!(matches!(
+            backend.fidelity_matrix(&measured, None, None),
+            Err(BackendError::UnsupportedCircuit(m)) if m.contains("individual qubits")
+        ));
+        let (two, three) = (state_circuits(1, 0.0), {
+            vec![ParameterizedCircuit::new(2)
+                .h(0)
+                .assign_parameters(&[])
+                .unwrap()]
+        });
+        assert!(matches!(
+            backend.fidelity_matrix(&two, Some(&three), None),
+            Err(BackendError::UnsupportedCircuit(m)) if m.contains("equally wide")
+        ));
+        // No states: an empty matrix, not an error.
+        assert!(backend.fidelity_matrix(&[], None, None).unwrap().is_empty());
+        assert!(backend
+            .fidelity_matrix(&two, Some(&[]), None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_fidelity_matrix_is_aborted() {
+        let backend = NativeStatevectorBackend::new(0);
+        let rows = state_circuits(6, 0.4);
+        let stop = || true;
+        for cap in [2, usize::MAX] {
+            assert!(matches!(
+                backend.fidelity_with_cap(&rows, None, Some(&stop), cap),
+                Err(BackendError::Aborted(_))
+            ));
+        }
+        let go = || false;
+        assert_eq!(
+            backend.fidelity_matrix(&rows, None, Some(&go)).unwrap(),
+            backend.fidelity_matrix(&rows, None, None).unwrap()
+        );
+    }
+
+    /// The tiling with gate kernels that run in parallel on one side and
+    /// sequentially on the other: `polypus-sim`'s `tests/properties.rs` checks
+    /// that a parallel gate gives the sequential gate's bits on the
+    /// simulator; this is the same property where the backend picks between
+    /// them (`gate_parallel_threshold`). With a threshold of 1:
+    ///
+    /// - `cap` 2 simulates one state at a time, a window shorter than the
+    ///   threads, so its gates run in parallel;
+    /// - `cap` `usize::MAX` holds every state: the full matrix simulates its
+    ///   rows, then its columns, in one window each, and the symmetric one all
+    ///   its states in one window. With `threads` rows and `threads` columns
+    ///   every window has at least as many states as threads, so the gates run
+    ///   sequentially.
+    #[test]
+    fn fidelities_are_the_same_bits_with_parallel_and_sequential_gates() {
+        let mut backend = NativeStatevectorBackend::new(0);
+        backend.simulator.parallel_threshold = 1;
+        let threads = rayon::current_num_threads();
+        let n = (2 * threads).max(2);
+        let states: Vec<ConcreteCircuit> = (0..n)
+            .map(|k| {
+                let t = 0.29 * k as f64 + 0.1;
+                let mut circuit = ParameterizedCircuit::new(6);
+                for q in 0..6 {
+                    circuit = circuit.h(q).ry(q, t * (q + 1) as f64);
+                }
+                for q in 0..5 {
+                    circuit = circuit.cx(q, q + 1).rzz(q, q + 1, t - 0.05 * q as f64);
+                }
+                circuit.assign_parameters(&[]).unwrap()
+            })
+            .collect();
+        let (rows, columns) = states.split_at(n / 2);
+        // The precondition of the sequential side: without it the test would
+        // compare parallel gates with parallel gates and pass for nothing.
+        assert!(rows.len() >= threads && columns.len() >= threads);
+        for (rows, columns) in [(rows, Some(columns)), (&states[..], None)] {
+            let parallel = backend.fidelity_with_cap(rows, columns, None, 2).unwrap();
+            let sequential = backend
+                .fidelity_with_cap(rows, columns, None, usize::MAX)
+                .unwrap();
+            assert!(parallel
+                .iter()
+                .zip(&sequential)
+                .all(|(a, b)| a.to_bits() == b.to_bits()));
+        }
+    }
+
+    #[test]
+    fn fidelity_entries_refuse_a_matrix_that_is_not_addressable() {
+        let too_large = |n1: usize, n2: usize| match fidelity_entries(n1, n2) {
+            Err(BackendError::UnsupportedCircuit(m)) => {
+                assert_eq!(
+                    m,
+                    format!("a {n1} x {n2} fidelity matrix does not fit in memory")
+                );
+            }
+            other => panic!("{n1} x {n2}: expected the refusal, got {other:?}"),
+        };
+        let half = 1usize << (usize::BITS / 2 + 1);
+        too_large(usize::MAX, 2);
+        too_large(half, half);
+        // Entries that fit in a `usize` but whose bytes do not.
+        too_large(1usize << (usize::BITS / 2 - 1), 1usize << (usize::BITS / 2));
+        // The limit: `isize::MAX` bytes hold `isize::MAX / 8` f64s, not one
+        // more. And an empty matrix.
+        let most = isize::MAX as usize / std::mem::size_of::<f64>();
+        assert_eq!(fidelity_entries(most, 1).unwrap(), most);
+        too_large(most + 1, 1);
+        assert_eq!(fidelity_entries(0, usize::MAX).unwrap(), 0);
+    }
+
+    #[test]
+    fn the_fidelity_cap_is_what_the_budget_leaves_beside_the_matrix() {
+        let budget = |bytes, source| MemBudget { bytes, source };
+        let explicit = |bytes| budget(bytes, BudgetSource::Explicit);
+        // 3-qubit states take 128 bytes; a 4 x 5 matrix takes 160.
+        let cap = |bytes| fidelity_cap(3, 4, 5, 20, explicit(bytes));
+        assert_eq!(cap(160 + 7 * 128 + 127).unwrap(), 7);
+        assert_eq!(cap(160 + 2 * 128).unwrap(), 2);
+        let refused = cap(160 + 2 * 128 - 1).unwrap_err();
+        match &refused {
+            BackendError::InsufficientMemoryForResult(e) => assert_eq!(
+                *e,
+                InsufficientMemoryForResult {
+                    result: "a 4 x 5 fidelity matrix".to_string(),
+                    result_bytes: 160,
+                    num_qubits: 3,
+                    statevectors: 2,
+                    statevector_bytes: 128,
+                    budget_bytes: 415,
+                    source: BudgetSource::Explicit,
+                }
+            ),
+            other => panic!("expected the refusal, got {other:?}"),
+        }
+        // Detected budgets refuse too; the blind fallback never does.
+        assert!(fidelity_cap(3, 4, 5, 20, budget(100, BudgetSource::Detected)).is_err());
+        assert_eq!(
+            fidelity_cap(3, 4, 5, 20, budget(100, BudgetSource::Fallback)).unwrap(),
+            2
+        );
+        // No overflow: huge widths and entry counts saturate.
+        for (width, entries) in [(200, 1), (64, 1), (3, usize::MAX), (usize::MAX, usize::MAX)] {
+            assert!(fidelity_cap(width, 1, 1, entries, explicit(u64::MAX)).is_err());
+            assert_eq!(
+                fidelity_cap(
+                    width,
+                    1,
+                    1,
+                    entries,
+                    budget(u64::MAX, BudgetSource::Fallback)
+                )
+                .unwrap(),
+                2
+            );
+        }
+        assert_eq!(
+            fidelity_cap(0, 1, 1, 0, explicit(u64::MAX)).unwrap(),
+            usize::try_from(u64::MAX / 16).unwrap_or(usize::MAX)
+        );
+    }
+
+    /// The matrix counts against the budget: 1-qubit states take 32 bytes, so
+    /// in 1 KiB a 12 x 12 matrix (1152 bytes) leaves nothing, refused before
+    /// a single state is simulated (the cancellation hook, polled in every
+    /// simulation and before every row, is never called), and a 10 x 10 one
+    /// (800 bytes) leaves room for seven states, so it runs in tiles.
+    #[test]
+    fn a_fidelity_matrix_counts_its_result_against_the_budget() {
+        let backend = NativeStatevectorBackend::new(0);
+        let one_qubit = |n: usize, shift: f64| -> Vec<ConcreteCircuit> {
+            (0..n)
+                .map(|k| {
+                    ParameterizedCircuit::new(1)
+                        .ry(0, 0.3 * k as f64 + shift)
+                        .assign_parameters(&[])
+                        .unwrap()
+                })
+                .collect()
+        };
+        let budget = MemBudget {
+            bytes: 1 << 10,
+            source: BudgetSource::Explicit,
+        };
+        let polls = std::sync::atomic::AtomicUsize::new(0);
+        let poll = || {
+            polls.fetch_add(1, Ordering::Relaxed);
+            false
+        };
+        let (twelve, ten) = (one_qubit(12, 0.1), one_qubit(10, -0.4));
+        match backend.fidelity_matrix_against(&twelve, None, Some(&poll), budget) {
+            Err(BackendError::InsufficientMemoryForResult(e)) => {
+                assert_eq!(e.result, "a 12 x 12 fidelity matrix");
+                assert_eq!(e.result_bytes, 1152);
+                assert_eq!(
+                    (e.num_qubits, e.statevectors, e.statevector_bytes),
+                    (1, 2, 32)
+                );
+                assert_eq!(
+                    (e.budget_bytes, e.source),
+                    (1 << 10, BudgetSource::Explicit)
+                );
+            }
+            other => panic!("expected the refusal, got {other:?}"),
+        }
+        assert!(matches!(
+            backend.fidelity_matrix_against(&twelve, Some(&twelve), Some(&poll), budget),
+            Err(BackendError::InsufficientMemoryForResult(_))
+        ));
+        assert_eq!(
+            polls.load(Ordering::Relaxed),
+            0,
+            "refused before simulating"
+        );
+        let accepted = backend
+            .fidelity_matrix_against(&ten, Some(&ten[..]), Some(&poll), budget)
+            .unwrap();
+        assert!(polls.load(Ordering::Relaxed) > 0);
+        assert_close_to(&accepted, &naive_fidelities(&ten, &ten));
+    }
+
+    /// Whatever budget accepts it, the matrix is the same bits: every budget
+    /// below forces tiles of a different size (the matrices take 160 and 200
+    /// bytes, a 3-qubit state 128), and the unlimited cap holds every state.
+    #[test]
+    fn fidelities_do_not_depend_on_the_budget_that_accepts_them() {
+        let backend = NativeStatevectorBackend::new(0);
+        let (rows, columns) = (state_circuits(5, 0.6), state_circuits(4, -0.2));
+        let whole_full = backend
+            .fidelity_with_cap(&rows, Some(&columns), None, usize::MAX)
+            .unwrap();
+        let whole_symmetric = backend
+            .fidelity_with_cap(&rows, None, None, usize::MAX)
+            .unwrap();
+        let same = |a: &[f64], b: &[f64]| a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
+        for states in [2u64, 3, 4, 6, 9, 64] {
+            let budget = MemBudget {
+                bytes: 200 + states * 128,
+                source: BudgetSource::Explicit,
+            };
+            let full = backend
+                .fidelity_matrix_against(&rows, Some(&columns), None, budget)
+                .unwrap();
+            assert!(same(&full, &whole_full), "{states} states");
+            let symmetric = backend
+                .fidelity_matrix_against(&rows, None, None, budget)
+                .unwrap();
+            assert!(
+                same(&symmetric, &whole_symmetric),
+                "{states} states, symmetric"
+            );
         }
     }
 }
