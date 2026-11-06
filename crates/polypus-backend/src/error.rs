@@ -31,7 +31,7 @@ use std::fmt;
 
 use polypus_observable::ObservableError;
 
-use crate::mem_budget::InsufficientMemory;
+use crate::mem_budget::{InsufficientMemory, InsufficientMemoryForResult};
 
 /// Failure of a quantum-execution backend or of backend construction.
 ///
@@ -107,6 +107,16 @@ pub enum BackendError {
     /// return it via [`check_statevector_fits`](crate::mem_budget::check_statevector_fits)
     /// and `?` (there is a `From<InsufficientMemory>`).
     InsufficientMemory(InsufficientMemory),
+    /// A result the backend keeps in memory beside its statevectors (the exact
+    /// quantum kernel's matrix) leaves no room for them in the memory budget:
+    /// refused before anything starts, like
+    /// [`InsufficientMemory`](Self::InsufficientMemory), and only against a
+    /// known limit.
+    ///
+    /// Surfaces as `polypus.InsufficientMemoryError` (a `polypus.BackendError`) at
+    /// the FFI edge, the same class as a statevector that does not fit (there is
+    /// a `From<InsufficientMemoryForResult>`).
+    InsufficientMemoryForResult(InsufficientMemoryForResult),
     /// Any provider-specific failure, type-erased.
     ///
     /// The Polypus Python backends box a Python exception here as
@@ -139,6 +149,7 @@ impl fmt::Display for BackendError {
             BackendError::Unresponsive(m) => write!(f, "the backend stopped responding: {m}"),
             BackendError::Aborted(m) => write!(f, "the backend call was aborted: {m}"),
             BackendError::InsufficientMemory(e) => write!(f, "{e}"),
+            BackendError::InsufficientMemoryForResult(e) => write!(f, "{e}"),
             BackendError::External(err) => write!(f, "{err}"),
         }
     }
@@ -156,6 +167,12 @@ impl std::error::Error for BackendError {
 impl From<InsufficientMemory> for BackendError {
     fn from(err: InsufficientMemory) -> Self {
         BackendError::InsufficientMemory(err)
+    }
+}
+
+impl From<InsufficientMemoryForResult> for BackendError {
+    fn from(err: InsufficientMemoryForResult) -> Self {
+        BackendError::InsufficientMemoryForResult(err)
     }
 }
 
@@ -285,6 +302,42 @@ mod tests {
         let err: BackendError = refusal.clone().into();
         assert!(matches!(&err, BackendError::InsufficientMemory(e) if *e == refusal));
         assert_eq!(err.to_string(), refusal.to_string());
+    }
+
+    #[test]
+    fn insufficient_memory_for_a_result_converts_and_displays_the_refusal() {
+        use crate::mem_budget::{BudgetSource, InsufficientMemoryForResult};
+        let refusal = InsufficientMemoryForResult {
+            result: "a 10 x 10 fidelity matrix".to_string(),
+            result_bytes: 800,
+            num_qubits: 20,
+            statevectors: 2,
+            statevector_bytes: 16 << 20,
+            budget_bytes: 1 << 20,
+            source: BudgetSource::Explicit,
+        };
+        let err: BackendError = refusal.clone().into();
+        assert!(matches!(&err, BackendError::InsufficientMemoryForResult(e) if *e == refusal));
+        let message = err.to_string();
+        assert_eq!(message, refusal.to_string());
+        for part in [
+            "a 10 x 10 fidelity matrix (800 B)",
+            "the 2 20-qubit statevectors (16.00 MiB each)",
+            "together they need 32.00 MiB",
+            "the memory budget is 1.00 MiB",
+            "set by POLYPUS_MEM_BUDGET",
+            "POLYPUS_MEM_BUDGET=64G",
+            "out-of-memory killer",
+        ] {
+            assert!(message.contains(part), "{part:?} missing from {message:?}");
+        }
+        // Saturated sizes read as such, never as a wrapped number.
+        let huge = InsufficientMemoryForResult {
+            result_bytes: u64::MAX,
+            statevector_bytes: u64::MAX,
+            ..refusal
+        };
+        assert!(huge.to_string().contains("(more than 16.00 EiB)"));
     }
 
     #[test]

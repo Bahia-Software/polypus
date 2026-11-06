@@ -559,6 +559,64 @@ impl fmt::Display for InsufficientMemory {
 
 impl std::error::Error for InsufficientMemory {}
 
+/// A result a computation keeps in memory beside its statevectors does not
+/// leave room for them in the memory budget: the exact quantum kernel's matrix,
+/// held while the statevectors whose inner products fill it are simulated.
+/// Refused before anything is allocated, as [`InsufficientMemory`] is, so the
+/// run is not killed by the OOM-killer; only against a known limit, never the
+/// blind fallback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsufficientMemoryForResult {
+    /// What the result is, for the message (`"a 12 x 12 fidelity matrix"`).
+    pub result: String,
+    /// Bytes the result needs, saturated to `u64::MAX`.
+    pub result_bytes: u64,
+    /// Qubit count of the statevectors held beside it.
+    pub num_qubits: usize,
+    /// How many of them the computation needs at once.
+    pub statevectors: usize,
+    /// Bytes one of them needs (`16 · 2^n`), saturated to `u64::MAX`.
+    pub statevector_bytes: u64,
+    /// The budget it was checked against.
+    pub budget_bytes: u64,
+    /// Where the budget came from (never [`BudgetSource::Fallback`]).
+    pub source: BudgetSource,
+}
+
+impl fmt::Display for InsufficientMemoryForResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let bytes = |bytes: u64| {
+            if bytes == u64::MAX {
+                format!("more than {}", format_bytes(u64::MAX))
+            } else {
+                format_bytes(bytes)
+            }
+        };
+        let total = (self.statevectors as u64)
+            .saturating_mul(self.statevector_bytes)
+            .saturating_add(self.result_bytes);
+        write!(
+            f,
+            "not enough memory for {result} ({result_bytes}) beside the {k} {n}-qubit \
+             statevectors ({statevector} each) it is computed from: together they need \
+             {total} but the memory budget is {budget} ({source}). Refusing to start rather \
+             than be killed by the out-of-memory killer. Compute less at a time, or, if more \
+             memory really is available, set {MEM_BUDGET_ENV} (e.g. {MEM_BUDGET_ENV}=64G) to \
+             override the budget.",
+            result = self.result,
+            result_bytes = bytes(self.result_bytes),
+            k = self.statevectors,
+            n = self.num_qubits,
+            statevector = bytes(self.statevector_bytes),
+            total = bytes(total),
+            budget = format_bytes(self.budget_bytes),
+            source = self.source,
+        )
+    }
+}
+
+impl std::error::Error for InsufficientMemoryForResult {}
+
 /// Check that one `num_qubits`-qubit statevector (`16 · 2^n` bytes) fits in
 /// `budget`. Pure, so a caller passes the budget explicitly (see
 /// [`check_statevector_fits`] for the active one).
