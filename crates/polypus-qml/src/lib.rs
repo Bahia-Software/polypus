@@ -74,7 +74,10 @@
 //! [`QmlProblem::gradient_from_adjoint`] reads the derivatives back. The
 //! expectation Jacobian has the same pair
 //! ([`JacobianBlock::adjoint_runs`], [`JacobianBlock::jacobian_from_adjoint`]),
-//! one run per sample and observable. This crate still executes nothing.
+//! one run per sample and observable, and so does its product with a
+//! cotangent ([`JacobianBlock::vjp_runs`], [`JacobianBlock::vjp_from_adjoint`]),
+//! one run per sample whatever the number of observables. This crate still
+//! executes nothing.
 //!
 //! ## Expectations and their Jacobian
 //!
@@ -87,7 +90,9 @@
 //! `∂⟨O_o⟩/∂x` ([`JacobianWrt`]), by the same per-occurrence shift rule, block
 //! by block if the caller wants to bound how many circuits are alive
 //! ([`JacobianBlock`]). It costs `2 · shifts` circuits per sample, with no
-//! unshifted one.
+//! unshifted one. A reverse-mode backward pass needs only its product with a
+//! cotangent, a [`Vjp`] ([`Jacobian::vjp`], or by adjoint differentiation as
+//! above).
 
 mod adjoint;
 mod dataset;
@@ -104,7 +109,7 @@ mod rng;
 pub use adjoint::{AdjointRun, DiagonalObservable};
 pub use dataset::Dataset;
 pub use error::{QmlError, ValidationError};
-pub use jacobian::{ExpectationJacobian, Jacobian, JacobianBlock, JacobianWrt};
+pub use jacobian::{ExpectationJacobian, Jacobian, JacobianBlock, JacobianWrt, Vjp};
 pub use layers::{
     AmplitudeEncoder, AngleEncoder, BasisEncoder, ConvBlock, ConvLayer, Entanglement, Entangler,
     HardwareEfficientAnsatz, IqpEncoder, KeepRule, Layer, Pairing, PoolBlock, PoolLayer,

@@ -1,4 +1,6 @@
-//! The adjoint gradient (issue #503) must be the parameter-shift gradient.
+//! The adjoint gradient (issue #503) must be the parameter-shift gradient, and
+//! the adjoint vector-Jacobian product (issue #559) the contraction of the
+//! shift Jacobian, from one run per sample.
 //!
 //! [`QmlProblem::adjoint_runs`] / [`QmlProblem::gradient_from_adjoint`] and
 //! their Jacobian twins hand a statevector simulator one adjoint
@@ -16,9 +18,9 @@ use std::collections::HashMap;
 
 use polypus_circuit::{CircuitError, ConcreteCircuit};
 use polypus_qml::{
-    AdjointRun, CompiledModel, ConvBlock, Dataset, Decision, Entanglement, HardwareEfficientAnsatz,
-    IqpEncoder, Jacobian, JacobianWrt, Layer, Loss, Observable, Pauli, PauliString, PoolBlock,
-    QmlError, QmlProblem, QuantumModel, Readout, RotationAxis,
+    AdjointRun, CompiledModel, ConvBlock, Dataset, Decision, Entanglement, ExpectationJacobian,
+    HardwareEfficientAnsatz, IqpEncoder, Jacobian, JacobianWrt, Layer, Loss, Observable, Pauli,
+    PauliString, PoolBlock, QmlError, QmlProblem, QuantumModel, Readout, RotationAxis, Vjp,
 };
 use polypus_sim::{Simulator, StatevectorSimulator};
 
@@ -469,6 +471,255 @@ fn adjoint_blocks_concatenate_to_the_whole_jacobian() {
     assert_eq!(whole.inputs().unwrap(), inputs.as_slice());
 }
 
+// ── The vector-Jacobian product ─────────────────────────────────────────────
+
+/// A cotangent with neither zero nor repeated entries: `(samples, observables)`.
+fn cotangent(samples: usize, observables: usize) -> Vec<f64> {
+    (0..samples * observables)
+        .map(|i| 0.7 - 0.31 * i as f64)
+        .collect()
+}
+
+/// The product by adjoint differentiation: one run per sample, each on the
+/// circuit and gates of the Jacobian's own adjoint runs.
+fn adjoint_vjp(jacobian: &ExpectationJacobian, theta: &[f64], v: &[f64]) -> Vjp {
+    let runs = jacobian.vjp_runs(theta, v).unwrap();
+    assert_eq!(runs.len(), jacobian.num_samples(), "one run per sample");
+    assert_eq!(runs.len(), jacobian.all().num_vjp_runs());
+    let k = jacobian.num_observables();
+    for (s, run) in runs.iter().enumerate() {
+        let per_observable = &jacobian.adjoint_runs(theta).unwrap()[s * k];
+        assert_eq!(run.circuit, per_observable.circuit);
+        assert_eq!(run.wrt, per_observable.wrt);
+    }
+    jacobian.vjp_from_adjoint(&run_adjoint(&runs)).unwrap()
+}
+
+/// The adjoint product against the contraction of the shift Jacobian with the
+/// same cotangent, part by part, at two points.
+fn assert_vjp_matches(model: &CompiledModel, samples: &[Vec<f64>], wrt: JacobianWrt, what: &str) {
+    let v = cotangent(samples.len(), model.num_observables());
+    for theta in thetas(model.num_params()) {
+        let jacobian = model.jacobian(samples, wrt).unwrap();
+        let adjoint = adjoint_vjp(&jacobian, &theta, &v);
+        let shift = shift_jacobian(model, samples, &theta, wrt).vjp(&v).unwrap();
+        assert_eq!(
+            adjoint.params().is_some(),
+            wrt != JacobianWrt::Inputs,
+            "{what}"
+        );
+        assert_eq!(
+            adjoint.inputs().is_some(),
+            wrt != JacobianWrt::Params,
+            "{what}"
+        );
+        assert_eq!(
+            adjoint.params().is_some(),
+            shift.params().is_some(),
+            "{what}"
+        );
+        assert_eq!(
+            adjoint.inputs().is_some(),
+            shift.inputs().is_some(),
+            "{what}"
+        );
+        if let (Some(a), Some(s)) = (adjoint.params(), shift.params()) {
+            assert_same(&format!("{what}, vjp params, θ = {theta:?}"), a, s);
+        }
+        if let (Some(a), Some(s)) = (adjoint.inputs(), shift.inputs()) {
+            assert_same(&format!("{what}, vjp inputs, θ = {theta:?}"), a, s);
+        }
+    }
+}
+
+/// One run per sample, whatever the number of observables: a three-class
+/// `Argmax` takes as many runs as a single observable, a third of what its
+/// Jacobian takes; each run's observable is `Σ_o v[s][o] · O_o`.
+#[test]
+fn the_vjp_takes_one_adjoint_run_per_sample_whatever_the_observables() {
+    for readout in readouts() {
+        let model = encoded(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .readout(readout)
+            .compile(4)
+            .unwrap();
+        let k = model.num_observables();
+        let theta = &thetas(model.num_params())[0];
+        let v = cotangent(ROWS.len(), k);
+        let jacobian = model.jacobian(&rows(), JacobianWrt::Params).unwrap();
+        let runs = jacobian.vjp_runs(theta, &v).unwrap();
+        assert_eq!(runs.len(), ROWS.len());
+        assert_eq!(jacobian.all().num_adjoint_runs(), ROWS.len() * k);
+        let per_observable = jacobian.adjoint_runs(theta).unwrap();
+        for (s, run) in runs.iter().enumerate() {
+            for b in 0..16 {
+                let expected: f64 = (0..k)
+                    .map(|o| v[s * k + o] * per_observable[s * k + o].observable.weight(b))
+                    .sum();
+                assert!(
+                    (run.observable.weight(b) - expected).abs() < 1e-12,
+                    "sample {s}, basis state {b}"
+                );
+            }
+        }
+    }
+}
+
+/// The parameter product, every model shape (convolution's shared parameters
+/// included) and readout.
+#[test]
+fn the_adjoint_parameter_vjp_is_the_contracted_shift_jacobian() {
+    for readout in readouts() {
+        for (model, features, name) in scalar_models(readout) {
+            let model = model.compile(features).unwrap();
+            assert_vjp_matches(&model, &rows(), JacobianWrt::Params, name);
+        }
+    }
+    // Pooling shares each parameter across pairs on top of the convolution.
+    let pooled = encoded(RotationAxis::Ry)
+        .conv(ConvBlock::Basic)
+        .pool(PoolBlock::Basic)
+        .readout(argmax(vec![
+            observable(&[0], Pauli::Z),
+            observable(&[1], Pauli::Z),
+        ]))
+        .compile(4)
+        .unwrap();
+    assert_vjp_matches(&pooled, &rows(), JacobianWrt::Params, "pooling");
+}
+
+/// The input product, and both at once, for re-uploaded angle encoders and
+/// the IQP encoder in every entanglement, whose `Rzz(x_i·x_j)` gates carry a
+/// chain-rule factor towards each of their two features.
+#[test]
+fn the_adjoint_input_vjp_is_the_contracted_shift_jacobian() {
+    for wrt in [JacobianWrt::Inputs, JacobianWrt::Both] {
+        for readout in [
+            readouts().remove(1),
+            readouts().remove(4),
+            readouts().remove(5),
+        ] {
+            let reuploaded = encoded(RotationAxis::Ry)
+                .hardware_efficient(1)
+                .angle_encoder(RotationAxis::Rx)
+                .conv(ConvBlock::Basic)
+                .angle_encoder(RotationAxis::Rz)
+                .readout(readout.clone())
+                .compile(4)
+                .unwrap();
+            assert_vjp_matches(&reuploaded, &rows(), wrt, "re-uploaded angle encoders");
+            for entanglement in [
+                Entanglement::Linear,
+                Entanglement::Circular,
+                Entanglement::Full,
+            ] {
+                let iqp = || Layer::Iqp(IqpEncoder { entanglement });
+                let model = QuantumModel::new(4)
+                    .layer(iqp())
+                    .layer(real_amplitudes(1))
+                    .layer(iqp())
+                    .readout(readout.clone())
+                    .compile(4)
+                    .unwrap();
+                assert_vjp_matches(&model, &rows(), wrt, &format!("IQP {entanglement:?}"));
+            }
+        }
+    }
+}
+
+/// Blocks concatenate to the whole product, row for row, each with its own
+/// rows of the cotangent.
+#[test]
+fn vjp_blocks_concatenate_to_the_whole_product() {
+    let model = QuantumModel::new(4)
+        .iqp_encoder()
+        .conv(ConvBlock::Basic)
+        .readout(readouts().remove(5))
+        .compile(4)
+        .unwrap();
+    let k = model.num_observables();
+    let samples = rows();
+    let theta = thetas(model.num_params())[0].clone();
+    let v = cotangent(samples.len(), k);
+    let jacobian = model.jacobian(&samples, JacobianWrt::Both).unwrap();
+    let whole = jacobian
+        .vjp_from_adjoint(&run_adjoint(&jacobian.vjp_runs(&theta, &v).unwrap()))
+        .unwrap();
+    let mut params = Vec::new();
+    let mut inputs = Vec::new();
+    let mut start = 0;
+    for block in jacobian.blocks(2) {
+        let end = start + block.num_samples();
+        let part = block
+            .vjp_from_adjoint(&run_adjoint(
+                &block.vjp_runs(&theta, &v[start * k..end * k]).unwrap(),
+            ))
+            .unwrap();
+        params.extend_from_slice(part.params().unwrap());
+        inputs.extend_from_slice(part.inputs().unwrap());
+        start = end;
+    }
+    assert_eq!(start, samples.len());
+    assert_eq!(whole.params().unwrap(), params.as_slice());
+    assert_eq!(whole.inputs().unwrap(), inputs.as_slice());
+}
+
+/// A zero cotangent gives a zero product by the adjoint too. A `NaN` is not
+/// refused: it reaches its sample's observable as it is (and only that
+/// sample's), which the native simulator refuses to weigh; the route for such
+/// a sample is the per-observable runs contracted by `Jacobian::vjp`, which
+/// propagate it as the contraction of the shift Jacobian does.
+#[test]
+fn the_adjoint_vjp_of_zero_is_zero_and_a_nan_reaches_only_its_sample() {
+    let model = encoded(RotationAxis::Ry)
+        .hardware_efficient(1)
+        .readout(readouts().remove(5))
+        .compile(4)
+        .unwrap();
+    let k = model.num_observables();
+    let theta = &thetas(model.num_params())[0];
+    let jacobian = model.jacobian(&rows(), JacobianWrt::Both).unwrap();
+    let zeros = adjoint_vjp(&jacobian, theta, &vec![0.0; ROWS.len() * k]);
+    assert!(zeros.params().unwrap().iter().all(|&d| d == 0.0));
+    assert!(zeros.inputs().unwrap().iter().all(|&d| d == 0.0));
+
+    let mut v = cotangent(ROWS.len(), k);
+    v[2 * k + 1] = f64::NAN; // sample 2, observable 1
+    let runs = jacobian.vjp_runs(theta, &v).unwrap();
+    for (s, run) in runs.iter().enumerate() {
+        assert_eq!(run.observable.weight(0).is_nan(), s == 2, "sample {s}");
+    }
+    let simulator = StatevectorSimulator::new();
+    let weigh = |run: &AdjointRun| {
+        simulator.adjoint_gradient(&run.circuit, &run.wrt, |b| run.observable.weight(b), None)
+    };
+    assert!(weigh(&runs[2]).is_err());
+    assert!(weigh(&runs[1]).is_ok());
+
+    let by_observable = jacobian
+        .jacobian_from_adjoint(&run_adjoint(&jacobian.adjoint_runs(theta).unwrap()))
+        .unwrap()
+        .vjp(&v)
+        .unwrap();
+    let shift = shift_jacobian(&model, &rows(), theta, JacobianWrt::Both)
+        .vjp(&v)
+        .unwrap();
+    let nan = |part: &[f64]| part.iter().map(|d| d.is_nan()).collect::<Vec<_>>();
+    for (a, s, columns) in [
+        (
+            by_observable.params().unwrap(),
+            shift.params().unwrap(),
+            model.num_params(),
+        ),
+        (by_observable.inputs().unwrap(), shift.inputs().unwrap(), 4),
+    ] {
+        assert_eq!(nan(a), nan(s));
+        for (row, chunk) in nan(a).chunks(columns).enumerate() {
+            assert!(chunk.iter().all(|&n| n == (row == 2)), "sample {row}");
+        }
+    }
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 #[test]
@@ -539,6 +790,43 @@ fn wrong_lengths_are_typed_errors() {
         QmlError::CountsLengthMismatch {
             expected: jacobian.all().num_adjoint_runs(),
             got: jacobian.all().num_adjoint_runs() - 1
+        }
+    );
+
+    // The product: θ, then the cotangent, then the rows read back.
+    let k = compiled.num_observables();
+    let v = vec![0.5; jacobian.num_samples() * k];
+    assert_eq!(
+        jacobian.vjp_runs(&[0.1], &v).unwrap_err(),
+        QmlError::Circuit(CircuitError::WrongNumberOfParams {
+            expected: compiled.num_params(),
+            got: 1
+        })
+    );
+    for wrong in [v.len() - 1, v.len() + 1, jacobian.num_samples()] {
+        assert_eq!(
+            jacobian.vjp_runs(&theta, &vec![0.5; wrong]).unwrap_err(),
+            QmlError::CountsLengthMismatch {
+                expected: v.len(),
+                got: wrong
+            }
+        );
+    }
+    let mut rows = run_adjoint(&jacobian.vjp_runs(&theta, &v).unwrap());
+    let gates = rows[0].len();
+    assert_eq!(
+        jacobian.vjp_from_adjoint(&rows[1..]).unwrap_err(),
+        QmlError::CountsLengthMismatch {
+            expected: jacobian.num_samples(),
+            got: jacobian.num_samples() - 1
+        }
+    );
+    rows[2].pop();
+    assert_eq!(
+        jacobian.vjp_from_adjoint(&rows).unwrap_err(),
+        QmlError::CountsLengthMismatch {
+            expected: gates,
+            got: gates - 1
         }
     );
 }
