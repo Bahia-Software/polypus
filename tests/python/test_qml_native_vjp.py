@@ -11,8 +11,6 @@ whatever the number of observables, so it is the contraction to rounding
 ``seed`` it is the contraction of that seed's Jacobian, to rounding too. The
 cotangent is checked for its shape only: a ``NaN`` or an infinity propagates as
 it does through the contraction. Every check runs before a backend exists.
-
-Draft of a seam contract test: to be reviewed and signed by a maintainer.
 """
 
 import math
