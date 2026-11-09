@@ -194,8 +194,9 @@ class TestFitTypes:
 
 
 class TestPrimitiveTypes:
-    """`qml.expval` returns an array; `qml.jacobian` an array, or a pair of
-    them with `wrt="both"`, and only the three `wrt` values type-check."""
+    """`qml.expval` returns an array; `qml.jacobian` and `qml.vjp` an array,
+    or a pair of them with `wrt="both"`, and only the three `wrt` values
+    type-check (`qml.vjp` only with its cotangent)."""
 
     _MODEL = (
         "import numpy as np\n"
@@ -238,6 +239,36 @@ class TestPrimitiveTypes:
         assert status == 1, report
         assert "snippet.py:9: error" in report, report
         assert "snippet.py:12: error" in report, report
+
+    def test_each_vjp_wrt_types_its_result(self, tmp_path):
+        source = self._MODEL + (
+            "v = np.ones((1, 1))\n"
+            "by_params: npt.NDArray[np.float64] = qml.vjp(model, [[0.1]], [0.1, 0.2], v)\n"
+            "by_inputs: npt.NDArray[np.float64] = qml.vjp(\n"
+            '    model, [[0.1]], [0.1, 0.2], [[1.0]], wrt="inputs", shots=64, seed=1\n'
+            ")\n"
+            "pair: tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]] = (\n"
+            '    qml.vjp(model, qml.Dataset([[0.1]]), (0.1, 0.2), v, wrt="both")\n'
+            ")\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+    def test_vjp_both_is_not_an_array_and_an_unknown_wrt_does_not_type_check(
+        self, tmp_path
+    ):
+        source = self._MODEL + (
+            "bad: npt.NDArray[np.float64] = qml.vjp(\n"
+            '    model, [[0.1]], [0.1, 0.2], [[1.0]], wrt="both"\n'
+            ")\n"
+            'qml.vjp(model, [[0.1]], [0.1, 0.2], [[1.0]], wrt="theta")\n'
+            "qml.vjp(model, [[0.1]], [0.1, 0.2])\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 1, report
+        assert "snippet.py:9: error" in report, report
+        assert "snippet.py:12: error" in report, report
+        assert "snippet.py:13: error" in report, report
 
 
 class TestAskTellTypes:

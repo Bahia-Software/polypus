@@ -73,6 +73,22 @@ Entries were curated from the Conventional Commits history. Releases before
   of `qml.expval`), and pickling of `Model`, so `copy.deepcopy` works: it
   travels as the JSON of its spec, rebuilt through the checks of `qml.load`
   (#502).
+- `polypus.qml.vjp(model, x, params, cotangent, *, wrt="params", ...)`, the
+  vector-Jacobian product of `qml.jacobian` with a `(rows, observables)`
+  cotangent, what a reverse-mode backward pass needs: `(num_params,)` summed
+  over the rows for `wrt="params"`, `(rows, features)` for `"inputs"`, the
+  tuple for `"both"`. With `exact=True` it takes one adjoint run per row
+  whatever the number of observables (`qml.jacobian` takes one per row and
+  observable), so the exact backward pass of `polypus.torch.QuantumLayer`,
+  which now calls it, is up to `K` times cheaper for a `K`-observable readout;
+  with shots it runs `qml.jacobian`'s circuits and gives its contraction for
+  the same `seed`. The cotangent's shape is checked right after `params` (a
+  `polypus.ConfigurationError`, as is a complex one); a `NaN` or an infinity
+  in it propagates as through the contraction. `qml.jacobian` does not
+  change. In `polypus-qml`: `Jacobian::vjp`,
+  `JacobianBlock::vjp_runs`/`num_vjp_runs`/`vjp_from_adjoint` (and
+  `ExpectationJacobian`'s), `Vjp` and `DiagonalObservable::weight_bound`.
+  `benchmarks/bench_vjp.py` measures it (#559, ADR 0008).
 - Multi-qubit Pauli sums and an exact H₂ Hamiltonian in `polypus-physics`
   (#529), the reference for molecular simulation (#528). In
   `hamiltonians`: `PauliString` (text form `"X0 X1 Y2 Y3"`, product with a

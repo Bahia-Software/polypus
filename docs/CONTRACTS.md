@@ -30,7 +30,7 @@ Rules of the road:
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 | C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
-| C-11 | Native QML (problem ↔ oracle, expectation Jacobian, `polypus.qml.Model`, `qml.expval`/`qml.jacobian`, `polypus.torch.QuantumLayer`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `tests/jacobian.rs` + `tests/adjoint.rs` + `src/model.rs` serde tests + `polypus-sim` `tests/adjoint.rs` + `polypus-infrastructure` `native.rs` adjoint tests + `polypus-evaluation` `qml_oracle.rs` + the primitive tests in `crates/polypus/src/bindings/qml.rs` + `tests/python/test_qml_native*.py` + `tests/python/test_qml_adjoint.py` + `tests/python/test_torch_*.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
+| C-11 | Native QML (problem ↔ oracle, expectation Jacobian, `polypus.qml.Model`, `qml.expval`/`qml.jacobian`/`qml.vjp`, `polypus.torch.QuantumLayer`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `tests/jacobian.rs` + `tests/adjoint.rs` + `src/model.rs` serde tests + `polypus-sim` `tests/adjoint.rs` + `polypus-infrastructure` `native.rs` adjoint tests + `polypus-evaluation` `qml_oracle.rs` + the primitive tests in `crates/polypus/src/bindings/qml.rs` + `tests/python/test_qml_native*.py` + `tests/python/test_qml_adjoint.py` + `tests/python/test_torch_*.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
 | C-12 | Call trace (`trace=` / `POLYPUS_CALL_TRACE`, JSON Lines v1) | `polypus-orchestration` `src/trace.rs`, `src/trace/decorators.rs`, `src/flow/trace_tests.rs`, `tests/conformance_with_trace.rs` + `polypus` `src/bindings/call_trace.rs` + `tests/python/test_call_trace*.py` (+ `tests/python/test_interrupt.py` `test_trace_on_interrupt` for Ctrl+C, and `tests/python/test_typing_stubs.py` `TestTraceType` for the stub type and the guide's example) | ✅ present | — |
 
 ✅ means the listed test enforces the contract; a ⏳ contract would be
@@ -1701,8 +1701,9 @@ is the first release action.*
 This contract governs the outer Rust↔Python boundary of the public entry
 points `polypus.run_quantum_circuit`, `polypus.train`, `polypus.qml.train` and
 `polypus.qml.predict`, and of the native QML API's `Model.fit`,
-`TrainedModel.predict`, `TrainedModel.run`, `polypus.qml.expval` and
-`polypus.qml.jacobian`, and `polypus.torch.QuantumLayer` over them (C-11):
+`TrainedModel.predict`, `TrainedModel.run`, `polypus.qml.expval`,
+`polypus.qml.jacobian` and `polypus.qml.vjp`, and `polypus.torch.QuantumLayer`
+over them (C-11):
 their `seed` kwarg and their return shape. (It is distinct from C-1, which
 freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 
@@ -1811,7 +1812,8 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   seed shot sampling like `run_quantum_circuit`: an explicit seed reproduces the
   counts, `None` draws one from OS entropy, and an explicit seed on `qmio` is a
   `ValueError`. With `exact=True` nothing is sampled.
-- **`qml.expval(..., seed=None)` / `qml.jacobian(..., seed=None)`** follow
+- **`qml.expval(..., seed=None)` / `qml.jacobian(..., seed=None)` /
+  `qml.vjp(..., seed=None)`** follow
   `TrainedModel.run`: an explicit seed reproduces the result bit for bit, `None`
   draws one from OS entropy, an explicit seed on `qmio` is a `ValueError`, and
   with `exact=True` nothing is sampled. They return bare arrays with no manifest,
@@ -1848,7 +1850,8 @@ A run (one entry-point call) sends its circuits to one backend in one or more
 calls: a `train` sends the initial population and one batch per generation,
 each split into waves when it exceeds the backend's concurrency (CUNQA:
 `n_qpus`) or the memory budget, and `qml.train` also windows its candidates by
-the host's cores, and `qml.expval`/`qml.jacobian` their rows by the same rule
+the host's cores, and `qml.expval`/`qml.jacobian`/`qml.vjp` their rows by the
+same rule
 (C-11); the `final_shots` batch is the last call. **Every call gets
 its own sampling stream, on every backend** (#411), so no two calls of a run
 share shot noise, and the same seed replays the whole sequence:
@@ -1933,6 +1936,8 @@ rejection, and the returned manifest/outcome fields), `tests/python/test_qml_pre
 shots, the `qmio` rejection, the `RunResult`/`ExactResult` fields),
 `test_qml_native_expval_jacobian.py`'s `TestBlocksAndSeeds` (`qml.expval` and
 `qml.jacobian`: seed replay, another seed differs, an omitted one is drawn, the
+`qmio` rejection), `test_qml_native_vjp.py` (`qml.vjp`: with a seed, the
+contraction of `qml.jacobian`'s result with that seed; another seed differs; the
 `qmio` rejection) and `a_seeded_native_result_does_not_depend_on_the_block_size`
 in `crates/polypus/src/bindings/qml.rs`, the minibatch draws in
 `crates/polypus-evaluation/src/qml_oracle.rs`
@@ -2310,7 +2315,7 @@ optimizers underneath (`docs/adr/0007-native-qml.md`). The contract has a
 Rust half — the seam between a `QmlProblem` and the oracle that scores it, a
 Rust-to-Rust contract like C-5, and the loss-free expectation Jacobian beneath
 it — and a Python half, the `polypus.qml.Model` API built on it and the
-`qml.expval`/`qml.jacobian` primitives.
+`qml.expval`/`qml.jacobian`/`qml.vjp` primitives.
 
 ### The problem ↔ oracle seam (Rust)
 
@@ -2423,6 +2428,29 @@ batching and distribution are the oracle's concern.
     the same bookkeeping (parameter, or feature times its chain-rule factor),
     with the same blocks. No loss: the observable is the readout's own. It is
     the shift's Jacobian to rounding.
+  - *Vector-Jacobian product (#559).* `Jacobian::vjp(v)` contracts a Jacobian
+    with a cotangent `v`, flat and row-major `(samples, observables)`: a
+    `Vjp` whose parts are, **per sample** `s`, `Σ_o v[s][o]·J[s][o][·]`, flat
+    and row-major `(samples, num_params)` and `(samples, num_features)`, a part
+    `wrt` did not ask for `None`; values are taken as they are (`NaN · 0` is
+    `NaN`). By adjoint differentiation, `vjp_runs(θ, v)` on an
+    `ExpectationJacobian` or a block gives **one run per sample**
+    (`num_vjp_runs`), whatever the number of observables: the circuit and the
+    gates of `adjoint_runs`, with the diagonal observable `Σ_o v[s][o]·O_o`
+    (`DiagonalObservable::combine`), since
+    `Σ_o v_o ∂⟨O_o⟩ = ∂⟨Σ_o v_o O_o⟩`; `vjp_from_adjoint` reads its
+    derivatives through the same bookkeeping into the same `Vjp`. It is the
+    shift Jacobian's contraction to rounding, and blocks concatenate row for
+    row. A non-finite value in `v` reaches its sample's observable as it is,
+    and so do finite values large enough to overflow the combined weight:
+    `DiagonalObservable::weight_bound()` (`Σ |c|` over its terms, a bound on
+    every eigenvalue, rounding included) is then not finite, and a simulator
+    may refuse to weigh such an observable (the native one does: `polypus-sim`
+    refuses non-finite weights); the caller that wants the cotangent to reach
+    the product as the contraction does takes `adjoint_runs` and
+    `Jacobian::vjp` for that sample instead (the binding of `qml.vjp` does so
+    already past a quarter of `f64::MAX`, below). A `v` of the wrong length,
+    like derivatives of the wrong length, is `QmlError::CountsLengthMismatch`.
   - *Circuits and order.* `2 · shifts` circuits per sample and no unshifted
     one, `shifts` counting the gates that read a parameter (a parameter shared
     by `g` gates counts `g` times) for `Params`, the gates that read the sample
@@ -2512,7 +2540,7 @@ ones. The typing stubs spell each set as a `Literal`.
 | `pool(keep=)` | `"even_positions"`, `"odd_positions"` |
 | `Readout(decision=)` | `"raw"`, `"sign"`, `"threshold"`, `"argmax"` |
 | `fit(loss=)` | `"squared_error"`, `"binary_cross_entropy"`, `"hinge"`, `"categorical_cross_entropy"`, `"expectation"` |
-| `qml.jacobian(wrt=)` | `"params"`, `"inputs"`, `"both"` (a `polypus.ConfigurationError`, like every check of the primitives) |
+| `qml.jacobian(wrt=)`, `qml.vjp(wrt=)` | `"params"`, `"inputs"`, `"both"` (a `polypus.ConfigurationError`, like every check of the primitives) |
 
 The one option that is not a string is `strongly_entangling(ranges=)`: `None`
 (PennyLane's default, `r = (layer mod (n − 1)) + 1`) or one integer per layer,
@@ -2611,9 +2639,10 @@ builds a circuit and runs nothing, so the same row that `run` rejects with a
 `ConfigurationError` is a `ValueError` here. The model is unchanged, and each
 call returns a new `Circuit`.
 
-**Expectation and Jacobian primitives.** `qml.expval(model, x, params, *, …)`
-and `qml.jacobian(model, x, params, *, wrt="params", …)` expose (g) to Python,
-for a training loop of the caller's own:
+**Expectation and Jacobian primitives.** `qml.expval(model, x, params, *, …)`,
+`qml.jacobian(model, x, params, *, wrt="params", …)` and
+`qml.vjp(model, x, params, cotangent, *, wrt="params", …)` expose (g) to
+Python, for a training loop of the caller's own:
 
 - **Arguments.** `model` is a `polypus.qml.Model` (anything else, a
   `TrainedModel` included, is a `TypeError`); `x` is rows or a `Dataset` (its
@@ -2622,15 +2651,25 @@ for a training loop of the caller's own:
   arguments are `TrainedModel.run`'s, keyword-only, with its rules: `exact`
   needs `infrastructure="local"` and `backend="polypus"`, `backend=None` goes
   by infrastructure, `seed` is drawn when omitted and refused on `qmio` (C-7).
+  `vjp`'s `cotangent`, `v`, is anything `numpy.asarray(cotangent, "float64")`
+  takes (rows as lists or tuples, a NumPy array of any real dtype; a complex
+  one is refused rather than losing its imaginary part) of shape
+  exactly `(rows, observables)`, the rows of `x` and the model's observables;
+  its values are taken as they are: a `NaN` or an infinity is not refused.
 - **Results.** `float64` `numpy.ndarray`s, C-contiguous, rows in row order:
   `expval` → `(rows, observables)` with every readout observable, whatever the
   decision (one column per class for `"argmax"`, the weighted sum for an
   `Observable`); `jacobian` → `(rows, observables, num_params)` for
   `wrt="params"`, `(rows, observables, features)` for `"inputs"`, and the tuple
-  of both for `"both"`, each identical to its separate call. With `exact=True`
-  they are the exact values, what `run(exact=True)` and `predict(exact=True)`
-  read; with shots, unbiased estimates. No manifest: the seed and `id` are
-  logged; pass a `seed` to replay.
+  of both for `"both"`, each identical to its separate call; `vjp` → the
+  vector-Jacobian product, `Σ_r,o v[r,o]·J_θ[r,o,:]` of shape `(num_params,)`
+  (**summed over the rows**) for `"params"`, `Σ_o v[r,o]·J_x[r,o,:]` of shape
+  `(rows, features)` for `"inputs"`, and the tuple of both for `"both"`, each
+  identical to its separate call. A non-finite value in `v` propagates as it
+  does through the contraction of `jacobian`'s result (`NaN · 0` is `NaN`).
+  With `exact=True` they are the exact values, what `run(exact=True)` and
+  `predict(exact=True)` read; with shots, unbiased estimates. No manifest: the
+  seed and `id` are logged; pass a `seed` to replay.
 - **The input Jacobian** covers angle encoders, angle re-uploading and IQP
   encoders (re-uploaded or not), through (g)'s chain rule (`Rz(x_i)` factor `1`,
   `Rzz(x_i·x_j)` factors `x_j` and `x_i`). An amplitude or basis encoder, in the
@@ -2644,7 +2683,19 @@ for a training loop of the caller's own:
   instead, one run per row and observable on
   `NativeStatevectorBackend::run_adjoint`, unless the memory budget holds one
   statevector of the width but not two: then the shifted circuits, logged at
-  `info` (as (f)). The result is the same to rounding either way.
+  `info` (as (f)). The result is the same to rounding either way. `vjp` runs
+  `jacobian`'s circuits and contracts each block's Jacobian with the block's
+  rows of `v`, so with shots and the same `seed` it is the contraction of
+  `jacobian`'s result, to rounding; with `exact=True` it takes (g)'s
+  vector-Jacobian product instead, **one adjoint run per row whatever the
+  number of observables**, with the same fallback to the shifted circuits. A
+  block whose combined observable cannot be weighed safely — a non-finite
+  value in its rows of `v`, or a `weight_bound` past `f64::MAX / 4`, so that
+  neither the weight nor the derivatives overflow (the simulator's sweep and
+  each derivative stay within the bound; the factor 4 leaves headroom for the
+  sums over the gates that share a parameter and the chain-rule factors) —
+  takes `jacobian`'s runs, one per row and observable, and contracts them, so
+  the result is still the contraction.
 - **Execution.** One backend and one scheduler per call — one connection, one
   `qraise` on CUNQA — closed on every way out, errors and Ctrl+C included. The
   rows run in sequential blocks, each bound, run and dropped before the next
@@ -2660,12 +2711,15 @@ for a training loop of the caller's own:
   guard while they run on rayon's threads and stops them, with the same
   `KeyboardInterrupt`. The result does not depend on the blocks: rows come back in row
   order, and a call on some rows equals the concatenation of calls on chunks
-  of them.
+  of them (for `vjp`'s `"params"`, which sums over the rows, their sum, to
+  rounding: the rows are summed in row order whatever the blocks).
 - **Checks.** Every one runs before a backend exists and raises
   `polypus.ConfigurationError`, in order: `wrt`; `shots` and `n_qpus`, the
-  CUNQA allocation and `exact`; the rows against the model; `params`; the
-  model and rows against `wrt` ((g)'s errors); a `seed` on `qmio`. The
-  `TypeError` for `model` comes first.
+  CUNQA allocation and `exact`; the rows against the model; `params`; for
+  `vjp`, the `cotangent` (real, convertible to `float64`, then its shape, the
+  error naming the expected and the received one); the model and rows against
+  `wrt` ((g)'s errors); a `seed` on `qmio`. The `TypeError` for `model` comes
+  first.
 
 **The PyTorch layer (`polypus.torch`).** `polypus.torch.QuantumLayer(model, *,
 initial_params=None, <qml.expval's execution arguments>)` is a
@@ -2756,7 +2810,14 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     `the_adjoint_gradient_needs_an_exact_gradient_too` in `src/problem.rs`,
     with `crates/polypus-sim/tests/adjoint.rs` for the simulator's derivative:
     (e)'s adjoint differentiation;
-  - `crates/polypus-qml/tests/jacobian.rs`, the `untie_traced_*` tests in
+  - `crates/polypus-qml/tests/jacobian.rs` (with `Jacobian::vjp`: the
+    contraction, a zero and a non-finite cotangent, the wrong length) and the
+    vector-Jacobian product tests of `tests/adjoint.rs` (one run per sample
+    whatever the observables, the contraction of the shift Jacobian for every
+    readout and model shape, the inputs of angle and IQP encoders, blocks, a
+    `NaN` reaching only its sample) with
+    `the_weight_bound_bounds_every_eigenvalue_and_flags_an_overflow` in
+    `src/adjoint.rs`, the `untie_traced_*` tests in
     `src/problem.rs`, the tests in `src/jacobian.rs` (a structure other than
     sample 0's, an angle gate that is not a Pauli rotation, an opaque encoder
     against `wrt`), and the trace tests in `src/model.rs` and the encoders:
@@ -2781,10 +2842,15 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     once, a cancellation or an error between blocks, a backend closed when no
     scheduler can be built over it, the array conversion, the exact Jacobian
     by the adjoint whatever the blocks, a Ctrl+C inside an exact block and the
-    watcher that stops it), with the window
+    watcher that stops it; for `qml.vjp`, one adjoint run per row whatever the
+    observables and `qml.jacobian`'s contraction whatever the blocks, the
+    shift and sampled routes, a non-finite cotangent, or a finite one that
+    overflows the weight, through the Jacobian's runs, a cancellation between
+    blocks and a Ctrl+C inside one), with the window
     tests in `crates/polypus-evaluation/src/qml_oracle.rs`
     (`a_backend_*`, `the_lift_*`, `many_circuits_per_item_*`,
-    `the_window_is_never_zero`): `qml.expval`/`qml.jacobian`'s execution.
+    `the_window_is_never_zero`): `qml.expval`/`qml.jacobian`/`qml.vjp`'s
+    execution.
 - **Python:** `tests/python/test_qml_native.py` (construction, the option
   sets, every construction check, `Dataset` splits and scaling, the
   `qml.train`/`qml.predict` rejection), `test_qml_native_layers.py` (what each
@@ -2802,6 +2868,11 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   types, shapes and contiguity, `expval` against `run`/`predict`, the Jacobian
   against finite differences for every layer and readout and against the
   chain rule of a loss, chunks, seeds, shots, every rejection),
+  `test_qml_native_vjp.py` (`qml.vjp`: types, shapes and contiguity, the
+  cotangent's containers, the contraction of `qml.jacobian` for every layer,
+  readout and input encoder, exact and with the same seed, chunks, one
+  observable, a zero, a non-finite, an overflowing, a complex and a wrongly
+  shaped cotangent, every rejection),
   `test_torch_quantum_layer.py` (the PyTorch layer: forward bit for bit
   `expval` in one call per batch, `gradcheck` with default tolerances for the
   parameters and the inputs, the backward pass the same by the adjoint and by
@@ -2819,18 +2890,20 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   every sample, minibatches included, with its shots and every sample at the
   seam), `test_typing_stubs.py`'s
   `TestFitTypes` (the stub types of both), `TestPrimitiveTypes` (each
-  `wrt`'s result type) and `TestTorchTypes` (the layer's inline types), the native
-  QML cases of `test_interrupt.py` (Ctrl+C during `fit`, with and without a
-  `callback`, and during `qml.jacobian`, exact and sampled, and inside one
-  long exact block; the minibatch rescore runs with the GIL released),
+  `wrt`'s result type, for `qml.jacobian` and `qml.vjp`) and `TestTorchTypes`
+  (the layer's inline types), the native QML cases of `test_interrupt.py`
+  (Ctrl+C during `fit`, with and without a `callback`, and during
+  `qml.jacobian` and `qml.vjp`, exact and sampled, and inside one long exact
+  block; the minibatch rescore runs with the GIL released),
   `test_qml_adjoint.py` (the adjoint and the parameter-shift fallback give the
-  same `qml.jacobian` and `fit` with Adam, the fallback logged, and no memory
-  for one statevector the exact path's error; the same comparison for the
-  `QuantumLayer` backward is in `test_torch_quantum_layer.py`),
+  same `qml.jacobian`, `qml.vjp` and `fit` with Adam, the fallback logged, and
+  no memory for one statevector the exact path's error; the same comparison
+  for the `QuantumLayer` backward is in `test_torch_quantum_layer.py`),
   `TestNativeQmlChecksRaiseIt` in `test_configuration_errors.py` (every check
-  of `fit`, `predict`, `run`, `qml.expval` and `qml.jacobian` is a
-  `polypus.ConfigurationError` raised before any CUNQA call, and a primitive
-  runs every block on one allocation), and the `Model.fit` cases of `test_callback.py` (its
+  of `fit`, `predict`, `run`, `qml.expval`, `qml.jacobian` and `qml.vjp` is a
+  `polypus.ConfigurationError` raised before any CUNQA call, `qml.vjp`'s
+  cotangent checked right after `params`, and a primitive runs every block on
+  one allocation), and the `Model.fit` cases of `test_callback.py` (its
   `callback`'s `TypeError` before the CUNQA seam and after `final_shots`, one
   call per iteration for every optimizer, Adam's `evaluations`, a stop that
   still sends the final batch, an exception raised as itself, with no call or

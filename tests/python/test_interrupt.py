@@ -550,13 +550,27 @@ except BaseException as exc:  # e.g. a PanicException from a swallowed error
 """
 
 
+# `qml.vjp` (#559) runs the same blocks: the same child, with the product
+# instead of the Jacobian (exactly, one adjoint run per row as the Jacobian of
+# this one-observable model takes; sampled, the same circuits).
+_JACOBIAN_CALL = 'qml.jacobian(model, x, params, wrt="both", exact=EXACT)'
+assert _JACOBIAN_CHILD.count(_JACOBIAN_CALL) == 1
+_VJP_CHILD = _JACOBIAN_CHILD.replace(
+    _JACOBIAN_CALL,
+    'qml.vjp(model, x, params, [[1.0]] * len(x), wrt="both", exact=EXACT)',
+)
+
+
 @pytest.mark.parametrize("exact", [True, False], ids=["exact", "sampled"])
-def test_native_qml_jacobian_responds_to_sigint_promptly(exact):
+@pytest.mark.parametrize("primitive", ["jacobian", "vjp"])
+def test_native_qml_jacobian_responds_to_sigint_promptly(primitive, exact):
+    child = _JACOBIAN_CHILD if primitive == "jacobian" else _VJP_CHILD
     _assert_responds_to_sigint_promptly(
-        _JACOBIAN_CHILD.replace("EXACT", str(exact)),
+        child.replace("EXACT", str(exact)),
         failure_hint=(
-            f"qml.jacobian(exact={exact}) — the block loop is likely not checking "
-            "the interrupt guard between blocks, or the GIL is held around it"
+            f"qml.{primitive}(exact={exact}) — the block loop is likely not "
+            "checking the interrupt guard between blocks, or the GIL is held "
+            "around it"
         ),
     )
 
@@ -601,11 +615,21 @@ except BaseException as exc:
 """
 
 
-def test_an_exact_adjoint_jacobian_stops_inside_a_block():
+_ADJOINT_CALL = "qml.jacobian(model, x, params, exact=True)"
+assert _ADJOINT_ONE_BLOCK_CHILD.count(_ADJOINT_CALL) == 1
+
+
+@pytest.mark.parametrize("primitive", ["jacobian", "vjp"])
+def test_an_exact_adjoint_jacobian_stops_inside_a_block(primitive):
+    child = _ADJOINT_ONE_BLOCK_CHILD
+    if primitive == "vjp":
+        child = child.replace(
+            _ADJOINT_CALL, "qml.vjp(model, x, params, [[1.0]] * len(x), exact=True)"
+        )
     _assert_responds_to_sigint_promptly(
-        _ADJOINT_ONE_BLOCK_CHILD,
+        child,
         failure_hint=(
-            "qml.jacobian(exact=True) with long adjoint runs — the calling "
+            f"qml.{primitive}(exact=True) with long adjoint runs — the calling "
             "thread is likely not watching for Ctrl+C while the block runs"
         ),
     )

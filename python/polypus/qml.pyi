@@ -49,6 +49,7 @@ __all__ = [
     "load",
     "expval",
     "jacobian",
+    "vjp",
     "Dataset",
     "PauliTerm",
     "Observable",
@@ -367,6 +368,75 @@ def jacobian(
     model: Model,
     x: Union[_DatasetRows, Dataset],
     params: _FloatVector,
+    *,
+    wrt: _Wrt = "params",
+    shots: int = 1024,
+    infrastructure: str = "local",
+    n_qpus: int = 1,
+    nodes: int = 1,
+    cores_per_qpu: int = 2,
+    walltime: Optional[str] = None,
+    options: Optional[dict[str, str]] = None,
+    sim_method: str = "automatic",
+    noise_model: Optional[NoiseModel] = None,
+    backend: Optional[str] = None,
+    seed: Optional[int] = None,
+    exact: bool = False,
+) -> Union[
+    npt.NDArray[np.float64], tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]
+]: ...
+
+# The Jacobian's product with `cotangent` (rows, observables): (num_params,)
+# summed over the rows for "params", (rows, features) for "inputs", both of
+# them for "both". Exact: one adjoint run per row whatever the observables.
+@overload
+def vjp(
+    model: Model,
+    x: Union[_DatasetRows, Dataset],
+    params: _FloatVector,
+    cotangent: _DatasetRows,
+    *,
+    wrt: Literal["params", "inputs"] = "params",
+    shots: int = 1024,
+    infrastructure: str = "local",
+    n_qpus: int = 1,
+    nodes: int = 1,
+    cores_per_qpu: int = 2,
+    walltime: Optional[str] = None,
+    options: Optional[dict[str, str]] = None,
+    sim_method: str = "automatic",
+    noise_model: Optional[NoiseModel] = None,
+    backend: Optional[str] = None,
+    seed: Optional[int] = None,
+    exact: bool = False,
+) -> npt.NDArray[np.float64]: ...
+@overload
+def vjp(
+    model: Model,
+    x: Union[_DatasetRows, Dataset],
+    params: _FloatVector,
+    cotangent: _DatasetRows,
+    *,
+    wrt: Literal["both"],
+    shots: int = 1024,
+    infrastructure: str = "local",
+    n_qpus: int = 1,
+    nodes: int = 1,
+    cores_per_qpu: int = 2,
+    walltime: Optional[str] = None,
+    options: Optional[dict[str, str]] = None,
+    sim_method: str = "automatic",
+    noise_model: Optional[NoiseModel] = None,
+    backend: Optional[str] = None,
+    seed: Optional[int] = None,
+    exact: bool = False,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]: ...
+@overload
+def vjp(
+    model: Model,
+    x: Union[_DatasetRows, Dataset],
+    params: _FloatVector,
+    cotangent: _DatasetRows,
     *,
     wrt: _Wrt = "params",
     shots: int = 1024,
