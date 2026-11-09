@@ -2,10 +2,18 @@
 //!
 //! Each template returns a [`ParameterizedCircuit`] so it stays composable: the
 //! caller can keep chaining gates, append `measure_all`, or export it directly.
-//! Templates add no measurements of their own.
+//! Templates add no measurements of their own. The order-finding circuit of
+//! Shor's algorithm is [`shor_order_finding`]; its arithmetic blocks are in
+//! [`arithmetic`].
+
+pub mod arithmetic;
+mod emit;
+mod shor;
+
+pub use shor::{shor_order_finding, MAX_SHOR_MODULUS_BITS};
 
 use crate::{CircuitError, ParameterizedCircuit};
-use std::f64::consts::PI;
+use emit::{circuit_from_ops, emit_qft};
 
 /// Most qubits a QFT may act on: its `n(n+1)/2` Hadamards and controlled
 /// phases, plus `⌊n/2⌋` swaps, then stay within the 4 000 000 instructions
@@ -62,50 +70,11 @@ pub fn qft_with_options(
             max_qubits: MAX_QFT_QUBITS,
         });
     }
-    let mut qc = ParameterizedCircuit::new(num_qubits);
-    if num_qubits == 0 {
-        return Ok(qc);
-    }
-
-    // cp(θ) is symmetric in its two qubits; the controlled-phase angle between
-    // qubits j and k is π / 2^(j-k), negated for the inverse.
-    let sign = if inverse { -1.0 } else { 1.0 };
-    let angle = |j: usize, k: usize| sign * PI / 2f64.powi((j - k) as i32);
-
-    let add_swaps = |mut qc: ParameterizedCircuit| {
-        for i in 0..num_qubits / 2 {
-            qc = qc.swap(i, num_qubits - i - 1);
-        }
-        qc
-    };
-
-    if inverse {
-        // Adjoint of the forward circuit: swaps first, then the rotation block
-        // in reverse (each Hadamard last on its qubit, phases with reversed
-        // sign and ascending target index).
-        if swaps {
-            qc = add_swaps(qc);
-        }
-        for j in 0..num_qubits {
-            for k in 0..j {
-                qc = qc.cp(k, j, angle(j, k));
-            }
-            qc = qc.h(j);
-        }
-    } else {
-        // Forward: Hadamard on the most-significant qubit, then the descending
-        // ladder of controlled phases; the swaps close the circuit.
-        for j in (0..num_qubits).rev() {
-            qc = qc.h(j);
-            for k in (0..j).rev() {
-                qc = qc.cp(k, j, angle(j, k));
-            }
-        }
-        if swaps {
-            qc = add_swaps(qc);
-        }
-    }
-    Ok(qc)
+    let register: Vec<usize> = (0..num_qubits).collect();
+    let swap_count = if swaps { num_qubits / 2 } else { 0 };
+    let mut ops = Vec::with_capacity(num_qubits * (num_qubits + 1) / 2 + swap_count);
+    emit_qft(&mut ops, &register, inverse, swaps);
+    circuit_from_ops(num_qubits, &ops)
 }
 
 #[cfg(test)]

@@ -21,15 +21,17 @@ Rules of the road:
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`, `test_cunqa_contract.py`) | ✅ present | the CUNQA seal sent `cores` to `qraise`, which CUNQA renamed `cores_per_qpu` in 2.4.0, so every reservation raised `TypeError` on CUNQA ≥ 2.4 (#204, fixed: `cores_per_qpu` goes through unchanged; **CUNQA 2.3 is no longer supported**); `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` received `backend` and `id` and CUNQA `run_qcs` received `backend`, none of them read (LOCAL-2, #230, fixed: Rust no longer sends them); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
-| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
+| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings; `polypus-qml`'s `every_instruction_kind_is_classified` in `src/problem.rs` for the gradient's gate classification; `polypus-sim`'s `apply_inverse_undoes_every_instruction_kind` in `src/statevector.rs` and `every_instruction_kind_is_differentiated_through` in `tests/adjoint.rs` for the adjoint gradient) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed); CUNQA 3.0.0 failed such a job (`key 'counts' not found`) and split the key of a circuit with several classical registers with spaces (#253, #304, fixed in the seal); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
-| C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
-| C-6 | Version coherence | `release.yml` gate (tag ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff) + `tests/python/test_version_coherence.py` (`polypus.__version__` ↔ Cargo.toml ↔ installed distribution) | ✅ present | tag/Cargo diverged at 0.6.0 |
+| C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` (+ `crates/polypus-optimizers/tests/initial_point.rs` and `tests/python/test_initial_point.py` for `initial_point`, `tests/python/test_final_shots.py` for `final_shots`, and `tests/python/test_qml_native_initial_point_final_shots.py` for both through `qml.Model.fit`; `crates/polypus-optimizers/tests/observer.rs` and `tests/python/test_callback.py` for `callback`) | ✅ present | DE `best_fitness` mismatch (C4) |
+| C-6 | Version coherence | `release.yml` gate (tag, internal pins, CHANGELOG.md, CITATION.cff ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff, pins) + `tests/python/test_version_coherence.py` (`polypus.__version__` ↔ Cargo.toml ↔ installed distribution) | ✅ present | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249) or the run `id`'s UUID (#264); both fixed: `polypus.BackendError` |
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 | C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
+| C-11 | Native QML (problem ↔ oracle, expectation Jacobian, `polypus.qml.Model`, `qml.expval`/`qml.jacobian`, `polypus.torch.QuantumLayer`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `tests/jacobian.rs` + `tests/adjoint.rs` + `src/model.rs` serde tests + `polypus-sim` `tests/adjoint.rs` + `polypus-infrastructure` `native.rs` adjoint tests + `polypus-evaluation` `qml_oracle.rs` + the primitive tests in `crates/polypus/src/bindings/qml.rs` + `tests/python/test_qml_native*.py` + `tests/python/test_qml_adjoint.py` + `tests/python/test_torch_*.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
+| C-12 | Call trace (`trace=` / `POLYPUS_CALL_TRACE`, JSON Lines v1) | `polypus-orchestration` `src/trace.rs`, `src/trace/decorators.rs`, `src/flow/trace_tests.rs`, `tests/conformance_with_trace.rs` + `polypus` `src/bindings/call_trace.rs` + `tests/python/test_call_trace*.py` (+ `tests/python/test_interrupt.py` `test_trace_on_interrupt` for Ctrl+C, and `tests/python/test_typing_stubs.py` `TestTraceType` for the stub type and the guide's example) | ✅ present | — |
 
 ✅ means the listed test enforces the contract; a ⏳ contract would be
 specified but only review-enforced until its test lands (none today). Known
@@ -173,9 +175,24 @@ The Rust orchestration layer now returns a typed `Result` on every path:
   **`polypus.EvaluationError`** (`qiskit_error_to_evaluation_error`) — no backend
   is involved yet — again with `module.Class: message` and `__cause__`, and with
   `ValueError`/`TypeError`/`KeyboardInterrupt` kept as they are. An exception
-  raised by the user's `expectation_function` (or variance callback) is **never**
-  retyped, even when its class is a Qiskit one: it travels in
-  `EvaluationError::Python` and re-raises verbatim.
+  raised by the user's `expectation_function` (or variance callback, or the
+  `ask()`/`tell()` of a `polypus.External` optimizer, or the training
+  `callback`, C-5) is **never** retyped, even
+  when its class is a Qiskit one: it travels in `EvaluationError::Python` and
+  re-raises verbatim.
+- **An external optimizer (`polypus.External`, #399).** The run calls the
+  user's `ask()` and `tell()` from inside `detach`, attaching for each call
+  only (`attach_or`), on the thread that called `train`. An exception either
+  call raises, a failed conversion of what `ask()` returned (`ValueError`), or
+  a Ctrl+C pending before either call, is recorded in the run's
+  `OracleErrorSlot` as `EvaluationError::Python`; the bridge stops, and
+  `dispatch_optimizer` returns the recorded error instead of the bridge's, so
+  the edge re-raises the original exception with its class,
+  `KeyboardInterrupt` included. Once the slot holds an error (that call's, a
+  backend failure, a Ctrl+C caught between waves), neither method calls
+  Python again, so the library is never told a failed batch's values. With the
+  interpreter unavailable, either call records `InterpreterUnavailable`
+  without calling Python.
 - **How the exception travels.** Between the seam and the FFI edge it crosses
   pyo3-free layers (the planner, `OracleErrorSlot`) that may format it while the
   thread is detached, so it is carried as
@@ -204,8 +221,17 @@ The Rust orchestration layer now returns a typed `Result` on every path:
   conversion, a statevector that does not fit in the memory budget) raises a
   class from the `polypus` exception hierarchy: `PolypusError` (base) →
   `BackendError` → {`CunqaError`, `QmioError`, `NativeCircuitError`,
-  `InsufficientMemoryError`}, and `PolypusError` → `EvaluationError`. Catching
-  `polypus.PolypusError` catches them all.
+  `InsufficientMemoryError`}, `PolypusError` → `EvaluationError`, and
+  `PolypusError` → `ConfigurationError`. Catching `polypus.PolypusError` catches
+  them all.
+- **`ConfigurationError`** (issue #418) subclasses both `PolypusError` and
+  `ValueError`. Every `ValueError` that `run_quantum_circuit`, `train`,
+  `qml.train` and `qml.predict` raise for an argument or a configuration (an
+  unknown `infrastructure`, a bad `walltime`, an optimizer setting,
+  `OracleError::Config`, …) is one, so the `ValueError` guarantees in this file
+  still hold. `train` and `qml.train` make these checks, and convert the
+  observable and the optimizer, before any backend exists, so on CUNQA an
+  invalid configuration never reaches `qraise`.
 - **`InsufficientMemoryError`** (issue #215): a circuit that does not fit in the
   memory budget — `POLYPUS_MEM_BUDGET` when it is valid (e.g. `32G`), else the
   detected RAM/cgroup limit minus a safety reserve — is refused *before* it runs,
@@ -290,6 +316,17 @@ shutdown); `interpreter_unavailable_in_external_maps_to_keyboard_interrupt`,
 among them); `signal_polling_cancels_when_the_interpreter_is_unavailable` and
 `statevector_cancellation_raises_keyboard_interrupt` in
 `crates/polypus/src/bindings/mod.rs`.
+An external optimizer: `an_exception_is_recorded_with_its_class`,
+`a_failed_run_calls_neither_method` and
+`an_unavailable_interpreter_is_recorded_without_calling_python` in
+`crates/polypus/src/bindings/external.rs`,
+`external_returns_the_failure_recorded_in_the_slot` in
+`crates/polypus-orchestration/src/dispatch.rs`,
+`test_an_exception_from_ask_or_tell_keeps_its_class` (a `LookupError` and a
+`KeyboardInterrupt` from either call) and `test_a_failing_cost_is_not_told` in
+`tests/python/test_external.py`, and
+`test_external_training_responds_to_sigint_promptly` in
+`tests/python/test_interrupt.py`.
 The local `run_qcs` kwarg set, with `max_memory_mb` present for a known budget,
 is pinned by `test_local_run_qcs_kwargs_*` in the same file.
 `InsufficientMemoryError` is pinned by `tests/python/test_memory_budget.py` (the
@@ -397,6 +434,21 @@ exporter (`qasm.rs`) and importer (`qasm_import.rs`), the OpenQASM 3 exporter
 semantics** (the native simulator is the reference; QIR decompositions may
 differ only by a global phase; the OpenQASM 3 definitions may not differ at
 all, under the profile's Qiskit phase conventions).
+
+**Consumers that classify the vocabulary.** `polypus-qml`'s exact
+parameter-shift gradient (`classify` in `crates/polypus-qml/src/problem.rs`)
+sorts every instruction kind into the Pauli rotations it can differentiate
+(`rx`, `ry`, `rz`, `rxx`, `rzz`), the parameter-free instructions it copies,
+and the angle-taking ones it rejects. An instruction kind it does not name is
+rejected, never passed through, so adding an instruction also means
+classifying it there: `every_instruction_kind_is_classified` fails until it is.
+The native simulator's adjoint gradient
+(`StatevectorSimulator::adjoint_gradient`) differentiates the same five
+rotations and steps back through the inverse of every other instruction
+(`Statevector::apply_inverse`, built from the vocabulary itself: no
+instruction is added for it); `apply_inverse_undoes_every_instruction_kind`
+and `every_instruction_kind_is_differentiated_through` fail until a new
+instruction has its inverse.
 
 Corollaries:
 
@@ -596,6 +648,18 @@ different row's circuit, not a replica of one circuit, so summing them has no
 meaning and `merged_counts` is `None`. The dict shape, bit order, key order
 and shot-conservation rule are exactly as specified here.
 
+**Exact probabilities (native backend only).**
+`NativeStatevectorBackend::run_circuits_exact` returns, instead of counts, each
+circuit's exact basis-state probabilities `|amplitude|²`, keyed exactly as the
+counts above (same width and bit order). It draws no samples and no seed: the
+values sum to 1 up to rounding, states of probability exactly zero are omitted
+as unobserved bitstrings are, and the result is the same bit for bit on every
+run. It reads every qubit, so it accepts only a full-register read-out (no
+measurement, or `measure_all`) and refuses a circuit that measures individual
+qubits (`UnsupportedCircuit`). It is not part of the `QuantumBackend` trait:
+"exact" means nothing for a noisy simulator or hardware. Enforced by the
+`exact_*` tests in `crates/polypus-infrastructure/src/native.rs`.
+
 **Enforcing test:** shot-conservation assertion in the orchestration tests
 (`crates/polypus/tests/running_quantum_circuits_local.rs`, plus the Python
 public-API case in `tests/python/test_local_run.py`; audit C6); the stable
@@ -681,11 +745,14 @@ explicit error — never silently reorder, deduplicate or no-op the measurement.
 The rule is enforced at four points, which must all reject identically (same
 offending qubit, same error) even though they see the circuit differently:
 
-- **Builder** (`ParameterizedCircuit::try_push`/`push`): incremental,
-  push-time. Each push is checked against the per-circuit record of qubits
-  already measured, which the push itself then updates — the prefix is known to
-  be valid, so only the new instruction can offend. Rescanning here would make
-  building a circuit quadratic in its gate count (issue #109).
+- **Builder** (`ParameterizedCircuit::try_push`/`push` and
+  `try_compose`/`compose`): incremental, push-time. Each push is checked against
+  the per-circuit record of qubits already measured, which the push itself then
+  updates — the prefix is known to be valid, so only the new instruction can
+  offend. Rescanning here would make building a circuit quadratic in its gate
+  count (issue #109). `try_compose`/`compose` check every instruction of the
+  composed circuit against that same record, in order, before appending any,
+  so a rejected composition leaves the circuit unchanged.
 - **QASM importer**: incremental, parse-time, against the parser's own
   `measured` set (which also carries the offending line number).
 - **Simulator** (`polypus-sim`) and **QIR exporter**: a single full-sequence
@@ -710,9 +777,290 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   `candidates.len()` finite `f64` values**, in order; higher is better.
   Python-backed oracles must validate length before returning across the FFI.
 - Preconditions validated with an error (not a panic): DE `population_size >= 4`
-  (with every `strategy`); PSO/QNG `bounds.0 < bounds.1`; `dimensions >= 1`.
+  (with every `strategy`); PSO/QNG `bounds.0 < bounds.1`; `dimensions >= 1`;
+  `initial_point` as below.
+- **Starting point (`initial_point`).** Every optimizer takes an optional
+  starting point: the `initial_point: Option<Vec<f64>>` field of
+  `AlgorithmDifferentialEvolutionArgs`, `AlgorithmPSOArgs`, `AlgorithmQNGArgs`,
+  `AlgorithmCmaEsArgs`, `AlgorithmAdamArgs`, `AlgorithmSPSAArgs` and
+  `AlgorithmRotosolveArgs`, the last argument of `dispatch_optimizer`, and `train(..., initial_point=None)`,
+  `qml.train(..., initial_point=None)` and `qml.Model.fit(..., initial_point=None)`
+  (keyword-only; `dimensions` is the model's `num_params`, C-11) in Python.
+  - Preconditions: exactly `dimensions` values, every one finite, and for PSO
+    every value within `[bounds.0, bounds.1]` (PSO clamps positions to its
+    bounds, so a point outside them would be moved). QNG and Adam take any
+    finite point: their `bounds` only shape the random draw. SPSA and
+    Rotosolve, which have no `bounds`, take any finite point too. Each optimizer
+    checks this after its other preconditions, whose errors come first, and
+    before any RNG draw or oracle call, as `OptimizerError::InvalidConfig` for
+    `initial_point`. Each optimizer's `check_preconditions` makes these checks,
+    configuration and point, in that order, without running anything;
+    `Method::check_preconditions` in `polypus-orchestration` calls the one the
+    method names, and `train`, `qml.train` and `qml.Model.fit` call it before
+    anything runs, with or without a point (no
+    backend, no CUNQA allocation), raising `polypus.ConfigurationError` (a
+    `ValueError`) with the optimizer's
+    message, so a configuration error comes first there too.
+  - Postconditions: the optimizer draws everything exactly as without a
+    point, then the point replaces part of it, so the RNG stream is
+    unchanged. DE (every strategy): the point, wrapped into `[0, 2π)`, is the
+    first member of the initial population, so it is the first candidate of
+    the first batch and every other member is the one drawn without it. PSO:
+    it is the first particle's position (its velocity is the drawn one), so
+    likewise the first candidate of the first batch. QNG: it is θ₀, so the
+    first batch is the finite-difference stencil `θ₀ ± h·eᵢ` around it. Adam:
+    it is θ₀, the first candidate it measures, where the first gradient is
+    taken: with a `FiniteDifferenceGradient` the first batch is θ₀ followed by
+    that stencil, and with an exact gradient θ₀ is the first single-candidate
+    batch. CMA-ES:
+    the point, wrapped into `[0, 2π)` like every candidate, is the mean of the
+    first run, IPOP restarts draw a fresh mean as without it, and `sigma0` is
+    not changed. SPSA: it is θ₀, unwrapped, the centre of the calibration
+    batch and the first candidate of the first iteration's batch, its first
+    measurement. Rotosolve: it is θ₀, unwrapped, the first candidate of the
+    first batch, followed by its two neighbours along the first parameter;
+    each coordinate is wrapped into `[0, 2π)` only when a step updates it.
+    Every other postcondition of this contract holds
+    with a point. Without one (`None`, the default) every optimizer is bit
+    for bit what it was before `initial_point` existed.
+  - `External` takes no point: the external library chooses its start, so
+    `AlgorithmExternalArgs` has no `initial_point` field, and
+    `AlgorithmExternal::check_preconditions` checks the configuration only.
+    `dispatch_optimizer` and `Method::check_preconditions` return
+    `InvalidConfig` for `initial_point` with `Method::External`, after its
+    configuration errors and before any `ask`, and `train`, `qml.train` and
+    `qml.Model.fit` raise `ValueError` before anything runs, in place of the length and
+    finiteness checks, pointing to the `initial_point` of the
+    `polypus.ask_tell` adapters (and pycma's `x0`).
+  - Enforced by `crates/polypus-optimizers/tests/initial_point.rs` (the first
+    batch of PSO and every DE strategy against the same seed without a point,
+    QNG's stencil around the point, Adam's first batch of the point and its
+    stencil, Adam's run from the θ₀ its
+    seed draws against the run without a point, CMA-ES's first generation, a
+    far point that still moves, and its restarts against the same seed
+    without a point, SPSA's calibration centred on the point and the point
+    measured first, SPSA's run from the θ₀ its seed draws against the run
+    without a point, Rotosolve's first batch and its run from the θ₀ its seed
+    draws against the run without a point, the rejections before
+    any oracle call and their precedence, PSO's bounds, the postconditions
+    over 10 seeds, and PSO's and QNG's outcome without a point pinned to the
+    bits they had before it), the `check_initial_point` unit tests in
+    `src/util.rs`, `initial_point_reaches_every_optimizer` and
+    `check_preconditions_agrees_with_dispatch` in
+    `crates/polypus-orchestration/src/dispatch.rs`, and
+    `tests/python/test_initial_point.py` (the `ValueError`s, PSO's bounds
+    included, before the CUNQA seam is reached, a configuration error before
+    the point's, the first candidates every optimizer sends through
+    `train` and `qml.train`, and a `best_params` list, tuple or NumPy array
+    as the point), and `tests/python/test_qml_native_initial_point_final_shots.py`
+    (the same rejections and their precedence through `qml.Model.fit`, before
+    the CUNQA seam, the first candidates every optimizer sends for a native
+    model, a list, tuple or NumPy array as the point, and a model saved and
+    read back with `qml.load` trained on from its `params`). The pinned `"rand1bin"` outcome and
+    `tests/python/test_determinism_baseline.py` are unchanged.
 - Postcondition of every optimizer: `best_fitness` is the oracle's value **for
   the returned `best_params`** (audit C4).
+- **Final re-evaluation (`final_shots`).** `train(..., final_shots=None)`,
+  `qml.train(..., final_shots=None)` and `qml.Model.fit(..., final_shots=None)`
+  (both keyword-only) and the
+  `final_shots: Option<u32>` field of `TrainFlow` (`polypus-orchestration`)
+  re-evaluate the optimizer's best candidates once it has stopped, in one
+  more batch with `final_shots` shots per circuit.
+  - `EvaluationOracle::evaluate_batch_with_shots(candidates, shots)` has
+    `evaluate_batch`'s contract (exactly `candidates.len()` finite values, in
+    order) with every circuit measured with `shots` shots. Its default calls
+    `evaluate_batch`, which is exact for an oracle without shots; `VqcOracle`
+    and `QmlOracle` put `shots` in every `CircuitTask` of the batch, every
+    training circuit of each candidate for QML, and the Planner reads them
+    from the tasks. `Arc<T>` and the walltime watch forward it. No optimizer
+    calls it.
+  - Seed: the batch is the run's last call to the backend, which gives it a
+    sampling stream of its own (C-7), so its shot noise is independent of
+    the training's even for a candidate re-evaluated at the position it was
+    scored at, as `best_params` at index 0 is for QNG, Adam and SPSA, and a
+    seeded run still reproduces it.
+  - Preconditions: an integer from 1 to 4294967295. `train`, `qml.train` and
+    `qml.Model.fit` raise `ValueError` for an integer out of that range (0, a
+    negative, 2³²) and `TypeError` for anything that is not an integer (a
+    `float`, a `bool`, a `str`), as for `shots`, before anything runs (no backend, no CUNQA
+    allocation), next to the `initial_point` check; a NumPy integer is
+    accepted. `qml.Model.fit` also refuses any valid value with `exact=True`,
+    which uses no shots, after this check (C-11). In Rust,
+    `Some(0)` is `OptimizerError::InvalidConfig` for `final_shots` before the
+    oracle is built.
+  - Which candidates: during the run the optimizer scores through a
+    decorator that keeps the best distinct candidates it saw. Only finite
+    values enter; candidates are distinct by their exact bits, a candidate
+    scored again keeps its best value, and equal values rank by the order
+    the candidates were scored (batch by batch, in batch order), so the
+    choice is deterministic. The batch is `best_params` first, then the best
+    others, up to `Method::final_candidates()`: 5 for DE (every strategy),
+    PSO, CMA-ES and External (the bridge cannot tell whether the library
+    searches globally or locally), 1 (`best_params` alone) for QNG, Adam,
+    SPSA and Rotosolve; fewer
+    when the run scored fewer distinct finite candidates.
+  - Postconditions: the batch is sent only after the optimizer returned a
+    result, whatever stopped it (its budget, convergence, a `callback` that
+    returned `True`); an optimizer error, an interrupt or an exception from
+    the `callback` skips it, and a failure or an interrupt in the batch is
+    raised as in any batch, with no result. `TrainResult.final_params` is the
+    candidate with the highest re-evaluated value (the earlier on a tie, so
+    `best_params`; a `NaN` never wins over a number) and `final_fitness` that
+    value; if every value is `NaN`, which only a custom Rust oracle can
+    return, they are `best_params` and `NaN`, with a warning. Both are `None`
+    without `final_shots`. `final_fitness` is a fresh estimate of the value of
+    `final_params` with `final_shots` shots: without bias when the batch holds
+    `best_params` alone, and slightly optimistic when it holds several, being
+    the highest of them, though far less than `best_fitness`, the highest of
+    the whole run. `best_params`, `best_fitness` (still the value the
+    optimizer measured for `best_params`), `fitness_history`,
+    `iterations_run` and `converged` are the optimizer's, unchanged; before
+    the batch, the run logs them (`best_params` and `best_fitness` at full
+    precision) at `INFO`, and again as a `WARNING` if the batch fails, since
+    the run then returns no result; in Rust,
+    `TrainOutcome::optimization` is the `OptimizationOutcome` and
+    `FinalEvaluation` holds the batch (`candidates`, `values`, `shots`) and
+    its choice. The batch comes after every circuit the optimizer sent, so
+    with the same seed everything before it is bit for bit the run without
+    `final_shots` (C-7). It is not counted in `iterations_run` or
+    `fitness_history`, and not in the CUNQA walltime projection.
+  - Enforced by the unit tests in
+    `crates/polypus-orchestration/src/final_batch.rs` (the five best
+    distinct finite candidates, `NaN` and infinities, repeats, `-0.0`, ties,
+    `best_params` first, `Method::final_candidates` for every variant, the
+    winner, a `NaN` and an all-`NaN` batch, a wrong length),
+    `final_shots_add_one_batch_after_an_unchanged_run` in `src/flow.rs`
+    (every optimizer, with and without a walltime watch, over an oracle
+    whose noise depends on the candidates scored before, as the native
+    backend's does: the same batches and outcome, then one batch with the
+    shots and the expected candidates) with the error, interrupt, optimizer
+    error, failing final batch, its warning and `Some(0)` tests there,
+    `a_batch_with_shots_is_forwarded_untimed` in `src/walltime.rs`, the
+    `a_batch_with_shots_puts_them_in_every_task` tests of `VqcOracle` and
+    `QmlOracle` (the shots and the run's seed in every wave), the trait's
+    tests in
+    `crates/polypus-optimizers/src/objective.rs`, and
+    `tests/python/test_final_shots.py` (the `ValueError`s and `TypeError`s
+    before the CUNQA seam, the final batch of every optimizer through both
+    entry points at the seam: its shots, its seed, its candidates, the winner and the
+    unchanged batches before it; an error, an interrupt and a failing final
+    batch; a real Aer run whose final batch is measured afresh; and seeded
+    native runs unchanged with a final value measured with `final_shots`),
+    and `tests/python/test_qml_native_initial_point_final_shots.py` (the same
+    through `qml.Model.fit`: the rejections before the CUNQA seam, the refusal
+    with `exact=True` and its order, the final batch at the Aer seam with its
+    shots and every sample, minibatches included, seeded native runs of every
+    optimizer unchanged by it, and a final value measured afresh with
+    `final_shots` that estimates the exact value of `final_params` within its
+    statistical error).
+- **Watching and stopping a run (`callback`, #500).** `train(..., callback=None)`,
+  `qml.train(..., callback=None)` and `Model.fit(..., callback=None)`
+  (keyword-only in all three) call the user's callback once per iteration of
+  the optimizer, which can watch the run, stop it on a criterion of its own,
+  or write a checkpoint. In Rust: `Optimizer::optimize_observed(args,
+  observer)` (with `optimize` its default, an observer that never stops) and
+  `AlgorithmDifferentialEvolution::optimize_with_strategy_observed` show an
+  `IterationObserver` an `IterationReport` (`iteration`, `best_fitness`,
+  `best_params`); `TrainFlow::observer` (`polypus-orchestration`) holds a
+  `TrainObserver`, shown a `TrainProgress` that adds `evaluations`, through
+  `dispatch_optimizer_observed`; the edge's `PyTrainObserver` calls the
+  Python callback with a `polypus.TrainProgress`.
+  - Preconditions: `None` or a callable; anything else raises `TypeError`
+    before anything runs (no backend, no CUNQA allocation), right after the
+    `final_shots` check in `train`, `qml.train` and `Model.fit`.
+  - What an iteration is: a generation of DE (every strategy), PSO and CMA-ES
+    (counted across IPOP restarts), an iteration of QNG, Adam and SPSA, a step
+    of Rotosolve (one parameter), and an ask/tell batch of External, reported
+    once it has been told. The callback is called exactly `iterations_run`
+    times, with `iteration` 1, 2, …, at the end of each iteration, after
+    everything the iteration measures; a stop it asks for wins over the
+    optimizer's own stopping test (and a CMA-ES restart) on that iteration.
+    It is not called after the optimizer returns: not for the `final_shots`
+    batch, nor for the re-score of a minibatched run's `best_fitness`.
+  - What it sees (`polypus.TrainProgress`, a frozen class): `iteration`;
+    `best_fitness`, the entry the iteration leaves in `fitness_history` (so
+    the last call sees `fitness_history[-1]` and, for a run that ends there,
+    `best_fitness`), non-decreasing; `best_params`, the parameters it belongs
+    to, a new `list` on every access, so mutating it never reaches the run;
+    and `evaluations`, the candidates scored as a fitness so far: every
+    candidate the optimizer hands to `evaluate_batch` (on the minibatch and,
+    for a minibatched Adam, on every sample), plus each θ an exact gradient
+    scores in its own batch (`GradientOracle::value_and_gradient`). The
+    gradient's shifted circuits, QNG's `variance_function` and the
+    `final_shots` batch are not counted. A candidate is one circuit in
+    `train` and one per training sample in `qml.train` and `Model.fit`. With
+    a minibatch, `best_fitness` is the minibatch estimate the search uses,
+    except for Adam, which tracks its best on every sample (see
+    "Minibatches" below).
+  - Adam, SPSA and Rotosolve measure the point their last step reached once
+    the run ends: that measurement is made within the last iteration, before
+    its call, so the last call already sees the run's final best.
+  - Return value: `True`, or a NumPy `bool_` that is true, stops the run after
+    that iteration; `None` and `False` (and a false `bool_`) let it go on. Any
+    other value (an `int`, a `float`, a `list`, a NumPy number) is a
+    `TypeError` naming it, raised as the run's error with no result, on that
+    same iteration.
+  - Postconditions of a stop: the run returns a `TrainResult` with
+    `iterations_run` the iteration that stopped it, `len(fitness_history) ==
+    iterations_run`, `converged = False` (also when the optimizer's own test
+    fired on the same iteration: the stop wins), `best_params` and
+    `best_fitness` those of the last call (with a minibatch, except for Adam,
+    `best_fitness` is then re-scored on every sample, as after any run; see
+    "Minibatches" below), and every other postcondition of
+    this contract (`best_fitness` is the oracle's value for `best_params`,
+    `fitness_history[-1] == best_fitness`). Nothing is evaluated after it: no
+    oracle call, and for External no further `ask()`. Adam, SPSA and
+    Rotosolve leave the point a stopped iteration's step reached unmeasured
+    (the last iteration measures it before its call, as above). With
+    `final_shots`, the final batch is still sent. A stop on the first
+    iteration is valid.
+  - An exception the callback raises propagates unchanged, class and message,
+    `KeyboardInterrupt` included: it is recorded in the run's
+    `OracleErrorSlot` as `EvaluationError::Python`, the run stops at once (no
+    further call, no oracle call, no `final_shots` batch) and returns no
+    result (C-1 "Failure modes"). Once the slot holds any failure (an oracle,
+    a backend, a Ctrl+C caught between waves), the run stops at the end of
+    that iteration without calling the callback. With the interpreter
+    unavailable, the call records `InterpreterUnavailable`, raised as
+    `KeyboardInterrupt`, without calling Python.
+  - Ctrl+C: the call checks for a pending signal before the user's code runs,
+    as the External bridge does, so a SIGINT during a run with a callback
+    raises `KeyboardInterrupt` as promptly as without one.
+  - Without a callback, or with one that never stops the run, a seeded run is
+    bit for bit the same as before (C-7): the observer only reads, and the
+    evaluation counter forwards every call unchanged.
+  - Enforced by `crates/polypus-optimizers/tests/observer.rs` (every
+    optimizer, DE in its three strategies and CMA-ES with and without
+    restarts, over 4 seeds: an observer that never stops leaves the outcome
+    and every batch unchanged; one report per iteration with its history
+    entry, the last one included; a stop at the first, second and next-to-last
+    iteration with the postconditions recomputed from the fitness function and
+    no oracle call after it; a stop on the iteration where the optimizer's
+    own test fires; no `ask` after a stop), the `Watching a run` tests in
+    `crates/polypus-orchestration/src/dispatch.rs` (the evaluation count for
+    DE, Adam with a finite difference, an exact gradient with and without its
+    own θ, and a minibatched Adam; a failed slot stops the run without
+    showing it; an error the observer records is the run's) and in
+    `src/flow.rs` (every optimizer: the count against the candidates scored
+    and without the final batch; a stop that still sends the final batch;
+    an observer error that skips it; a failed run never shown), the
+    `callback` tests in `crates/polypus/src/bindings/callback.rs` (the
+    record, read-only and copied; `True`, `np.bool_`, `None`, `False`; the
+    `TypeError` for any other value; an exception recorded as itself; a
+    failed run not calling Python; the `TypeError` for a non-callable) and
+    `a_callback_is_checked_after_final_shots_and_before_the_backend` in
+    `bindings/mod.rs`, `tests/python/test_callback.py` (the `TypeError`
+    before the CUNQA seam in all three entry points and after `final_shots`;
+    keyword-only; one call per iteration for every optimizer through `train`,
+    `qml.train` and `Model.fit`, with `evaluations` equal to the circuits
+    sent, and no call for a minibatched run's re-score; a stop with `True` and `np.bool_(True)` and its postconditions,
+    with nothing sent after it and the final batch still sent; an exception
+    and a `KeyboardInterrupt` raised as themselves with no final batch; the
+    `TypeError` for other return values; a callback that never stops leaves
+    a seeded result unchanged, also replayed in a fresh interpreter), and the
+    SIGINT-with-a-callback tests in `tests/python/test_interrupt.py` (`train`
+    and `Model.fit`). `tests/python/test_determinism_baseline.py` and the
+    pinned `"rand1bin"` outcome are unchanged.
 - **DE early stopping — fitness stagnation.** DE stops early on *best-fitness
   stagnation*, not on population-spread collapse. With `fitness_history[g]` the
   best fitness at the end of generation `g` (0-indexed; DE maximises, so this
@@ -732,11 +1080,24 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     generations, long before the fitness had plateaued.)
   - `patience` (generations; DE binding default **20**) is the look-back window.
     No early stop can fire before generation `patience`, so a larger value makes
-    the optimizer more patient. Exposed as `polypus.DE(..., patience=20)`.
-  - The search dynamics of the default `strategy="rand1bin"` are unchanged
-    (DE/rand/1, `F = 0.8`, `CR = 0.7`, angles initialised in `[0, 2π)`); only
-    the stopping rule differs. The `"shade"` and `"lshade"` strategies below
-    stop by the same rule. PSO still uses the per-dimension std-collapse test;
+    the optimizer more patient. Exposed as `polypus.DE(..., patience=20)`. It
+    must be at least 1: 0 would compare a generation's best fitness with
+    itself and stop the run at once, so it is an `OptimizerError::InvalidConfig`
+    before any RNG draw, for every strategy and for CMA-ES too (in Python, the
+    `ValueError` of `train`/`qml.train` before any QPU is requested).
+  - The search dynamics of the default `strategy="rand1bin"` are DE/rand/1/bin
+    with angles initialised in `[0, 2π)` and a fixed mutation factor `F` and
+    crossover rate `CR`: `polypus.DE(mutation_factor=None,
+    crossover_rate=None)`, `None` meaning 0.8 and 0.7 (Rust:
+    `AlgorithmDifferentialEvolutionArgs::{mutation_factor, crossover_rate}`,
+    `AlgorithmDifferentialEvolution::DEFAULT_*`). `F` must be finite and in
+    `(0, 2]`, `CR` finite and in `[0, 1]`; a value out of range, or any value
+    with `"shade"` or `"lshade"`, which adapt both, raises `ValueError` when
+    the `DE` object is created or the attribute set (Rust:
+    `OptimizerError::InvalidConfig` from `check_preconditions` before any RNG
+    draw). One coordinate of each trial, `j_rand`, always comes from the
+    mutant, so no trial is a plain copy of its parent (#410). The `"shade"`
+    and `"lshade"` strategies below stop by the same rule. PSO still uses the per-dimension std-collapse test;
     QNG has no early stop.
 - **DE strategies.** `polypus.DE(strategy=...)` (Rust: `DeStrategy` and
   `AlgorithmDifferentialEvolution::optimize_with_strategy`) picks how trial
@@ -766,8 +1127,10 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     it by stepping the schedule the optimizer follows, and the walltime
     projection (`run_shape`) uses that count.
   - The adaptive strategies share with `"rand1bin"` the initial population
-    (the same draws from the same seed), the wrapping of mutated angles into
-    `[0, 2π)` (`rem_euclid`: the parameters are periodic), one oracle batch per
+    (the same draws from the same seed), difference vectors taken as the
+    shortest arc in `(−π, π]`, so an optimum on the 0/2π seam is found as well
+    as one at π (#410), mutated angles wrapped into `[0, 2π)` (the parameters
+    are periodic), one oracle batch per
     generation after the initial one, its length checked, the evaluation
     budget, the stagnation stop above (`patience` counts generations for
     L-SHADE too) and every postcondition of this contract. `"rand1bin"` and
@@ -776,14 +1139,17 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
 - **Quality trajectory.** Every optimizer reports `fitness_history: Vec<f64>` —
   the best fitness at the end of each executed generation/iteration, so
   `fitness_history.len() == iterations_run` and `fitness_history.last()`
-  equals `best_fitness`. It is surfaced on the Python `TrainResult`.
+  equals `best_fitness` (the one exception, a minibatched run of a population
+  method or QNG, is under *Minibatches* below). It is surfaced on the Python
+  `TrainResult`.
 - **CMA-ES** (`AlgorithmCmaEs`, exposed as `polypus.CMAES`: Hansen's
   (μ/μ_w, λ)-CMA-ES with IPOP restarts).
   - Preconditions, each an `OptimizerError::InvalidConfig` before any RNG
     draw or oracle call: `dimensions >= 1` (unlike DE and PSO, which accept
     zero), `generations >= 1` (there is no initial batch), `sigma0` finite and
     in `(0, 2π]`, `population_size >= 2` when given (`None` is Hansen's
-    `4 + ⌊3 ln d⌋`), and `population_size · 2^restarts` within `u32`.
+    `4 + ⌊3 ln d⌋`), `population_size · 2^restarts` within `u32`, and
+    `patience >= 1`, as DE's.
   - One `evaluate_batch` call of λ candidates per generation, its length
     checked, and no separate initial batch. The mean and samples stay
     unwrapped in ℝ^d; each candidate is wrapped into `[0, 2π)` when handed to
@@ -818,6 +1184,437 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     through Python by `tests/python/test_cmaes.py` (configuration rejected
     before any batch, batch sizes and restarts at the seam) and the CMA-ES
     cases of `tests/python/test_oracle_contract.py`.
+- **Adam** (`AlgorithmAdam`, exposed as `polypus.Adam`, ascending the
+  fitness by one of two `AdamRule`s: Kingma and Ba's Adam with bias
+  correction, the default, or Polyak's heavy-ball momentum) and its
+  **`GradientOracle`**.
+  - `GradientOracle::gradient_batch(theta, dims)` returns **exactly `dims`
+    finite values**, `∂fitness/∂θ` in parameter order, uphill (the same sign
+    convention as `EvaluationOracle`). A wrong length is
+    `OptimizerError::OracleLengthMismatch`, and a non-finite component
+    `OptimizerError::NonFiniteGradient` (its index and value), before `θ`
+    moves.
+  - `GradientOracle::value_and_gradient(theta, dims)` returns `θ`'s fitness
+    and the gradient from one call, or `None` (the default) when the oracle
+    does not score `θ` itself. The value must be the one Adam's own
+    `EvaluationOracle` returns for `θ`, since Adam reports it as measured: an
+    implementation computes it with that oracle, shared through an `Arc`.
+  - Preconditions, each an error before any RNG draw or oracle call:
+    `max_iters >= 1`, `dimensions >= 1`, `learning_rate` finite and `> 0`,
+    `beta1` and `beta2` in `[0, 1)`, `epsilon` finite and `> 0`,
+    `patience >= 1` (`InvalidConfig`, with either rule, although momentum
+    uses neither `beta2` nor `epsilon`; a `patience` of 0 would compare an
+    iteration with itself), `bounds` finite with `lb < ub` (`InvalidBounds`),
+    and `initial_point` as under *Starting point* above. `AdamRule` parses
+    only `"adam"` and `"momentum"` (`InvalidConfig` for `rule` otherwise);
+    `polypus.Adam(rule=...)` raises `ValueError` for any other name when it
+    is passed or set.
+  - The initial `θ` is `initial_point` when given, otherwise drawn uniformly
+    from `bounds`, and is not wrapped afterwards. Each iteration measures the
+    current `θ` and the gradient there, then steps, so `max_iters` counts
+    steps. When the gradient oracle scores `θ` (`value_and_gradient`), that
+    is **one call**: with a
+    `FiniteDifferenceGradient`, one `evaluate_batch` of `2·dims + 1`
+    candidates, `[θ, θ+h·e₀, θ−h·e₀, …]`. Otherwise Adam scores `θ` in one
+    `evaluate_batch` of one candidate, its length checked, and then calls
+    `gradient_batch`. The gradient's length and finiteness are checked either
+    way, before the step. After the last step, the `max_iters`-th or the one
+    after which the run stagnated, Adam scores the `θ` it reached in one
+    `evaluate_batch` of one candidate, its length checked, so every gradient
+    feeds a measured step.
+  - `best_params` is the measured `θ` with the best fitness and `best_fitness`
+    the value the oracle returned for it; the stencil's `θ ± h·e_i` only give
+    the gradient and never compete. `fitness_history[t]` is the best
+    measured up to iteration `t`, the final `θ` counted in the last entry.
+    The first measurement is kept and later ones only when strictly better,
+    so a `NaN` never wins over a number (a run
+    that only measures `NaN` reports its first `θ` and that `NaN`, unless its
+    gradient is `NaN` too, as a finite difference of those values is, which is
+    `NonFiniteGradient`).
+  - `AdamRule::Adam` steps `θ += learning_rate·m̂/(√v̂ + epsilon)`, with the
+    bias corrections `1 − β₁ᵗ` and `1 − β₂ᵗ` carried as running products.
+    `AdamRule::Momentum` steps `v ← beta1·v + learning_rate·g`, `θ += v`, so
+    its step, unlike Adam's, scales with the cost. Both use only +, −, ×, ÷
+    and `sqrt`, so a seeded run over a backend whose results do not depend on
+    the platform reproduces bit for bit on every platform (C-7).
+  - A run ends on fitness stagnation, the rule above with `patience` counted in
+    iterations, and then reports `converged = true`. The rule is checked
+    after each step, on the `θ`s measured up to it; the `θ` that step
+    reached is then measured as above, and can raise the last entry.
+  - `FiniteDifferenceGradient` turns any `EvaluationOracle` into a
+    `GradientOracle` by central differences with a step `h` (finite and `> 0`):
+    one `evaluate_batch` of `2·dims` candidates,
+    `[θ+h·e₀, θ−h·e₀, θ+h·e₁, …]`, per gradient, and `θ` in front of them for
+    `value_and_gradient`. It approximates; an exact gradient is its own
+    `GradientOracle`. If the wrapped oracle returns the wrong number of
+    values, or a parameter index is out of range for `θ`, the gradient is
+    empty, without a panic, so Adam reports the length mismatch. An `Arc` of
+    an oracle is an oracle, so one scorer can feed both, and must when the
+    adapter returns `θ`'s value.
+  - Enforced by `crates/polypus-optimizers/tests/adam.rs` (one batch of `θ`
+    and its stencil per iteration, then the final `θ` alone, after a single
+    iteration and after the stagnation stop too; the C-5 postconditions
+    against the batches the oracle saw over 25 seeds, with each rule and with
+    an exact gradient, which is scored as one single-candidate batch per
+    iteration and one for the final `θ`; convergence on a sphere and a
+    periodic cosine with each rule; a `NaN` fitness, never
+    the best, and an oracle of only `NaN`; the initial point as the first `θ`;
+    stagnation; a seeded run of each rule pinned bit for bit; Adam's update
+    against a reference of Kingma and Ba's Algorithm 1; momentum's
+    recurrence, its scale dependence and its unused `beta2` and `epsilon`;
+    the rule names; every rejected configuration, `patience = 0` included,
+    with no oracle call; the gradient length and finiteness checks; and the
+    finite-difference stencil,
+    `θ` first in `value_and_gradient`, its accuracy, its step validation, a
+    broken wrapped oracle and an index out of range) and the `BestMeasured`
+    unit tests in `src/util.rs`.
+  - In a training run the gradient comes from the run's `Oracles`
+    (`polypus-orchestration`): the exact one when the factory provides it,
+    otherwise a `FiniteDifferenceGradient` of the evaluation oracle with
+    `AdamConfig::finite_difference_step`. `QmlOracleFactory` provides the
+    exact parameter-shift gradient for a native QML model, which also scores
+    `θ` through `value_and_gradient` when there is no minibatch, so such an
+    iteration is one call (C-11 (f)); neither it, for Qiskit circuits, nor
+    `VqcOracleFactory` provides a gradient otherwise, so those runs take the
+    finite difference, built over the run's evaluation oracle so that `θ`'s
+    value is that oracle's. A `GradientOracle` declares in advance, through
+    `scores_theta` (default `false`), whether its `value_and_gradient` scores
+    `θ` in the gradient's own batch: `true` exactly when it returns a value,
+    as `FiniteDifferenceGradient` always does and `QmlOracle` does without a
+    minibatch. The CUNQA walltime projection (`Method::run_shape_over`)
+    counts one batch per iteration when the gradient scores `θ` (the finite
+    difference the run builds with no gradient and no minibatch, or a given
+    gradient whose `scores_theta` is `true`), and two (`θ`, then the
+    gradient) with a given gradient that does not, or with a minibatch and no
+    given gradient; the final `θ` counts as one more iteration, exact with
+    one batch per iteration and a bound on its single candidate with two. The
+    watch forwards every call, `value_and_gradient` and `scores_theta`
+    included, `value_and_gradient` counted as a batch only when it returns a
+    value, so Adam sends the same batches with and without it. Enforced by
+    `scores_theta_tells_whether_value_and_gradient_scores_theta` in
+    `crates/polypus-optimizers/tests/adam.rs` (the default, the finite
+    difference and an `Arc` of each agree with `value_and_gradient`), by the
+    `adam_*` tests in `crates/polypus-orchestration/src/dispatch.rs` (the rule
+    reaches the optimizer, one batch of `2·dims + 1` per iteration and the
+    final `θ`) and in `src/walltime.rs` (the projection counts the batches
+    sent for every combination of gradient and minibatch, one or two per
+    iteration, the same batches with and without the watch, the watch of an
+    iteration with an exact gradient, a forwarded `value_and_gradient` timed
+    as a batch, whose one-call iteration the projection times exactly, and a
+    forwarded `scores_theta`). Through Python, `tests/python/test_adam.py`
+    pins the batches at the seam (one batch of `θ` and its stencil per
+    iteration, then the final `θ`, with each rule), the configuration and an
+    unknown `rule` rejected before any batch, the defaults, and both entry
+    points; the Adam cases of `tests/python/test_oracle_contract.py` cover a
+    bad value in a batch, the updated `θ`'s own and the final `θ`'s included.
+- **SPSA** (`AlgorithmSPSA`, exposed as `polypus.SPSA`: Spall's
+  simultaneous perturbation stochastic approximation, ascending the fitness,
+  with a calibrated first step).
+  - Preconditions, each an `OptimizerError::InvalidConfig` before any RNG draw
+    or oracle call, in this order: `max_iters >= 1`, `dimensions >= 1`,
+    `resamplings` from 1 to `AlgorithmSPSA::MAX_RESAMPLINGS` (2³¹ − 1, so an
+    iteration's batch of `2·resamplings + 1` fits in `u32`, as CMA-ES's
+    population must), `perturbation` and `target_step` finite and `> 0`,
+    `alpha` in `(0.5, 1]`, `gamma > 0` with `alpha − gamma > 0.5` (Spall's
+    conditions on the gains), `stability_constant` finite and `>= 0`,
+    `eval_interval >= 1`, then `initial_point` as under *Starting point*
+    above.
+  - θ₀ is `initial_point` when given, otherwise drawn uniformly from
+    `[0, 2π)`; the iterates are not wrapped. The first call is the
+    calibration: one `evaluate_batch` of 50 candidates, 25 pairs
+    `[θ₀ + c·Δᵢ, θ₀ − c·Δᵢ]` with ±1 perturbations `Δᵢ` and `c` the
+    `perturbation`. Each pair gives `|f₊ − f₋|/(2c)`, the magnitude of every
+    component of its gradient estimate; the first gain is
+    `a₁ = target_step / mean`, the mean over the pairs whose magnitude is
+    finite (a non-finite value, or an overflow, leaves its pair out), and
+    `a = a₁·(1 + A)^α` with `A` the `stability_constant`, so the first step
+    does not depend on `A` (exactly `a = a₁` with the default `A = 0`). With
+    no such pair, a zero mean (a flat landscape), a non-finite mean or a
+    non-finite `a₁`, `a₁ = target_step` and a warning is logged; the run goes
+    on.
+  - Iteration `k = 1, …, max_iters` makes **one** `evaluate_batch`, its length
+    checked: `K = resamplings` fresh pairs `[θ_k + c_k·Δ, θ_k − c_k·Δ]`,
+    `2K` candidates, headed by `θ_k` itself (`2K + 1`) on the first
+    iteration and every `eval_interval` iterations after it. It steps
+    `θ_{k+1} = θ_k + a_k·ĝ_k` with `a_k = a/(k + A)^α`, `c_k = c/k^γ` and `ĝ_k`
+    the mean of the pairs' estimates `(f₊ − f₋)/(2c_k)·Δ` whose slope
+    `(f₊ − f₋)/(2c_k)` is finite; with none, θ stays. After the last step,
+    one `evaluate_batch` of one candidate, its length checked, measures the
+    `θ` it reached, so the last iteration's pairs feed a measured step.
+  - `best_params` is the measured `θ_k` with the best fitness and
+    `best_fitness` the value the oracle returned for it (the perturbed
+    candidates never count), kept as Adam's: the first measurement, then only
+    a strictly better one, so a `NaN` never wins over a number.
+    `fitness_history[k − 1]` is the best measured up to iteration `k`, the
+    final `θ` counted in the last entry; the first iteration measures θ₀, so
+    no entry is the `-∞` placeholder (a `NaN` measurement can appear), and
+    the last is `best_fitness`.
+  - No early stop: the run makes `max_iters` iterations and reports
+    `converged = false`, as QNG does.
+  - The gains use `powf`, so a seeded run reproduces on the same platform and
+    build only, as CMA-ES's (C-7).
+  - In a training run the calibration is a leading batch of the CUNQA
+    walltime projection (`RunShape::leading_batches`): it is not timed, and
+    its circuits count as iterations at the first iteration's pace. The
+    final `θ` counts as one more iteration, a bound on its single candidate.
+    The first iteration measures θ, `2K + 1` circuits where most iterations
+    have `2K`, so on `Q` QPUs the projection stays an upper bound but can
+    reach `⌈(2K + 1)/Q⌉ / ⌈2K/Q⌉` of the real time: `(2K + 1)/2K` on one QPU
+    (1.5× with `K = 1`), 2× on `2K` QPUs, 1× on `2K + 1` or more.
+  - Enforced by `crates/polypus-optimizers/tests/spsa.rs` (the calibration
+    batch and the first step it sets, the stability constant keeping it and
+    slowing the decay, the flat and non-finite fallbacks and a non-finite
+    pair left out; one batch of `2K` per iteration with `θ` first
+    when measured, then the final `θ` alone; every step against Spall's
+    recurrence, the last included; the C-5
+    postconditions against the batches the oracle saw over 25 seeds, with one
+    and several perturbations; convergence on a sphere and a periodic cosine;
+    seeded reproducibility; a `NaN` measurement, a non-finite estimate and an
+    oracle of only `NaN`; every rejected configuration with no oracle call;
+    the oracle's length check, the final `θ`'s included; and a single
+    iteration, which steps and measures where it lands), the unit tests in
+    `src/spsa.rs`, the `spsa_*` tests in
+    `crates/polypus-orchestration/src/dispatch.rs` and
+    `spsa_run_shape_counts_the_batches_the_optimizer_sends` with
+    `the_spsa_calibration_is_not_timed_as_the_first_iteration` in
+    `src/walltime.rs`. Through Python, `tests/python/test_spsa.py` pins the
+    calibration and the batches at the seam, the final `θ` included, the
+    pairs centred on `θ`, the first two steps with and without a stability
+    constant, the
+    configuration rejected before any batch on both entry points, the
+    defaults and a native climb; the SPSA cases of
+    `tests/python/test_oracle_contract.py` cover a bad value in a batch,
+    `θ`'s own and the final `θ`'s included.
+- **Rotosolve** (`AlgorithmRotosolve`, exposed as `polypus.Rotosolve`:
+  Ostaszewski, Grant and Benedetti's closed-form coordinate update, with the
+  value reuse of Nakanishi, Fujii and Todo's NFT, maximising).
+  - Preconditions, each an `OptimizerError::InvalidConfig` before any RNG draw
+    or oracle call, in this order: `sweeps >= 1`, `dimensions >= 1`,
+    `reevaluate_every >= 1`, `tolerance` finite and `>= 0`, `patience >= 1`,
+    then `initial_point` as under *Starting point* above.
+  - What it assumes and who checks it: every parameter is the angle of one
+    rotation generated by a single Pauli operator (or a phase), as `±θ + c`,
+    and the fitness is linear in each circuit's measured distribution (a
+    cost per bitstring averaged over the shots, and for `qml.train` a mean
+    over the samples). Then `f(θ_j + t) = a + A·cos t + B·sin t` along each
+    parameter. The optimizer cannot see the circuit; `train` and `qml.train`
+    (and `qml.Model.fit` for a native model, C-11)
+    check it before anything runs (no backend, no CUNQA allocation) and
+    raise `ValueError` with the first problem: for a `polypus.Circuit`,
+    `ParameterizedCircuit::check_single_frequency` (`polypus-circuit`; the
+    gates `rx`, `ry`, `rz`, `rxx`, `rzz`, `p`, `u1`, and every angle of `u`,
+    `u2` and `u3`, which are `rz(φ)·ry(θ)·rz(λ)` up to a global phase; each
+    parameter in exactly one angle, with coefficient exactly ±1 and no other
+    parameter, the coefficients computed in written order: `+`, `−` and `·`
+    or `/` by a constant, any other operation on a parameter rejected); for a
+    Qiskit circuit, `polypus_python.rotosolve` (the same gates, with `ryy`,
+    `rzx` and the angle θ of `r`, not its φ, which turns the rotation's axis;
+    composite gates read through their definitions; in `qml.train` only the
+    ansatz's parameters trained, the feature map's being constants). Qiskit
+    simplifies some expressions as it builds them, so the Python check takes
+    a coefficient from Qiskit's derivative and then checks that the angle is
+    `±θ + c` at values of θ from −10⁶ to 10⁶, which rejects an angle that is
+    that only on part of the line (`abs(θ)`, `exp(log(θ))`); an expression
+    Qiskit folds back to `±θ + c` (`θ·x/x`, `θ**1`) is accepted, which the
+    Rust check, without simplification, rejects. `qml.train` also rejects a `polypus.SampleCost`, a function
+    of each sample's whole distribution. Controlled rotations are rejected,
+    `cp` and `cu1` included, and so is every custom gate of a
+    `polypus.Circuit`, with or without a body, and a Qiskit gate whose
+    definition is missing or cannot be built.
+  - θ₀ is `initial_point` when given, otherwise drawn uniformly from
+    `[0, 2π)` (drawn either way). Step `k = 0, 1, …` updates parameter
+    `j = k mod d` with **one** `evaluate_batch`, its length checked:
+    `[x + π/2·e_j, x − π/2·e_j]`, headed by `x` itself on step 0 and every
+    `reevaluate_every` steps (`k mod reevaluate_every == 0`). With `f₀` the
+    value of `x` (measured, or else the maximum the previous step predicted)
+    and `f±` the two neighbours, `a = (f₊ + f₋)/2`, `B = (f₊ − f₋)/2`,
+    `A = f₀ − a`; `x_j` moves by `atan2(B, A)` and is wrapped into
+    `[0, 2π)`, and the predicted maximum is `a + hypot(A, B)`. A flat
+    coordinate (`A = B = 0`) does not move. When `f₀`, `f±`, the shift or
+    the maximum is not finite, the coordinate is left as it is; a
+    non-finite `f₀` stays until `x` is measured again.
+  - `best_params` is the best of the **measured** points (`x` when measured,
+    and every neighbour), kept as Adam's: the first measurement, then only a
+    strictly better one, so a `NaN` never wins over a number; predicted
+    values never compete. The neighbours are offered unwrapped, so
+    `best_params` can lie up to π/2 outside `[0, 2π)`, and further when an
+    `initial_point` outside it leaves a coordinate unmoved.
+    `fitness_history[k]` is the best measured up to step `k`; step 0 measures
+    θ₀, so no entry is `-∞`, and the last is `best_fitness`. After the last
+    step, whether the run used its sweeps or
+    stopped early, one more `evaluate_batch` of one candidate, its length
+    checked, measures the point it reached; it competes for `best_params`
+    like any measured point and its value joins the last entry of
+    `fitness_history`. The stop is decided before it, so that entry can be
+    higher than the one the stop judged.
+  - Stopping in whole sweeps (`d` steps): with `B₀` the value measured for
+    θ₀ and `B_s` the best measured at the end of sweep `s`, the run stops at
+    the end of the sweep that makes `patience` consecutive sweeps with
+    `B_s − B_{s−1} < tolerance` (a larger or non-finite difference resets the
+    count) and reports `converged = true`; otherwise it runs `sweeps` sweeps
+    and reports `converged = false`. `tolerance = 0` never stops early.
+    `iterations_run` counts steps.
+  - The step calls `atan2` and `hypot`, so a seeded run reproduces on the
+    same platform and build only, as CMA-ES's (C-7).
+  - In a training run the CUNQA walltime projection counts `sweeps × d + 1`
+    steps of one batch each, the final point as a step, with no leading
+    batch, and its warning asks to lower `sweeps`. The first step measures
+    `x`, 3 circuits where most steps have 2, so on `Q` QPUs the projection
+    stays an upper bound but can reach
+    `⌈3/Q⌉ / ⌈2/Q⌉` of the real time: 1.5× on one QPU, 2× on two, 1× on
+    three or more.
+  - Enforced by `crates/polypus-optimizers/tests/rotosolve.rs` (each step on
+    the maximum along its coordinate of a coupled sinusoid against a grid,
+    for several `reevaluate_every`; a separable sinusoid solved in one sweep;
+    a flat landscape that never moves; one batch of 2 per step with `x` first
+    when measured, then the final point alone, where the last step moved;
+    the C-5 postconditions against the batches the oracle saw
+    over 25 seeds; seeded reproducibility; patience counted in sweeps, a
+    reset by an improving sweep and by a `NaN` improvement; a `NaN` for `x`,
+    a `NaN` beside it, an infinite value and an oracle of only `NaN`; every
+    rejected configuration with no oracle call and their order; the oracle's
+    length check), the unit tests in `src/rotosolve.rs` (the closed form
+    against a brute-force maximisation of 500 random sinusoids and against
+    the paper's minimising form), `crates/polypus/tests/rotosolve_statevector.rs`
+    (exact statevector expectations of a native circuit with every accepted
+    gate: each step on the maximum; a controlled rotation, which the check
+    rejects, makes it miss), the `single_frequency` tests in
+    `crates/polypus-circuit`, the `rotosolve_*` tests in
+    `crates/polypus-orchestration/src/dispatch.rs` and `src/walltime.rs`, and
+    `tests/python/test_rotosolve.py` (the Qiskit check, the `ValueError`s
+    before the CUNQA seam is reached on both entry points, the batches at the
+    seam, invalid settings before any batch, the defaults and a native
+    climb); the Rotosolve cases of `tests/python/test_oracle_contract.py`
+    cover a bad value in a batch, the re-measured `x` included.
+- **External** (`AlgorithmExternal`, exposed as `polypus.External`: a bridge
+  to an optimizer outside Polypus through the `AskTell` trait, `ask()` for a
+  batch and `tell(candidates, values)` for its values, maximising; the
+  bindings implement it over any Python object with those two methods, and
+  `polypus.ask_tell` adapts Optuna, Nevergrad and pycma, #399; an
+  adapter's `tell` raises `ValueError` for other candidates than the batch
+  it handed out, and Optuna's adapter has `close()`, which marks the trials
+  of an untold batch failed).
+  - Preconditions, each an `OptimizerError::InvalidConfig` before any `ask`
+    or oracle call, in this order: `max_evaluations >= 1`,
+    `dimensions >= 1`; `initial_point` is refused (under *Starting point*
+    above). `polypus.External` checks, when it is built and when either
+    attribute is set, that `max_evaluations` is an integer from 1 to
+    2⁶⁴ − 1 (`ValueError` out of that range, `TypeError` for a value that is
+    not an integer, a `bool` or a `float` included) and that `optimizer` has
+    callable `ask` and `tell` (`TypeError`).
+  - Batch `k = 0, 1, …` is one `ask()`. `None` or an empty batch ends the
+    run with `converged = true`. A batch of `n` rows with
+    `spent + n > max_evaluations` ends it with `converged = false` and is
+    neither evaluated nor told, and a run that has spent exactly
+    `max_evaluations` ends without asking again (`converged = false`), so
+    the candidates evaluated never exceed `max_evaluations`. Otherwise every
+    row is checked, exactly `dimensions` values and every one finite (the
+    first that is not is `OptimizerError::InvalidCandidate { batch, row,
+    reason }`, with nothing of that batch evaluated or told), the batch is
+    **one** `evaluate_batch`, its length checked (`OracleLengthMismatch`,
+    and that batch is not told), and `tell` receives exactly those rows and
+    the oracle's values, in order. In Python a row or a batch that is not
+    iterable, or a value that is not a real number (a `bool` or a NumPy
+    `bool_`, a complex number, an `int` too large for a float, anything
+    `float()` refuses), is a `ValueError` with the same wording, raised by
+    the conversion before the bridge sees the batch; a batch is read only up
+    to one row past the budget left, so an endless iterator ends the run as
+    any batch over the budget does, a row only up to one value past
+    `dimensions`, so an endless row is a row too long (`it has more than d
+    values`), and a pending Ctrl+C is checked before each row. `External`
+    takes part in Python's garbage collection (`__traverse__` and
+    `__clear__` of its optimizer), so an optimizer that holds its `External`
+    is freed with it.
+  - A first `ask()` that proposes nothing (`OptimizerError::ExternalOptimizer`)
+    and a first batch larger than `max_evaluations` (`InvalidConfig` for
+    `max_evaluations`) are errors before any oracle call: nothing was
+    measured, so there is no result. Both, and `InvalidCandidate`, are
+    `ValueError` in Python. An error from `ask` or `tell` is
+    `ExternalOptimizer` with its message; through Python the original
+    exception is raised instead (C-1).
+  - `best_params` is the best **measured** candidate, kept with
+    `BestMeasured` in batch order (the first measurement, then only a
+    strictly better one, so a `NaN` never wins over a number), and
+    `best_fitness` the oracle's value for it, whatever the library reports
+    as its own best. `fitness_history[k]` is the best measured up to batch
+    `k`, so the last is `best_fitness`; `iterations_run` counts the batches
+    evaluated and told.
+  - No seed: the library owns its randomness and its start (C-7).
+    `Method::final_candidates()` is 5. In a training run the CUNQA walltime
+    projection counts `⌊max_evaluations / n⌋` batches after a first batch of
+    `n` candidates (at least one): exact when every batch has the first's
+    size, an upper bound to within one first batch when they grow (if a
+    batch `k` times larger takes at most `k` times as long), and possibly
+    too low when they shrink. The first batch is timed until the second
+    starts, so the library's `tell()` and next `ask()` between them are in
+    the projection; a run of one batch is not projected. Its warning asks to
+    lower `max_evaluations` (`docs/backends.md`).
+  - Enforced by `crates/polypus-optimizers/tests/external.rs` (one oracle
+    batch per `ask` and its values told; `None` and an empty batch; a batch
+    over the budget neither scored nor told; the budget spent exactly and
+    never exceeded over several batch patterns; a first `ask` with nothing
+    and a first batch over the budget, with no oracle call; rows of the
+    wrong length, `NaN` and ±∞, with no oracle call; failing `ask` and
+    `tell`; the oracle's length check; the configuration rejected before any
+    `ask`; the C-5 postconditions against the batches the oracle saw over 25
+    seeds and three batch patterns; a `NaN` never winning; a deterministic
+    run), the unit tests in `src/external.rs`, the `external_*` tests in
+    `crates/polypus-orchestration/src/dispatch.rs` and `src/walltime.rs`
+    (`an_external_run_is_projected_from_its_first_batch` among them),
+    `final_candidates_counts_five_for_population_and_external_methods_and_one_for_local_ones`
+    in `src/final_batch.rs`, the flow tests of every method in `src/flow.rs`,
+    the unit tests in `crates/polypus/src/bindings/external.rs` (the
+    conversions, bools, complex numbers and huge integers refused, a batch
+    read up to one row past the budget and a row up to one value past
+    `dimensions`, the recorded exception class, the configuration checks),
+    `method_is_send_and_sync` in
+    `crates/polypus-orchestration/src/dispatch.rs`,
+    `tests/python/test_external.py` (the object, the `ValueError`s before
+    the seam is reached, one batch per `ask` on `train` and `qml.train`, the
+    budget, the rows, an endless row, the exceptions, the calling thread,
+    reuse, the spread over the QPUs, a reference cycle collected, and the
+    outcome against what `tell` received over 5 seeds), and
+    `tests/python/test_ask_tell_adapters.py` (the adapters against fakes of
+    each library's public API, their `tell` refusing other candidates than
+    the batch handed out, Optuna's `close()` failing an untold batch's
+    trials, the pip extras' floors against CI's pins, and through the bridge
+    with Optuna's TPE, Nevergrad and pycma, their values negated for the
+    minimising ones, and Optuna's `close()` on a real study: these skip when
+    a library is not installed, but CI installs the three, pinned, on its
+    latest Python and sets `POLYPUS_REQUIRE_EXTERNAL_LIBRARIES=1`, so there
+    they run); the External cases of
+    `tests/python/test_oracle_contract.py` cover a bad value in a batch,
+    which the library is not told.
+- **Minibatches (`batch_size`).** With a minibatch, `evaluate_batch` scores a
+  per-call subset of the training samples, and the run's `Oracles` also carry
+  `full_evaluation`, the same model on every sample. The search steers by the
+  subsets; what is reported is the full dataset:
+  - **Adam:** the minibatch drives only the gradient. Adam's own oracle is
+    `full_evaluation`, so each iteration scores `θ` on every sample and then
+    asks for the gradient on the minibatch: two calls. A
+    `FiniteDifferenceGradient` of the minibatch is used without its
+    `value_and_gradient`, since its `θ` would be a minibatch value; an exact
+    gradient does not score `θ`. `fitness_history` and `best_fitness` are
+    therefore full-dataset values and every postcondition above holds, and the
+    walltime projection counts the two calls.
+  - **DE, PSO, CMA-ES, QNG, SPSA, Rotosolve and External:** every evaluation
+    is a minibatch estimate, so after the run `best_fitness` is re-scored on
+    every sample for the returned `best_params`. `fitness_history` keeps the estimates the search used, so its
+    last entry need not equal `best_fitness`: the one exception to the
+    quality-trajectory rule.
+  - The final batch (`final_shots`) scores every sample too: the native QML
+    oracle's `evaluate_batch_with_shots` draws no minibatch, so a seeded run
+    is the same up to it.
+  - Enforced by the `a_minibatched_*` tests in
+    `crates/polypus-orchestration/src/dispatch.rs`, the minibatch cases of
+    `adam_run_shape_counts_the_batches_the_optimizer_sends` in
+    `src/walltime.rs`, and the minibatch and factory tests in
+    `crates/polypus-evaluation/src/qml_oracle.rs` (with
+    `a_native_final_batch_scores_every_sample_with_its_shots`), and, through
+    `qml.Model.fit`, the minibatch cases of
+    `tests/python/test_qml_native_initial_point_final_shots.py` (Adam and DE:
+    the run unchanged, and the final value on every sample, not on a
+    minibatch).
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/` (the pure-Rust optimizer↔oracle invariant),
@@ -834,7 +1631,11 @@ silently-poisoned result.
 
 The DE strategies have their own suite,
 `crates/polypus-optimizers/tests/de_strategies.rs`: the pinned `"rand1bin"`
-outcome (`rand1bin_default_matches_its_pinned_outcome`), the multi-seed
+outcome (`rand1bin_default_matches_its_pinned_outcome`, re-pinned in #410),
+`j_rand` (`rand1bin_never_evaluates_a_trial_equal_to_its_parent`), the seam
+(`an_optimum_on_the_seam_converges_as_well_as_one_at_pi`), `F` and `CR`
+(`rand1bin_uses_the_given_mutation_factor_and_crossover_rate`,
+`invalid_rates_are_rejected_before_any_evaluation`), the multi-seed
 invariant (`adaptive_strategies_best_params_fitness_invariant_holds_across_seeds`),
 the stagnation stop, length errors (one on a shrunken L-SHADE batch), the
 L-SHADE schedule and budget
@@ -852,16 +1653,21 @@ each strategy sends, `test_seed_reproducibility.py` the seeded runs, and
 ## C-6 · Version coherence
 
 The workspace `Cargo.toml` version (`[workspace.package].version`) is the
-**single source of truth**. Everything else must equal it exactly:
+**single source of truth**. It is `X.Y.Z` in a release and `X.Y.Z-dev` on
+`main` between releases (docs/RELEASING.md). Everything else follows it:
 
-- a release tag `vX.Y.Z`;
-- the root `version` of `CITATION.cff`;
+- a release tag `vX.Y.Z` (never for a `-dev` version);
+- the version pin of every internal crate in `[workspace.dependencies]`,
+  exactly;
+- the root `version` of `CITATION.cff`: equal in a release; on a `-dev`
+  version it keeps the last release, so it must be an earlier `X.Y.Z`;
 - the version of the installed `polypus-quantum` distribution, which maturin
-  derives from it at build time;
+  derives from it at build time (`X.Y.Z-dev` becomes the PEP 440 `X.Y.Z.dev0`);
 - `polypus.__version__`, a `str` the compiled extension sets from
-  `CARGO_PKG_VERSION` when it is built, so it names the binary actually loaded
-  rather than whatever distribution metadata happens to be installed. It is
-  listed in `polypus.__all__`.
+  `CARGO_PKG_VERSION` when it is built, in the same PEP 440 form as the
+  distribution, so it names the binary actually loaded rather than whatever
+  distribution metadata happens to be installed, and a build of `main` never
+  reports a released version. It is listed in `polypus.__all__`.
 
 The release workflow refuses to publish when the tag and `Cargo.toml` diverge.
 
@@ -871,9 +1677,14 @@ is the first release action.*
 
 **Enforcing checks:**
 
-- Tag ↔ `Cargo.toml`: the `gate` job of `.github/workflows/release.yml`, on
-  every tag push (it reads `[workspace.package].version` and refuses a tag
-  other than `v<version>`).
+- Tag, pins, `CHANGELOG.md` and `CITATION.cff` ↔ `Cargo.toml` at release: the
+  `gate` job of `.github/workflows/release.yml`
+  (`.github/scripts/release_check.py`, tests in
+  `.github/scripts/test_release_check.py`), on every tag push and manual run
+  with `target=pypi`.
+- Version form, internal pins and no already-tagged `X.Y.Z` on every pull
+  request and push to `main`: the same script in branch mode, from
+  `.github/workflows/hygiene.yml`.
 - `Cargo.toml` ↔ `CITATION.cff`: `.github/workflows/hygiene.yml` on every pull
   request and push to `main` (`.github/scripts/hygiene.py`, rule
   `version-mismatch`; tests in `.github/scripts/test_hygiene.py`).
@@ -883,17 +1694,16 @@ is the first release action.*
   `polypus-quantum` distribution is installed, and its `Cargo.toml` comparison
   only when the tests run outside the repository.
 
-The release gate requires a green `ci.yml` run for the tagged commit but not a
-green `hygiene.yml` run, so a mismatch with `CITATION.cff` blocks merges, not
-releases.
-
 ---
 
 ## C-7 · Seeding & run manifest (Python entry points)
 
-This contract governs the outer Rust↔Python boundary of the four public entry
+This contract governs the outer Rust↔Python boundary of the public entry
 points `polypus.run_quantum_circuit`, `polypus.train`, `polypus.qml.train` and
-`polypus.qml.predict`: their `seed` kwarg and their return shape. (It is distinct from C-1, which
+`polypus.qml.predict`, and of the native QML API's `Model.fit`,
+`TrainedModel.predict`, `TrainedModel.run`, `polypus.qml.expval` and
+`polypus.qml.jacobian`, and `polypus.torch.QuantumLayer` over them (C-11):
+their `seed` kwarg and their return shape. (It is distinct from C-1, which
 freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 
 ### The `seed` kwarg
@@ -926,13 +1736,16 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     path reproduces the per-replica counts of running the replicas one by
     one. Until #348 the seed was `s + k`, which made neighbouring base seeds
     share streams shifted by one circuit; counts for a fixed seed changed when
-    that was fixed. Aer receives the base seed unchanged, and CUNQA keeps its
-    per-QPU offset below.
+    that was fixed. Aer and CUNQA receive one seed per call instead (see
+    [The seed across the calls of one run](#the-seed-across-the-calls-of-one-run)):
+    a `run_quantum_circuit` that is one call gives Aer the base seed
+    unchanged, and CUNQA adds its per-QPU offset below.
   - With `infrastructure="cunqa"`: the same `seed` kwarg is forwarded across
     the same seam (`crates/polypus-infrastructure/src/cunqa.rs` mirrors
     `local.rs`, `polypus_python`'s `cunqa.py` mirrors `local.py`), with a
     per-QPU offset so distributed shots aren't identical copies: the circuit
-    sent to QPU `k` runs with `seed + k`, masked to 63 bits. With shots split
+    sent to QPU `k` runs with the call's seed (below) `+ k`, masked to 63
+    bits. With shots split
     across the QPUs, replica `i` runs on QPU `i`, so every replica gets its own
     QPU and seed even when the split is uneven (`shots` not a multiple of
     `n_qpus`) and is sent as one `run_qcs` call per batch size, each carrying
@@ -950,27 +1763,129 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   job (making population init / mutation deterministic, inside the pure-Rust
   `polypus-optimizers`) is independent of which backend evaluates the oracle.
   Precedence: the explicit `seed` kwarg wins; otherwise the `seed` field pinned
-  on the `DE`/`PSO`/`QNG`/`CMAES` instance; otherwise a fresh OS-entropy value. On the
+  on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA`/`Rotosolve` instance; otherwise a fresh OS-entropy
+  value. `External` has no `seed` field (`method_seed` returns nothing for
+  it): its library owns its randomness and is seeded where the user builds
+  it, so the resolved seed only seeds shot sampling and is reported; with a
+  deterministic optimizer a seeded native run reproduces exactly
+  (`tests/python/test_seed_reproducibility.py`, the External cases). On the
   native, Aer, and CUNQA backends the resolved seed *also* seeds shot sampling,
-  so a `train()` run on any of them is reproducible end-to-end; `qml.train` is
+  so a `train()` run on any of them is reproducible end-to-end, in another
+  process too: every cost reducer sums a counts map in ascending bitstring
+  order, never in `HashMap` order, which differs per process (#401;
+  `TestReplayInFreshInterpreter` in `test_seed_reproducibility.py` replays
+  seeded native runs in fresh interpreters); `qml.train` is
   Qiskit/Aer-only (native rejected), and since Aer shot noise is now seeded
   too, its reproducibility guarantee covers both the optimizer trajectory and
   Aer's sampling. A seeded `CMAES` run reproduces on the same platform and
   build only: its steps call `exp`, `ln` and `cos` from the platform's math
   library, which is not guaranteed correctly rounded, so its trajectory can
   differ between platforms even over a platform-independent backend (DE's
-  steps are basic arithmetic only).
+  steps are basic arithmetic only). `Adam` does not carry that caveat: with
+  either `rule` its steps use only +, −, ×, ÷ and `sqrt`, all correctly
+  rounded in IEEE 754 (its bias corrections are running products, not
+  powers), so a seeded run over a platform-independent backend reproduces
+  bit for bit on every platform; `crates/polypus-optimizers/tests/adam.rs`
+  pins one per rule. A seeded `SPSA` run carries CMA-ES's caveat: its gains
+  `a/k^α` and `c/k^γ` call `powf`, which is not guaranteed correctly rounded
+  either, so it reproduces on the same platform and build only;
+  `crates/polypus-optimizers/tests/spsa.rs` compares two runs instead of
+  pinning one. A seeded `Rotosolve` run carries the same caveat: its seed
+  only draws θ₀, but every step calls `atan2` and `hypot`;
+  `crates/polypus-optimizers/tests/rotosolve.rs` compares two runs. With `final_shots` (C-5) the final batch is the run's last
+  call (below), sent after every call of the optimizer, so a seeded run
+  gives the same `best_params`, `best_fitness` and `fitness_history` with
+  and without it, and the final batch has shot noise of its own, which a
+  seeded run reproduces too.
 - **`qml.predict(..., seed=None)`** seeds shot sampling like
   `run_quantum_circuit`: an explicit seed reproduces the counts, `None` draws one
   from OS entropy, and the effective value is reported. `qmio` is rejected
   outright, since a QML model is a Qiskit circuit.
+- **`Model.fit(..., seed=None)`** follows `train`: the explicit `seed` wins,
+  then the optimizer object's field, then OS entropy. The effective seed also
+  seeds the shot sampling and the minibatch draws (one subset of the samples
+  per oracle call, drawn from the seed and a call counter), so a run replays
+  exactly. With `exact=True` nothing is sampled, and the seed drives only the
+  optimizer and the minibatches.
+- **`TrainedModel.predict(..., seed=None)` / `TrainedModel.run(..., seed=None)`**
+  seed shot sampling like `run_quantum_circuit`: an explicit seed reproduces the
+  counts, `None` draws one from OS entropy, and an explicit seed on `qmio` is a
+  `ValueError`. With `exact=True` nothing is sampled.
+- **`qml.expval(..., seed=None)` / `qml.jacobian(..., seed=None)`** follow
+  `TrainedModel.run`: an explicit seed reproduces the result bit for bit, `None`
+  draws one from OS entropy, an explicit seed on `qmio` is a `ValueError`, and
+  with `exact=True` nothing is sampled. They return bare arrays with no manifest,
+  so the effective seed is only logged (with the run `id`, at `info`): to replay
+  a call, pass a `seed`. A call runs its rows in blocks over one backend (C-11);
+  on the native backend the circuit counter runs on across the blocks, so a
+  seeded result does not depend on the block size. On Aer and CUNQA each block
+  is at least one call, and the block size follows the host's cores and the
+  backend's concurrency, so a seeded call replays on the same configuration, as
+  a `qml.train` does (below).
+- **`polypus.torch.QuantumLayer(..., seed=None)`** never passes its `seed` on
+  as such: forward pass `n` of the layer calls `qml.expval` with
+  `SeedSequence([seed, n, 0]).generate_state(1, uint64)[0]`, and the backward
+  pass of that forward pass calls `qml.jacobian` with `[seed, n, 1]`, so every
+  backend call of a training gets its own stream, a layer rebuilt with the same
+  `seed` replays the values and gradients step by step, and seeds `s` and
+  `s+1` share no stream. The counter is the layer's, outside the `state_dict`.
+  `seed=None` passes `None` to every call, which draws and logs its own; an
+  explicit `seed` on `qmio` is `qml.expval`'s error at the first forward pass.
+  Enforced by `test_torch_quantum_layer.py`'s `TestSeeds`.
 - **OS entropy failure.** If the OS entropy source cannot be read, the entry
   point raises `polypus.BackendError` instead of panicking — whether while
   drawing a default seed (`seed=None` and, for `train`/`qml.train`, no `seed`
-  pinned on the `DE`/`PSO`/`QNG`/`CMAES` instance) or while drawing the random bytes of
+  pinned on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA`/`Rotosolve` instance,
+  or a `polypus.External`) or while drawing the
+  random bytes of
   the run `id`'s UUID v4 suffix. Every call draws an id, so this holds
   with or without an explicit seed and for `infrastructure="qmio"`, which
   never draws a seed.
+
+### The seed across the calls of one run
+
+A run (one entry-point call) sends its circuits to one backend in one or more
+calls: a `train` sends the initial population and one batch per generation,
+each split into waves when it exceeds the backend's concurrency (CUNQA:
+`n_qpus`) or the memory budget, and `qml.train` also windows its candidates by
+the host's cores, and `qml.expval`/`qml.jacobian` their rows by the same rule
+(C-11); the `final_shots` batch is the last call. **Every call gets
+its own sampling stream, on every backend** (#411), so no two calls of a run
+share shot noise, and the same seed replays the whole sequence:
+
+- The native backend seeds circuit `k` of the run with `circuit_seed(s, k)`
+  (above); its calls take consecutive blocks of `k`, so its seeds do not
+  depend on how the batches are split.
+- Aer, CUNQA and the subprocess bridge receive one seed per call: the base
+  seed `s` on call `0` and `stream_seed(s, n)` on call `n >= 1`, the native
+  map (`polypus_backend::{stream_seed, CallSeeds}`). Calls are numbered in the
+  order the backend receives them, which is the run's: the planners call a
+  backend sequentially. Every `run_circuits` call counts, and so does a
+  `run_shots_distributed` call on CUNQA, which overrides it; Aer and the
+  bridge use the trait's default, one `run_circuits` call per shot group, so
+  an uneven shot split is several calls there. CUNQA adds each QPU's offset to
+  its call's seed. A run of one call, such as a `run_quantum_circuit` with
+  `n_qpus=1` or an even split, therefore seeds Aer exactly as Aer's own
+  `seed_simulator=s` does. On that first call, as before #411, neighbouring
+  base seeds can share streams (on CUNQA, QPU `k+1` of seed `s` is QPU `k` of
+  seed `s+1`); later calls are mixed like the native backend's circuits.
+- Since a call's seed depends on its index, a seeded Aer or CUNQA run replays
+  on the same configuration: the same `n_qpus`, and for a split that depends
+  on them, the same memory budget and core count.
+- A third-party backend receives the base seed in `RunParams::seed` on every
+  call and gives each call its own stream, with `CallSeeds` or its own
+  derivation (`docs/backends.md`).
+
+Until #411, Aer, CUNQA and the bridge received the base seed on every call,
+so batch slot `i` was sampled with the same random numbers in every
+generation, unlike the native backend; seeded results on those backends
+changed in 0.8.0. **Enforcing tests:** `tests/python/test_seed_streams.py`
+(the seeds Aer and the fake CUNQA receive over a `train`, read off the
+`run_qcs` seam, and their replay), `consecutive_calls_get_their_own_streams`
+in `crates/polypus-infrastructure/src/native.rs`,
+`crates/polypus-subprocess-backend/tests/seed_streams.rs` (the seeds the
+reference worker receives) and the `CallSeeds` tests in
+`crates/polypus-backend/src/seed.rs`.
 
 ### The run manifest (return shapes)
 
@@ -987,20 +1902,46 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   internally (`predict_<n_qpus>_<infrastructure>_<uuid>`).
 - `train` / `qml.train` return a **`TrainResult`** exposing the full
   optimization outcome — `best_params` (`list[float]`), `best_fitness` (float),
-  `iterations_run` (int), `converged` (bool) — plus `seed` (int, the effective
+  `iterations_run` (int), `converged` (bool), `fitness_history`
+  (`list[float]`) — and the final re-evaluation, `final_params`
+  (`list[float] | None`) and `final_fitness` (`float | None`), both `None`
+  without `final_shots` (C-5), plus `seed` (int, the effective
   seed used) and `id` (str, the effective run id: the caller-supplied `id`
   prefix suffixed with a UUID v4 for uniqueness — a label for logging /
   SLURM / temp-file identification only, never for correlating runs by content;
   see #75). This replaces the former bare `list[float]`, which discarded
   fitness, iteration count and the convergence flag.
 
+- `Model.fit` returns the same **`TrainResult`**. `TrainedModel.run` returns
+  a **`RunResult`** shaped like `qml.predict`'s (one C-3 dict per row,
+  `merged_counts` `None`, `id` generated as `qml_<n_qpus>_<infrastructure>_<uuid>`,
+  `seed` `None` only on `qmio`), or, with `exact=True`, an **`ExactResult`**:
+  `probabilities` (one dict per row, keyed like the counts), `id`, `backend`
+  and `infrastructure`, and no `seed`, since nothing was sampled.
+
 The effective `seed` on both result types is what lets a caller log a run and
-replay it exactly.
+replay it exactly. A run started from an `initial_point` (contract C-5) replays
+only with the same point too: the result does not echo it, so a caller that
+passes one logs it alongside the seed.
 
 **Enforcing test:** `tests/python/test_seed_reproducibility.py` (public-API
 end-to-end: native and Aer reproducibility, entropy variation, the `qmio`
 rejection, and the returned manifest/outcome fields), `tests/python/test_qml_predict.py`
-(the `qml.predict` manifest, seed replay and per-row counts), plus the Rust tests in
+(the `qml.predict` manifest, seed replay and per-row counts),
+`tests/python/test_qml_native_training.py` and `test_qml_native_inference.py`
+(`Model.fit` and `TrainedModel.run`: seed replay, exact runs independent of
+shots, the `qmio` rejection, the `RunResult`/`ExactResult` fields),
+`test_qml_native_expval_jacobian.py`'s `TestBlocksAndSeeds` (`qml.expval` and
+`qml.jacobian`: seed replay, another seed differs, an omitted one is drawn, the
+`qmio` rejection) and `a_seeded_native_result_does_not_depend_on_the_block_size`
+in `crates/polypus/src/bindings/qml.rs`, the minibatch draws in
+`crates/polypus-evaluation/src/qml_oracle.rs`
+(`a_minibatch_is_drawn_once_per_call_and_shared_by_the_whole_call`),
+`tests/python/test_determinism_baseline.py` (seeded results pinned bit for bit:
+counts and a mocked-backend `qml.train` on any platform, native `train`
+trajectories on the fixture's build only, opt-in with
+`POLYPUS_DETERMINISM_STRICT=1`, and the same trajectories replayed in a fresh
+process on every CI leg, #407), plus the Rust tests in
 `crates/polypus/src/bindings/mod.rs` (native seed round-trip through
 `run_quantum_circuit`, the `qmio` rejection path, the seed-resolution
 precedence / optimizer determinism, the default-seed entropy-failure path
@@ -1069,6 +2010,9 @@ rejected too, all before anything runs.
 A row whose length cannot be read (e.g. a generator with no `__len__`) is a
 legitimate type error and propagates as-is; it is not masked into the messages
 above. `y_train` itself is only iterated, so a generator is fine there.
+A `polypus.qml.Encoder` or `Ansatz` as `feature_map` or `ansatz` is a
+`TypeError` before anything runs: native models are trained with
+`polypus.qml.Model.fit` (C-11).
 A Qiskit failure while composing the circuits or binding a row (an ansatz wider
 than the feature map, a feature value Qiskit rejects) is raised as
 `polypus.EvaluationError` with the Qiskit original as `__cause__` (C-1, issue
@@ -1077,7 +2021,8 @@ than the feature map, a feature value Qiskit rejects) is raised as
 **Enforcing test:** `tests/python/test_qml_train_validation.py` (every rejection,
 with nothing executed), `tests/python/test_qml_supervised.py` (each sample's
 counts meet its own label; the objective calling convention) and
-`tests/python/test_qml_predict.py` (the inference agreements).
+`tests/python/test_qml_predict.py` (the inference agreements) and
+`tests/python/test_qml_native.py` (native pieces rejected by both).
 
 ---
 
@@ -1352,3 +2297,872 @@ express: `to_py_object_rejects_a_circuit_openqasm2_cannot_express`
 (`polypus-subprocess-backend`), and
 `test_running_a_circuit_openqasm2_cannot_express_raises_instead_of_panicking`
 in `tests/python/test_qasm3.py`.
+
+---
+
+## C-11 · Native QML (`polypus-qml` problem ↔ oracle, and `polypus.qml.Model`)
+
+This contract governs the native form of quantum machine learning: a model that
+Polypus builds, reads out and scores itself, as opposed to the Qiskit form of
+C-8, whose circuits are opaque and scored by the caller's cost. The two forms
+are separate entry points that share the oracle, the scheduler and the
+optimizers underneath (`docs/adr/0007-native-qml.md`). The contract has a
+Rust half — the seam between a `QmlProblem` and the oracle that scores it, a
+Rust-to-Rust contract like C-5, and the loss-free expectation Jacobian beneath
+it — and a Python half, the `polypus.qml.Model` API built on it and the
+`qml.expval`/`qml.jacobian` primitives.
+
+### The problem ↔ oracle seam (Rust)
+
+A `QmlProblem` bundles a compiled model, a training set and a loss, and exposes
+exactly what an oracle needs: *bind these parameters into circuits* and *here
+are the results, give me the fitness (and its gradient)*. Backend, shots,
+batching and distribution are the oracle's concern.
+
+- **(a) `bind_batch` shape and order.** `bind_batch(θ)` returns exactly
+  `num_circuits()` `ConcreteCircuit`s in a **stable sample-major order**, one
+  per training sample. Results handed back to `fitness_from_counts` (or its
+  exact twin `fitness_from_probabilities`) must be in the **same order**:
+  misaligned results are a corrupt result, so the order is specified and
+  tested, never assumed.
+- **(b) Finite fitness or typed error.** The fitness is `−mean_loss` (the
+  optimizers maximise): a finite `f64` or a typed `QmlError`, **never `NaN`**.
+  `BinaryCrossEntropy` clamps its probability away from the `log`
+  singularities; the unsupervised `Expectation` loss is `−⟨O₀⟩`, so its fitness
+  is the mean expectation; non-finite predictions are impossible upstream (the
+  dataset and circuits reject them), and a problem never has zero samples.
+  Results of the wrong length are a typed `QmlError::CountsLengthMismatch`.
+- **(c) Emitted circuits obey C-4 and C-2.** Every bound circuit ends in one
+  `measure_all` (C-4) and uses only the C-2 vocabulary, by construction: the
+  model emits through `polypus-circuit`'s builder only.
+- **(d) `num_params()` is stable and positive.** Fixed at `compile` time and
+  `> 0` (a model without trainable parameters is
+  `ValidationError::NoTrainableParams`), it is the `dimensions` the optimizer
+  consumes under C-5.
+- **(e) The gradient is exact.** `gradient_circuits(θ)` and
+  `gradient_from_counts` / `gradient_from_probabilities` give `∂fitness/∂θ` by
+  the parameter-shift rule, applied **per occurrence**: a parameter that
+  several gates share (convolution and pooling reuse theirs across qubit pairs)
+  is shifted at each gate in turn and the results are summed. With exact
+  probabilities it matches a central finite difference of the fitness to near
+  machine precision for every layer. One gradient runs
+  `num_gradient_circuits() = num_circuits · (1 + 2 · occurrences)` circuits. The
+  rule is exact only for gates `exp(−iθP/2)` with `P` a Pauli product; every
+  `GateInstruction` kind is classified, and a model containing one the rule
+  cannot handle has no exact gradient (`QmlError::NoExactGradient`, raised
+  lazily, so gradient-free optimizers still train it).
+  - *Adjoint differentiation.* For a caller that holds the exact statevector,
+    `adjoint_runs(θ, base)` and `gradient_from_adjoint` give the same gradient
+    with no shifted circuit: one run per sample — the untied template bound at
+    `θ`, which is the circuit `bind_batch(θ)` gives, with every trainable gate
+    differentiated and the loss's chain rule folded into its diagonal
+    observable — where `base` is `θ`'s exact probabilities (the loss is not
+    linear in the expectations). It differentiates the same gates per
+    occurrence, sums a shared parameter's gates the same way, and fails with
+    the same `NoExactGradient`. It is the shift gradient to rounding, not bit
+    for bit (the sums run in another order); the native simulator computes it
+    in about three simulations holding two statevectors
+    (`StatevectorSimulator::adjoint_gradient`), against `2 · occurrences + 1`
+    circuits.
+- **(f) The oracle.** The `QmlOracle` scores a native problem
+  (`QmlSource::Native`) through the same candidate windows as the Qiskit form:
+  one finite fitness per candidate (C-5), sampled through the planner or, in
+  exact mode, from `NativeStatevectorBackend::run_circuits_exact` (C-3's exact
+  probabilities, same memory budget and windows). It is also the run's
+  `GradientOracle`, for Adam. Its exact gradient is the adjoint one ((e)):
+  `θ`'s base circuits run exactly, giving the value and the chain rule, then
+  one adjoint run per sample on `NativeStatevectorBackend::run_adjoint`, which
+  counts two statevectors per run against the memory budget. When the budget
+  holds one statevector of the width but not two
+  (`NativeStatevectorBackend::adjoint_fits`), it is the parameter shift's
+  instead, logged at `info` the first time on that backend (once per fit, or
+  per `qml.jacobian` call, not once per gradient); when it holds none, the
+  error is the exact path's
+  `InsufficientMemory`. The sampled (shots) gradient is always the parameter
+  shift's. Without a minibatch its `value_and_gradient`
+  returns `θ`'s fitness, read from the gradient's own base circuits (those
+  that lead the shift's batch, or the exact run that precedes the adjoint),
+  with the gradient, so an Adam iteration is one call and `θ`'s circuits run
+  once; in exact mode that value is, bit for bit, what `evaluate_batch`
+  returns for `θ`. With a minibatch it returns `None` (those base circuits are
+  the minibatch's, and Adam tracks its best on every sample), and Adam scores
+  `θ` apart. Its `scores_theta` declares which, `true` exactly without a
+  minibatch, so the walltime projection counts an Adam iteration as one call
+  without a minibatch and two with one (C-5); enforced by
+  `the_native_gradient_declares_whether_it_scores_theta` in
+  `crates/polypus-evaluation/src/qml_oracle.rs` and, through the factory's
+  `Oracles`, `the_factory_hands_out_each_role_the_source_has`. With a minibatch,
+  one subset of the samples is drawn per call, from the run's seed and a call
+  counter, and shared by every candidate of an `evaluate_batch` and by the base
+  and every shift of a gradient; `evaluate_full` scores every sample (the
+  minibatch rules of C-5).
+- **(g) The expectation Jacobian (loss-free).** `CompiledModel::jacobian(samples,
+  wrt)` builds an `ExpectationJacobian`: the circuits and the reader of
+  `∂⟨O_o⟩(x_s, θ)` for **every** readout observable `O_o` and sample `x_s`,
+  with no labels and no loss, so it takes every readout (`Argmax` included,
+  which `QmlProblem` pairs only with the categorical loss). `wrt` is
+  `Params` (shape `(samples, observables, num_params)`), `Inputs` (shape
+  `(samples, observables, num_features)`) or `Both` (the two, from one set of
+  circuits); the `Jacobian` it reads is flat and row-major, a part `wrt` did
+  not ask for `None`. `CompiledModel::expectations_from_counts` /
+  `expectations_from_probabilities` read the expectations themselves, one
+  sample at a time.
+  - *Mechanics.* (e)'s, reused: every template is untied and each occurrence
+    shifted by `±π/2` on its own. A trainable gate adds
+    `(⟨O⟩(+) − ⟨O⟩(−))/2` to the parameter it reads (summed over the gates
+    that share it). The encoders record which gates read the sample and the
+    chain-rule factor of each feature they read: an angle encoder's `R(x_f)`
+    and an IQP encoder's `Rz(x_f)` have factor `1`; an IQP `Rzz(x_i·x_j)` has
+    `x_j` towards `x_i` and `x_i` towards `x_j`, and is shifted **once** for
+    both. Data re-uploading sums the gates that read a feature. Recording this
+    changes no gate: every template is, gate for gate, what it was.
+  - *Adjoint differentiation.* (e)'s, for the Jacobian: `adjoint_runs(θ)` on
+    an `ExpectationJacobian` or a block gives one run per sample and readout
+    observable (`num_adjoint_runs`), sample-major, each differentiating the
+    gates the shift would move, and `jacobian_from_adjoint` reads them through
+    the same bookkeeping (parameter, or feature times its chain-rule factor),
+    with the same blocks. No loss: the observable is the readout's own. It is
+    the shift's Jacobian to rounding.
+  - *Circuits and order.* `2 · shifts` circuits per sample and no unshifted
+    one, `shifts` counting the gates that read a parameter (a parameter shared
+    by `g` gates counts `g` times) for `Params`, the gates that read the sample
+    for `Inputs`, both for `Both`; sample-major, and per sample the `+π/2` then
+    the `−π/2` circuit of each shifted gate in gate order. Results come back in
+    the same order; the wrong number is `QmlError::CountsLengthMismatch`. It
+    can be bound and read block by block (`blocks`, `block(range)`), the
+    blocks' Jacobians concatenating to the whole one value for value.
+  - *Exactness.* From exact probabilities it is the Jacobian: it matches a
+    central finite difference of the expectations to near machine precision
+    for every layer and readout (and the inputs of angle and IQP encoders);
+    from counts, an unbiased estimator. The chain rule over it,
+    `−(1/n)·Σ_i Σ_o ∂loss/∂⟨O_o⟩(x_i) · J[i, o, :]`, is `QmlProblem`'s
+    gradient for every loss.
+  - *Errors, all at construction.* A sample of the wrong width or one its
+    encoder rejects is that `QmlError`; a model the shift rule cannot
+    differentiate is `QmlError::NoExactGradient`, whatever `wrt`; with
+    `Inputs` or `Both`, an amplitude or basis encoder, whose angles have no
+    derivative in the sample, is `QmlError::NoInputGradient` naming it;
+    samples that read their parameters or features through different gates are
+    `QmlError::NoExactGradient`, never a silently wrong Jacobian.
+
+### The Python API (`polypus.qml`)
+
+**Building a model.** `Model(encoder, ansatz, readout)` joins an `Encoder` (the
+layers that load each sample), an `Ansatz` (the trainable layers, which may also
+re-upload the data) and a `Readout`. It copies the three, so building on them
+afterwards does not change it, and it holds no trained parameters. Everything
+that does not depend on the data is checked where it is written, as a plain
+`ValueError`, as `polypus.Circuit`'s builders raise (the checks of `fit`,
+`predict` and `run` below are `polypus.ConfigurationError`):
+
+- each `Encoder`/`Ansatz` builder call re-checks its layers (a misplaced
+  amplitude encoder, pooling below two active qubits, a
+  `strongly_entangling` range out of bounds) and leaves the object as it was
+  when it raises;
+- `Model` checks that the `Encoder` and the `Ansatz` have the same width, that
+  some layer loads the data, that the layers reserve trainable parameters, and
+  that the readout's positions exist among the qubits still active at the end;
+- a count argument (`reps`) that is negative or larger than a `usize` holds is
+  refused at the call, before the layer is checked, and a parameter count that
+  does not fit in a `usize` (a huge `reps`, or any layer after one) is
+  `ValidationError::TooManyParams`; both are a `ValueError` that leaves the
+  object as it was, never PyO3's `OverflowError` or a panic.
+
+What depends on the data — how many features the encoders can carry — is
+checked when the model meets a dataset. `num_params` and `num_observables` (the
+readout's observables, the columns of `qml.expval`) are fixed at construction.
+A `Model` pickles, and so copies with `copy.deepcopy`, as the JSON of its spec
+(the `spec` of the save format below), rebuilt by `Model._from_spec` through
+the checks `qml.load` runs: a corrupt or edited spec is a `ValueError`, never an
+inconsistent model.
+
+**Readout observables.** `Readout(observables, decision="raw", threshold=None)`.
+Each observable is a `polypus.qml.PauliTerm` (`Z(0)`, `Z(0) @ Z(1)`: one product,
+coefficient `1.0`), a `polypus.qml.Observable` (a weighted sum
+`Observable([(0.5, Z(0)), (1.5, Z(0) @ Z(1))])`, the only form with coefficients
+or several terms) or a `[(pauli, position), …]` list, the literal spelling of a
+`PauliTerm`. They are told apart by type, never by the shape of the tuples, and
+may be mixed. Positions are logical: they index the qubits still active after
+any pooling. A non-finite coefficient, an unknown Pauli or a position repeated
+in one product is a `ValueError` (`Z(0) @ Z(0)` raises at the `@`); anything
+else is a `TypeError` naming the three forms. `"argmax"` reads one observable
+per class (at least two); the other decisions predict from the first.
+`threshold` is required by `"threshold"` and rejected by every other decision.
+
+**Measurement basis (single group).** A readout may measure `X`/`Y`: the model
+inserts the basis change (`H` for `X`; `Sdg` then `H` for `Y`) before the
+terminal measurement, provided the whole readout resolves to one basis group
+(every term agrees on the Pauli of each qubit it touches). Conflicting bases
+inside one observable are `ValidationError::ObservableHasIncompatibleBases`; a
+readout needing more than one group is
+`ValidationError::ReadoutNeedsMultipleBasisGroups`: rejected, never mismeasured.
+
+**Options.** Every option in the table below is a string from a closed set,
+checked when it is given; any other value is a `ValueError` listing the valid
+ones. The typing stubs spell each set as a `Literal`.
+
+| Option | Accepted values |
+| --- | --- |
+| `angle_encoder(axis=)`, `hardware_efficient(rotations=[…])` | `"rx"`, `"ry"`, `"rz"` |
+| `hardware_efficient(entanglement=)`, `iqp_encoder(entanglement=)` | `"linear"`, `"circular"`, `"full"` |
+| `hardware_efficient(entangler=)`, `strongly_entangling(entangler=)` | `"cx"`, `"cz"` |
+| `conv(block=)` | `"basic"`, `"cartan"` |
+| `conv(pairing=)` | `"even_pairs"`, `"odd_pairs"`, `"alternating"` |
+| `pool(block=)` | `"basic"` |
+| `pool(keep=)` | `"even_positions"`, `"odd_positions"` |
+| `Readout(decision=)` | `"raw"`, `"sign"`, `"threshold"`, `"argmax"` |
+| `fit(loss=)` | `"squared_error"`, `"binary_cross_entropy"`, `"hinge"`, `"categorical_cross_entropy"`, `"expectation"` |
+| `qml.jacobian(wrt=)` | `"params"`, `"inputs"`, `"both"` (a `polypus.ConfigurationError`, like every check of the primitives) |
+
+The one option that is not a string is `strongly_entangling(ranges=)`: `None`
+(PennyLane's default, `r = (layer mod (n − 1)) + 1`) or one integer per layer,
+each in `1..=n−1` for the `n` qubits active where the layer sits (after any
+pooling). A count other than `reps`, or a range outside those bounds, is
+`ValidationError::StronglyEntanglingRangesLength` /
+`StronglyEntanglingRangeOutOfBounds`, a `ValueError` at the call; with one
+active qubit no entangler is emitted, so only the count is checked. A range
+is a count argument like `reps`: a negative one, or one larger than a `usize`
+holds, is the same `ValueError` at the call.
+
+**Training (`Model.fit`).** `fit(x, y=None, *, method, loss=None, …)`; every
+argument after `y` is keyword-only and `method` is required. It returns a
+`TrainResult` (C-7) whose `best_params` has `num_params` values. All the checks
+below run before a backend exists and raise `polypus.ConfigurationError`, which
+is also a `ValueError` (#418), as `train`'s do:
+
+- **Data.** `x` is rows of features or a `polypus.qml.Dataset`; with a
+  `Dataset`, `y` is an error (it carries its own labels, or none).
+  Labels from `y` follow C-8's checks; the rows must be non-empty, of equal
+  width and finite.
+- **Labels and loss.** With labels, `loss` is required and is a supervised
+  loss; `"expectation"` (which ignores labels) is an error. Without
+  labels (`y=None`, or a `Dataset` built without them), `loss=None` means
+  `"expectation"` and a supervised loss is an error: labels are never
+  ignored, and a supervised loss never trains against made-up labels. `"argmax"`
+  pairs with `"categorical_cross_entropy"` only, and every other decision with a
+  scalar loss. Label domains are the loss's (±1 for `"hinge"`, 0/1 for
+  `"binary_cross_entropy"`, class indices below the number of observables for
+  `"categorical_cross_entropy"`).
+- **`exact=True`** replaces sampling with exact probabilities (so `shots` does
+  not matter) and needs `infrastructure="local"` with `backend="polypus"`.
+- **`batch_size`** must satisfy `1 <= batch_size < number of samples`; the
+  reported `best_fitness` is on every sample (C-5).
+- **`initial_point`** (keyword-only, default `None`) is C-5's starting point,
+  with `num_params` as `dimensions`: its checks, after the optimizer's
+  configuration (checked with or without a point), are `train`'s, with its
+  messages, and a list, tuple or NumPy array is accepted, such as the `params`
+  of a `TrainedModel` read back with `qml.load`, to train it on.
+- **`final_shots`** (keyword-only, default `None`) is C-5's final
+  re-evaluation, with `train`'s checks; its batch scores every sample, with
+  or without `batch_size`, into `final_params` and `final_fitness`. With
+  `exact=True`, which uses no shots, any valid `final_shots` is an error; a
+  malformed one fails its own check first, and `exact=True` off the local
+  native simulator fails `exact`'s.
+- **`polypus.Rotosolve`** needs what its closed-form step assumes (C-5):
+  `loss="expectation"`, the one loss linear in the measured distribution
+  (another is an error naming it), and every trainable parameter the
+  angle of exactly one rotation, checked with
+  `ParameterizedCircuit::check_single_frequency` on the model's template (an
+  error with the first problem; a `conv` or `pool` layer over more than
+  one pair fails it, since it shares each parameter across the pairs). Every
+  other optimizer takes any model.
+- **`callback`** is `None` or a callable, as for `polypus.train` (C-5); one
+  that is neither is a `TypeError`, not a `ConfigurationError`, raised right
+  after the `final_shots` check, before a backend exists. A stop it asks for
+  still sends the `final_shots` batch. Its
+  `evaluations` count Adam's θ, which the exact parameter-shift gradient
+  measures in its own batch, but not the shifted circuits; with `batch_size`
+  its `best_fitness` is a minibatch estimate except for Adam.
+- **`backend=None`** is `"polypus"` (the native simulator) on
+  `infrastructure="local"` and `"aer"` elsewhere (CUNQA's QPUs run Aer; a
+  registry backend such as QMIO does not read it); an explicit `backend` wins.
+  The other execution arguments follow `polypus.train` (C-1, C-7, C-9).
+
+**Inference.** `model.bind(params)` checks that `params` has exactly
+`num_params` finite values (`ValueError` otherwise) and returns an immutable
+`TrainedModel`; the `Model` is unchanged. `TrainedModel.predict(x, *, …)`
+returns one decision per row: an `int` for `"sign"` and `"threshold"` (±1) and
+for `"argmax"` (the class index), a `float` for `"raw"` (the expectation).
+`TrainedModel.run(x, *, …)` returns the raw results: a `RunResult` whose
+`counts` holds one C-3 dict per row (`merged_counts` is `None`), or with
+`exact=True` an `ExactResult` whose `probabilities` holds one dict per row,
+keyed like the counts. Both take rows or a `Dataset` (its labels are not used);
+`exact` and `backend=None` follow `fit`'s rules, and so do their checks (the
+rows against the model, `exact`, a `seed` on `qmio`): before a backend exists,
+as `polypus.ConfigurationError`.
+
+**Inspecting the circuit.** `model.circuit(x, params=None)` and
+`TrainedModel.circuit(x)` return the `polypus.Circuit` the model runs for the
+one sample `x` (a flat sequence of floats or a 1-D NumPy array): the features
+fixed, the trainable layers, the readout's basis change and the terminal
+`measure_all`. It is the model's only circuit, since the readout resolves to a
+single basis group. Without `params` the trainable angles stay free:
+`num_params` equals the model's and `param_names` are `theta_0`, `theta_1`, …,
+in the order of `best_params`. With `params` (checked as `bind` checks them) it
+is `model.bind(params).circuit(x)`, every angle fixed and `num_params == 0`.
+The bound circuit is the one `run` and `predict` execute for that row: run on
+the native simulator with the same seed and shots it gives `run([x])`'s counts,
+and its statevector gives `run([x], exact=True)`'s probabilities. `x` is
+checked as a row of `fit`: a feature count the encoders cannot carry, a
+non-finite value or, for the amplitude encoder, a zero sample is a
+`ValueError`; several rows or a `Dataset` is a `TypeError`. These are plain
+`ValueError`s, as `bind` raises, not `polypus.ConfigurationError`: `circuit`
+builds a circuit and runs nothing, so the same row that `run` rejects with a
+`ConfigurationError` is a `ValueError` here. The model is unchanged, and each
+call returns a new `Circuit`.
+
+**Expectation and Jacobian primitives.** `qml.expval(model, x, params, *, …)`
+and `qml.jacobian(model, x, params, *, wrt="params", …)` expose (g) to Python,
+for a training loop of the caller's own:
+
+- **Arguments.** `model` is a `polypus.qml.Model` (anything else, a
+  `TrainedModel` included, is a `TypeError`); `x` is rows or a `Dataset` (its
+  labels are not used); `params` is a list, tuple or NumPy array of exactly
+  `num_params` finite values, checked as `bind` checks them. The execution
+  arguments are `TrainedModel.run`'s, keyword-only, with its rules: `exact`
+  needs `infrastructure="local"` and `backend="polypus"`, `backend=None` goes
+  by infrastructure, `seed` is drawn when omitted and refused on `qmio` (C-7).
+- **Results.** `float64` `numpy.ndarray`s, C-contiguous, rows in row order:
+  `expval` → `(rows, observables)` with every readout observable, whatever the
+  decision (one column per class for `"argmax"`, the weighted sum for an
+  `Observable`); `jacobian` → `(rows, observables, num_params)` for
+  `wrt="params"`, `(rows, observables, features)` for `"inputs"`, and the tuple
+  of both for `"both"`, each identical to its separate call. With `exact=True`
+  they are the exact values, what `run(exact=True)` and `predict(exact=True)`
+  read; with shots, unbiased estimates. No manifest: the seed and `id` are
+  logged; pass a `seed` to replay.
+- **The input Jacobian** covers angle encoders, angle re-uploading and IQP
+  encoders (re-uploaded or not), through (g)'s chain rule (`Rz(x_i)` factor `1`,
+  `Rzz(x_i·x_j)` factors `x_j` and `x_i`). An amplitude or basis encoder, in the
+  `Encoder` or the `Ansatz`, has no derivative in the sample: `wrt="inputs"` or
+  `"both"` with one is a `polypus.ConfigurationError` naming it; `"params"`
+  takes any model.
+- **Circuits.** `expval` runs one per row; `jacobian` `2 · shifts` per row
+  ((g): every gate that reads a parameter, once per gate, every encoder gate
+  that reads the row, an IQP `Rzz` once for its two features), and no
+  unshifted circuit. With `exact=True` it is (g)'s adjoint differentiation
+  instead, one run per row and observable on
+  `NativeStatevectorBackend::run_adjoint`, unless the memory budget holds one
+  statevector of the width but not two: then the shifted circuits, logged at
+  `info` (as (f)). The result is the same to rounding either way.
+- **Execution.** One backend and one scheduler per call — one connection, one
+  `qraise` on CUNQA — closed on every way out, errors and Ctrl+C included. The
+  rows run in sequential blocks, each bound, run and dropped before the next
+  (the planner splits a block into waves), so the live circuits stay bounded.
+  Rows per block are the `QmlOracle`'s candidate window, sized by the same
+  function (`polypus_evaluation::candidate_window_size`, with rows for
+  candidates): derived from the host's cores, the backend's concurrency and
+  the circuits per row, never configured. The whole
+  block loop runs with the GIL released, and Ctrl+C raises `KeyboardInterrupt`
+  between blocks (the exact path included, which has no planner) and between
+  waves, and, during an exact block's adjoint runs, inside the block: the
+  calling thread, the one a Ctrl+C can be seen on, polls the run's interrupt
+  guard while they run on rayon's threads and stops them, with the same
+  `KeyboardInterrupt`. The result does not depend on the blocks: rows come back in row
+  order, and a call on some rows equals the concatenation of calls on chunks
+  of them.
+- **Checks.** Every one runs before a backend exists and raises
+  `polypus.ConfigurationError`, in order: `wrt`; `shots` and `n_qpus`, the
+  CUNQA allocation and `exact`; the rows against the model; `params`; the
+  model and rows against `wrt` ((g)'s errors); a `seed` on `qmio`. The
+  `TypeError` for `model` comes first.
+
+**The PyTorch layer (`polypus.torch`).** `polypus.torch.QuantumLayer(model, *,
+initial_params=None, <qml.expval's execution arguments>)` is a
+`torch.nn.Module` over a native `Model`, and `polypus.torch.from_trained(trained,
+**same)` is `QuantumLayer(trained.model, initial_params=trained.params, ...)`.
+It adds no quantum logic: everything it computes comes from the primitives
+above.
+
+- **Import.** PyTorch is an optional extra (`polypus-quantum[torch]`, floor =
+  the CPU torch CI tests). `import polypus` imports neither `polypus.torch` nor
+  `torch`; `import polypus.torch` without PyTorch is an `ImportError` naming the
+  extra.
+- **Arguments.** `model` is a `Model` (a `TrainedModel` is a `TypeError` naming
+  `from_trained`, which in turn takes only a `TrainedModel`, a `Model` being a
+  `TypeError` naming `QuantumLayer`). `initial_params` is checked as `bind`
+  checks it; without it the parameters are uniform on `[-π, π)` from PyTorch's
+  global generator. `seed` is `None` or an integer `>= 0` (`TypeError` /
+  `polypus.ConfigurationError` at construction). The other arguments are
+  `qml.expval`'s, names, defaults and rules, kept and checked by it at the first
+  forward pass, before a backend exists. The one trainable parameter is
+  `params`, 1-D, `num_params` values, `float64` unless the layer is converted
+  (`layer.float()`); `num_params` and `num_observables` are the model's.
+- **Forward = `expval`.** A `(batch, features)` tensor gives
+  `(batch, num_observables)`; a 1-D tensor is one sample and gives
+  `(num_observables,)`, the row of the 2-D result; another rank is a
+  `ValueError`. One `qml.expval` call per forward pass with the whole batch;
+  in exact mode the output is, bit for bit, `qml.expval(model, x, params,
+  exact=True)`. The rows' checks (empty batch, feature count, non-finite
+  values) are `expval`'s errors.
+- **Backward = the VJP of `jacobian`.** One `qml.jacobian` call per backward
+  pass, with `wrt` exactly what needs a gradient (`"params"`, `"inputs"`, or
+  `"both"`), none when nothing does; `∂L/∂θ = Σ_b,o g[b,o]·J_θ[b,o,:]` and
+  `∂L/∂x[b] = Σ_o g[b,o]·J_x[b,o,:]`. An amplitude or basis encoder raises
+  `jacobian`'s `polypus.ConfigurationError` only when the input's gradient is
+  wanted. The backward pass is not differentiable (no second derivatives); in
+  exact mode `torch.autograd.gradcheck` passes with its default tolerances.
+- **dtype and device.** The computation is `float64` on the CPU: the input and
+  parameter are converted at the boundary; the output comes back in the
+  input's dtype (`float64` for a non-floating input) and device, each gradient
+  in its tensor's dtype and device.
+- **Seeds (C-7).** With `seed=s`, forward pass `n` (counted per layer from 0,
+  not in the `state_dict`, so not thread-safe) calls `expval` with
+  `SeedSequence([s, n, 0]).generate_state(1, uint64)[0]` and its backward pass
+  calls `jacobian` with `[s, n, 1]` (a forward pass counts even when it raises,
+  so twin layers stay in step): two layers with the same `seed` replay the
+  same values and gradients step by step, every call has its own stream, and
+  neighbouring seeds share none. Without `seed`, `None` reaches every call,
+  which draws its own. A `seed` on `qmio` is `expval`'s `ConfigurationError` at
+  the first forward pass.
+- **Cost.** One backend per forward pass and one per backward pass (two
+  allocations per training step on CUNQA). Not supported: `torch.compile`,
+  `torch.vmap`. `copy.deepcopy` and `state_dict` keep `params` bit for bit.
+
+**Save format.** `TrainedModel.save(path)` writes, and `polypus.qml.load(path)`
+reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
+
+```json
+{"format": "polypus.qml.TrainedModel", "version": 1, "spec": {…}, "params": […]}
+```
+
+- Loading checks the format and the version, then rebuilds the model through the
+  same checks as `Model` and `bind`, so a corrupt or edited file is a
+  `ValueError` and never an inconsistent model (an edited
+  `strongly_entangling` range included). Loading only parses JSON: it
+  never runs code.
+- A new layer is a new variant of the `spec`'s layer list, which leaves every
+  existing file valid, so it keeps `version` 1 (`StronglyEntangling` was
+  added this way). The reverse does not hold: an older Polypus rejects, as a
+  `ValueError`, a file that uses a layer it does not know.
+- Every parameter reads back bit for bit (the file is written with
+  `serde_json`'s round-trip float formatting), so a loaded model predicts
+  exactly as the saved one.
+- `save` replaces any file at `path`, writing beside it and renaming over it,
+  so a failure never leaves a partial file. A disk failure is an `OSError`
+  (`FileNotFoundError`, `PermissionError` where they apply) naming the path.
+
+`qml.train` and `qml.predict` take Qiskit circuits only: an `Encoder` or
+`Ansatz` given to them is a `TypeError` before anything runs (C-8).
+
+**Enforcing test:**
+
+- **Rust:**
+  - `crates/polypus-qml/tests/contracts.rs`: (a)–(d), and the readout and
+    zero-sample guards;
+  - `crates/polypus-qml/tests/gradient_exactness.rs` and
+    `every_instruction_kind_is_classified` in `src/problem.rs`: (e);
+  - `crates/polypus-qml/tests/adjoint.rs` and
+    `the_adjoint_gradient_needs_an_exact_gradient_too` in `src/problem.rs`,
+    with `crates/polypus-sim/tests/adjoint.rs` for the simulator's derivative:
+    (e)'s adjoint differentiation;
+  - `crates/polypus-qml/tests/jacobian.rs`, the `untie_traced_*` tests in
+    `src/problem.rs`, the tests in `src/jacobian.rs` (a structure other than
+    sample 0's, an angle gate that is not a Pauli rotation, an opaque encoder
+    against `wrt`), and the trace tests in `src/model.rs` and the encoders:
+    (g);
+  - the `serde_tests` and `trained_model_tests` in `src/model.rs`: the save
+    format, exact round-trip and revalidation on load;
+  - the `native_*`, `a_minibatch_*`, `evaluate_full_*` and `the_factory_*`
+    tests in `crates/polypus-evaluation/src/qml_oracle.rs`, the `exact_*`
+    and `adjoint_*` tests and
+    `the_adjoint_needs_two_statevectors_and_falls_back_to_the_shift_with_one`
+    in `crates/polypus-infrastructure/src/native.rs`, `the_shift_fallback_*`
+    and `a_cancelled_exact_gradient_*` in `qml_oracle.rs`, and the `adam_*` and
+    `a_minibatched_*` tests in `crates/polypus-orchestration/src/dispatch.rs`:
+    (f);
+  - `a_bound_circuit_converts_gate_for_gate` and
+    `an_invalid_concrete_circuit_is_an_error_not_a_panic` in
+    `crates/polypus/src/bindings/qml.rs`: the bound circuit `circuit` returns
+    is, gate for gate, the one the model binds;
+    `final_shots_is_refused_only_with_exact` there: `fit`'s `final_shots`
+    with `exact=True`; and the primitive tests there (the seeded result
+    independent of the block size, row order, one backend created and closed
+    once, a cancellation or an error between blocks, a backend closed when no
+    scheduler can be built over it, the array conversion, the exact Jacobian
+    by the adjoint whatever the blocks, a Ctrl+C inside an exact block and the
+    watcher that stops it), with the window
+    tests in `crates/polypus-evaluation/src/qml_oracle.rs`
+    (`a_backend_*`, `the_lift_*`, `many_circuits_per_item_*`,
+    `the_window_is_never_zero`): `qml.expval`/`qml.jacobian`'s execution.
+- **Python:** `tests/python/test_qml_native.py` (construction, the option
+  sets, every construction check, `Dataset` splits and scaling, the
+  `qml.train`/`qml.predict` rejection), `test_qml_native_layers.py` (what each
+  layer and observable computes, against closed forms and bit-for-bit
+  equivalences, and predictions against the results they read),
+  `test_qml_native_training.py` (`fit`: supervised, unsupervised, exact,
+  sampled, minibatches, seeds, every layer trained, the convergence curve, every
+  rejection, Rotosolve's checks before the CUNQA seam and a Rotosolve climb),
+  `test_qml_native_inference.py` (`bind`, `predict`, `run`,
+  `ExactResult`, decision types, save/load and tampered files),
+  `test_qml_native_circuit.py` (`Model.circuit` and `TrainedModel.circuit`:
+  the shape and parameter names, the basis change, the drawings, counts and
+  exact probabilities identical to `run`'s, every rejection),
+  `test_qml_native_expval_jacobian.py` (`qml.expval` and `qml.jacobian`:
+  types, shapes and contiguity, `expval` against `run`/`predict`, the Jacobian
+  against finite differences for every layer and readout and against the
+  chain rule of a loss, chunks, seeds, shots, every rejection),
+  `test_torch_quantum_layer.py` (the PyTorch layer: forward bit for bit
+  `expval` in one call per batch, `gradcheck` with default tolerances for the
+  parameters and the inputs, the backward pass the same by the adjoint and by
+  the shift fallback, the `wrt` each backward pass asks for, amplitude
+  and basis encoders, dtype and device, shapes, the derived seeds and their
+  replay, training with SGD, Adam and LBFGS, `state_dict`, `deepcopy` and
+  `from_trained`), `test_torch_import.py` (the import without PyTorch, the
+  wheel's module, the extra's floor against CI's pin),
+  `test_qml_native.py`'s `TestModel` (`num_observables`, pickle and
+  `deepcopy`, an edited spec rejected),
+  `test_qml_native_initial_point_final_shots.py` (`fit`'s `initial_point` and
+  `final_shots`: every rejection before the CUNQA seam and their order, the
+  refusal of `final_shots` with `exact=True`, where each optimizer starts, a
+  model read back with `qml.load` trained on, and the final re-evaluation on
+  every sample, minibatches included, with its shots and every sample at the
+  seam), `test_typing_stubs.py`'s
+  `TestFitTypes` (the stub types of both), `TestPrimitiveTypes` (each
+  `wrt`'s result type) and `TestTorchTypes` (the layer's inline types), the native
+  QML cases of `test_interrupt.py` (Ctrl+C during `fit`, with and without a
+  `callback`, and during `qml.jacobian`, exact and sampled, and inside one
+  long exact block; the minibatch rescore runs with the GIL released),
+  `test_qml_adjoint.py` (the adjoint and the parameter-shift fallback give the
+  same `qml.jacobian` and `fit` with Adam, the fallback logged, and no memory
+  for one statevector the exact path's error; the same comparison for the
+  `QuantumLayer` backward is in `test_torch_quantum_layer.py`),
+  `TestNativeQmlChecksRaiseIt` in `test_configuration_errors.py` (every check
+  of `fit`, `predict`, `run`, `qml.expval` and `qml.jacobian` is a
+  `polypus.ConfigurationError` raised before any CUNQA call, and a primitive
+  runs every block on one allocation), and the `Model.fit` cases of `test_callback.py` (its
+  `callback`'s `TypeError` before the CUNQA seam and after `final_shots`, one
+  call per iteration for every optimizer, Adam's `evaluations`, a stop that
+  still sends the final batch, an exception raised as itself, with no call or
+  circuit after it and no final batch, a result unchanged by a callback that
+  never stops).
+
+---
+
+## C-12 · Call trace (`trace=` / `POLYPUS_CALL_TRACE`, JSON Lines schema v1)
+
+`polypus.train` and `polypus.run_quantum_circuit` can write a *call trace* of a
+run: a JSON Lines file that records how the run called its planner, its
+backend, its optimizer and QNG's metric, with sizes, indices, times and
+outcomes only. It shows how many batches and backend calls a run made, how
+many circuits and shots each carried and how long each took, without changing
+the run. The trace needs no Python and lives in the `trace` module of
+`polypus-orchestration`: `src/trace.rs` holds the schema's types and
+`CallTracer`, which creates, writes, caps and closes the file, and
+`src/trace/decorators.rs` the four decorators that record the calls
+(`TracingPlanner`, `TracingBackend`, `TracingObserver` and `TracingVariance`).
+`TrainFlow` and `RunCircuitFlow` take the tracer in their `trace` field. The
+edge (`crates/polypus/src/bindings/call_trace.rs`) opens the trace from the
+`trace` argument or from `POLYPUS_CALL_TRACE`, and closes it with the status
+Python sees.
+
+`trace` is keyword-only and defaults to `None`. It takes a `str` or an
+`os.PathLike` whose path is a `str` (the stubs type it
+`Optional[Union[str, PathLike[str]]]`); any other value, a `bytes` path
+included, is a `TypeError` raised before anything runs.
+
+### The format
+
+- **(a) Lines, clock and closed fields.** A trace is UTF-8 JSON Lines: one JSON
+  object per event, each line ended by `\n`. The `run` header is the first line
+  and `end` the last. Every `t` is in nanoseconds since `t0`, the moment the
+  tracer was created, on a monotonic clock, and every `dt` is a duration in
+  nanoseconds; the wall-clock time appears only in the header, as
+  `t0_unix_ns`. The fields are closed: each line has exactly the fields its
+  `ev` has in the table below, in that order, and a reader of `v: 1` rejects a
+  line with any other key, so a new field means a new version.
+
+| `ev` | One line per | Fields |
+|---|---|---|
+| `run` | run, first | `v` (`1`), `ev`, `flow` (`"train"` or `"run_circuit"`), `id` (the run's effective id), `polypus` (the version that ran it), `method` (the optimizer; `null` for `"run_circuit"`), `dims` (the parameters it optimizes; `null` for `"run_circuit"`), `backend`, `infrastructure`, `n_qpus`, `shots` (per circuit), `seed` (the effective seed; `null` for a run without one, that is `run_quantum_circuit` on `qmio`, while `train` always has one), `t0_unix_ns` |
+| `batch` | planner call that runs circuits: `evaluate`, `execute` or `execute_replicas` | `ev`, `k` (the batch's index in the run, from 0), `op` (the method), `n` (circuits), `shots` (per circuit), `t`, `dt`, `ok` (whether it succeeded) |
+| `wave` | backend call that runs circuits: `run_circuits` or `run_shots_distributed` | `ev`, `k` (its batch; `null` for a call outside a planner batch, which the flows never make), `w` (its index in the batch, from 0), `op`, `n` (circuits; replicas for `run_shots_distributed`), `shots` (the shots per circuit asked for in that call; for `run_shots_distributed`, the sum of `replicas`), `t`, `dt`, `ok`, and for `run_shots_distributed` only, `replicas` (the shots of each replica) |
+| `iter` | optimizer iteration | `ev`, `i` (the iteration, from 1), `evals` (candidates scored so far), `batches` (the batches recorded before it), `best` (`TrainProgress.best_fitness`; `null` if it is not finite), `t` (when the optimizer reported the iteration, taken before the `callback` runs) |
+| `metric` | call to QNG's metric (a `VarianceOracle`) | `ev`, `n` (the elements asked for: 1 for `variance`, `dims` for `variance_diagonal`), `t`, `dt` |
+| `end` | run, last | `ev`, `status` (h), `batches`, `waves`, `circuits` (the sum of the batches' `n`), `truncated` (f), `t` |
+
+A batch's `wave` lines come before its `batch` line, which is recorded once the
+batch returns. The counts of `end` cover every event recorded, those a size cap
+kept out of the file included (f): its `batches`, `waves` and `circuits` equal
+the `batch` lines, the `wave` lines and the sum of the batches' `n` unless
+`truncated` is `true`. The [JSON Schema](#json-schema-of-version-1) below gives
+each line's fields, their types and their ranges, but two rules of the table
+are beyond it, so a reader that validates with the schema alone accepts a line
+that breaks them: the order of the fields, which
+`header_and_events_serialize_to_schema_v1_lines` pins, and `replicas` being on
+the `run_shots_distributed` waves and on no other line, which the Python tests
+check with `check_trace` (`tests/python/call_trace.py`).
+
+- **(b) The trace changes nothing.** With or without a trace, a run returns the
+  same result, bit for bit (`TrainResult`, `RunResult`), raises the same error
+  and makes the same calls to its backend, with the same arguments, seeds
+  included, in the same order. A traced run is always observed: it gets a
+  `TracingObserver` even without a `callback`, so it takes C-5's observed path,
+  whose outcome an observer that never stops the run leaves bit for bit the
+  same. Its calls to the backend stay the same as long as the run's oracles
+  stop running circuits once a failure is recorded, as those of
+  `polypus-evaluation` do: an observed run stops at the end of the iteration
+  in which a failure was recorded (C-5).
+- **(c) Every method is forwarded.** Each decorator forwards every method of
+  its trait to what it wraps, with the same arguments, and returns what that
+  returns, error included, the methods the trait gives a default included:
+  `TracingBackend` the 10 of `QuantumBackend`, `TracingPlanner` the 5 of
+  `Planner`, `TracingVariance` the 2 of `VarianceOracle` and `TracingObserver`
+  the 1 of `TrainObserver`. A decorator that kept a default would make other
+  calls than the untraced run: the default `run_shots_distributed` would call
+  the wrapper's `run_circuits`, and the default `variance_diagonal` would call
+  `variance` once per element. A method added to one of these traits gets its
+  forwarding, and its test, in the same PR.
+
+### Opening, naming, capping and closing
+
+- **(d) Opening.** The `trace` argument wins over `POLYPUS_CALL_TRACE`. The
+  file is created new (`create_new`, that is `O_EXCL`): whatever is already at
+  the path, a symbolic link included (even a dangling one), is left as it is,
+  never overwritten or followed. On Unix the file's mode is `0640`, narrowed
+  by the umask. The trace never creates a directory. If the file cannot be
+  created (something is at the path, its directory does not exist, the
+  process may not write there), the run logs one warning, `call trace off`,
+  with the run's id, the path and the error, and goes on without a trace. The
+  trace is opened before the backend is created, so its clock counts the
+  backend's start-up (on CUNQA, raising the QPUs), and every way out of the
+  run from there closes it (h).
+- **(e) File names from the variable.** Unset or empty, `POLYPUS_CALL_TRACE` is
+  off. Otherwise, for a run whose `trace` is `None`, it names the directory
+  where the run writes its trace, in a file of its own:
+  `<id>-<pid>-<n>.jsonl`, for `train` and `run_quantum_circuit` alike, where
+  `<id>` is the run's effective id (the `id` of its result and of its
+  header), `<pid>` is the process's id and `<n>` counts, from 0, the traces
+  the variable named before in the process. The effective id ends in a UUID
+  v4, and that is what keeps apart the files of different runs: `<pid>` and
+  `<n>` repeat among the processes that share a directory (in two
+  containers, on two hosts, or once the system hands a pid on), and anyone
+  who can list the processes knows them. Every character of `<id>` outside
+  `[A-Za-z0-9._-]` becomes `_`, so the name stays inside the directory
+  whatever the id holds, and an id longer than 100 characters keeps its first
+  100, followed by `-` and eight hexadecimal digits of a hash of the whole id
+  (the low 32 bits of the 64-bit FNV-1a of its UTF-8 bytes), so two ids that
+  share their first 100 characters still get different names.
+- **(f) Size cap.** `POLYPUS_CALL_TRACE_MAX_MB` caps every trace, in MiB (2^20
+  bytes): a whole number, at least 1, in ASCII digits alone, without a sign,
+  spaces or a unit, whose size in bytes fits in 64 bits (so below 2^44 MiB);
+  unset, the cap is 512 MiB. An invalid value is logged with one warning per
+  process and ignored, so the default applies. The header counts toward the
+  cap. An event that would take the trace past it is counted
+  but not written, and neither is any event after it; the `end` line is
+  written regardless, with `"truncated": true`, so the file never grows past
+  the cap plus its `end` line.
+- **(g) Write failures.** Recording never fails the run. The first write error
+  (a full disk, an I/O error) logs one warning, `call trace stopped`, and stops
+  the trace: nothing more is written, `end` included. A trace without an `end`
+  line is incomplete, as is the trace of a process that was killed; its whole
+  lines can still be read, up to the first that is not JSON.
+- **(h) Status.** The `status` of `end` is the outcome Python sees: `"ok"` when
+  the run returns its result; `"cancelled"` when it raises
+  `KeyboardInterrupt`, as Ctrl+C does (it reaches the edge as the
+  `KeyboardInterrupt` of `check_signals` inside a backend error, not as a
+  cancelled run), and so do a cancelled run (`InfrastructureError::Cancelled`)
+  and an aborted one (`BackendError::Aborted`); `"error"` for any other
+  exception, one raised before the first batch included, such as by creating
+  the backend; and `"aborted"` when nobody closed the trace: a `CallTracer`
+  dropped without `finish` writes its `end` line with that status. Only the
+  first `finish` writes.
+- **(i) Content.** A trace holds the fields of the schema and nothing else:
+  never circuits, parameters, counts, environment variables or paths.
+- **(j) Cost.** Without a trace nothing is installed: the flows run on the
+  run's own planner, the same `Arc`, and add no decorator and no observer.
+  With one, each line is serialized into one reused buffer and written through
+  a 64 KiB buffer, flushed only after the header and when the trace is closed,
+  behind one mutex per trace, uncontended in practice. The event lines
+  (`batch`, `wave`, `iter`, `metric`) are written by a hand-written encoder that
+  produces exactly the bytes `serde_json` would, which
+  `event_lines_encode_as_serde_json_does` and
+  `event_lines_encode_as_serde_json_does_for_random_values` check.
+
+### JSON Schema of version 1
+
+The schema, exactly. `tests/python/call_trace.py` reads it from this block
+(`load_schema`), and the Python tests read every trace with its `read_trace`,
+which validates every whole line against it.
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "polypus-call-trace-v1",
+  "title": "Polypus call trace, version 1: one JSON object per line",
+  "oneOf": [
+    {"$ref": "#/$defs/run"}, {"$ref": "#/$defs/batch"}, {"$ref": "#/$defs/wave"},
+    {"$ref": "#/$defs/iter"}, {"$ref": "#/$defs/metric"}, {"$ref": "#/$defs/end"}
+  ],
+  "$defs": {
+    "run": {
+      "type": "object", "additionalProperties": false,
+      "required": ["v", "ev", "flow", "id", "polypus", "method", "dims", "backend", "infrastructure", "n_qpus", "shots", "seed", "t0_unix_ns"],
+      "properties": {
+        "v": {"const": 1},
+        "ev": {"const": "run"},
+        "flow": {"enum": ["train", "run_circuit"]},
+        "id": {"type": "string"},
+        "polypus": {"type": "string"},
+        "method": {"type": ["string", "null"]},
+        "dims": {"type": ["integer", "null"], "minimum": 1},
+        "backend": {"type": "string"},
+        "infrastructure": {"type": "string"},
+        "n_qpus": {"type": "integer", "minimum": 1},
+        "shots": {"type": "integer", "minimum": 1},
+        "seed": {"type": ["integer", "null"], "minimum": 0},
+        "t0_unix_ns": {"type": "integer", "minimum": 0}
+      }
+    },
+    "batch": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "k", "op", "n", "shots", "t", "dt", "ok"],
+      "properties": {
+        "ev": {"const": "batch"},
+        "k": {"type": "integer", "minimum": 0},
+        "op": {"enum": ["evaluate", "execute", "execute_replicas"]},
+        "n": {"type": "integer", "minimum": 0},
+        "shots": {"type": "integer", "minimum": 0},
+        "t": {"type": "integer", "minimum": 0},
+        "dt": {"type": "integer", "minimum": 0},
+        "ok": {"type": "boolean"}
+      }
+    },
+    "wave": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "k", "w", "op", "n", "shots", "t", "dt", "ok"],
+      "properties": {
+        "ev": {"const": "wave"},
+        "k": {"type": ["integer", "null"], "minimum": 0},
+        "w": {"type": "integer", "minimum": 0},
+        "op": {"enum": ["run_circuits", "run_shots_distributed"]},
+        "n": {"type": "integer", "minimum": 0},
+        "shots": {"type": "integer", "minimum": 0},
+        "t": {"type": "integer", "minimum": 0},
+        "dt": {"type": "integer", "minimum": 0},
+        "ok": {"type": "boolean"},
+        "replicas": {"type": "array", "items": {"type": "integer", "minimum": 0}}
+      }
+    },
+    "iter": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "i", "evals", "batches", "best", "t"],
+      "properties": {
+        "ev": {"const": "iter"},
+        "i": {"type": "integer", "minimum": 1},
+        "evals": {"type": "integer", "minimum": 0},
+        "batches": {"type": "integer", "minimum": 0},
+        "best": {"type": ["number", "null"]},
+        "t": {"type": "integer", "minimum": 0}
+      }
+    },
+    "metric": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "n", "t", "dt"],
+      "properties": {
+        "ev": {"const": "metric"},
+        "n": {"type": "integer", "minimum": 0},
+        "t": {"type": "integer", "minimum": 0},
+        "dt": {"type": "integer", "minimum": 0}
+      }
+    },
+    "end": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "status", "batches", "waves", "circuits", "truncated", "t"],
+      "properties": {
+        "ev": {"const": "end"},
+        "status": {"enum": ["ok", "error", "cancelled", "aborted"]},
+        "batches": {"type": "integer", "minimum": 0},
+        "waves": {"type": "integer", "minimum": 0},
+        "circuits": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"},
+        "t": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}
+```
+
+**Enforcing test:**
+
+- **Rust:**
+  - `crates/polypus-orchestration/src/trace.rs`:
+    `header_and_events_serialize_to_schema_v1_lines` (a);
+    `create_never_overwrites_a_file_or_follows_a_symlink` and
+    `trace_file_is_created_0640_or_stricter` (d);
+    `size_cap_truncates_and_still_closes` and
+    `worst_case_trace_fits_two_megabytes` (f);
+    `write_failure_warns_once_and_leaves_no_end` and
+    `a_transient_write_error_writes_nothing_more` (g);
+    `trace_drop_writes_aborted`, `drop_failure_logs_one_error`,
+    `finish_is_written_once` and
+    `finish_stamps_the_end_after_a_record_in_progress` (h);
+  - `crates/polypus-orchestration/src/trace/decorators.rs`:
+    `planner_trace_records_every_batch`,
+    `a_backend_wrapped_outside_a_batch_has_no_k` and
+    `iter_is_stamped_before_the_observer_and_metric_spans_the_oracle` (a);
+    `traced_calls_return_what_untraced_calls_return` (b);
+    `tracing_backend_forwards_every_method`,
+    `tracing_planner_forwards_every_method`,
+    `tracing_planner_passes_on_the_callers_cancel_token`,
+    `tracing_observer_forwards_every_call` and
+    `tracing_variance_forwards_both_methods` (c);
+  - `crates/polypus-orchestration/src/flow/trace_tests.rs`:
+    `trace_matches_method_shape`, `trace_iter_and_metric_events_are_exact`,
+    `run_circuit_flow_traces_its_replicas` and
+    `method_name_labels_every_method` (a);
+    `trace_does_not_change_the_outcome` and
+    `trace_keeps_the_error_and_the_backend_calls_of_a_failed_run` (b);
+    `trace_size_cap` (f); `trace_survives_write_errors` (g);
+    `trace_off_installs_nothing` (j);
+  - `crates/polypus-orchestration/tests/conformance_with_trace.rs`:
+    `conformance_with_trace`, the whole `polypus-backend-conformance` battery
+    on the native backend wrapped in a `TracingBackend` (c);
+  - `crates/polypus/src/bindings/call_trace.rs`:
+    `trace_file_name_is_sanitized` and `file_name_hash_is_fnv1a_64` (e);
+    `max_mb_parses_whole_mebibytes` (f);
+    `run_status_follows_the_python_error` and
+    `an_interrupt_inside_a_backend_error_is_cancelled` (h).
+- **Python:**
+  - `tests/python/test_call_trace.py`:
+    `test_trace_is_a_keyword_only_argument_that_defaults_to_none`,
+    `test_a_trace_that_is_not_a_path_raises_before_anything_runs` and
+    `test_a_bytes_trace_path_raises_before_anything_runs` (the argument);
+    `test_trace_header_fields`, `test_run_quantum_circuit_trace` and
+    `test_qng_metric_events_match_variance_calls` (a);
+    `test_trace_does_not_change_results` (b);
+    `test_same_trace_path_twice_keeps_the_first_file` and
+    `test_a_trace_in_a_missing_directory_runs_without_a_trace` (d);
+    `test_reader_stops_at_last_complete_line` (g);
+    `test_trace_status_follows_the_outcome` and
+    `test_an_error_before_the_first_batch_closes_the_trace_with_error` (h);
+  - `tests/python/test_call_trace_cunqa.py`: `test_cunqa_trace_forwarding` and
+    `test_cunqa_train_trace_forwarding` (b, c: the same calls and seeds at the
+    CUNQA seam, `run_shots_distributed` included, with and without a trace);
+    `test_a_failing_cunqa_job_closes_the_trace_with_error` (h);
+  - `tests/python/test_call_trace_process.py`:
+    `test_an_existing_path_or_symlink_is_left_alone_with_one_warning` and
+    `test_trace_file_mode_is_0640` (d);
+    `test_env_mode_writes_one_file_per_run`,
+    `test_a_file_named_after_the_pid_alone_does_not_stop_the_trace`,
+    `test_runs_with_the_same_pid_and_count_get_different_names`,
+    `test_the_trace_argument_wins_over_the_variable`,
+    `test_env_mode_creates_no_directory`, `test_an_empty_variable_is_off` and
+    `test_trace_id_is_sanitized` (d, e);
+    `test_max_mb_caps_the_trace` and
+    `test_an_invalid_max_mb_is_warned_about_once_and_ignored` (f);
+    `test_killed_run_leaves_a_readable_trace` (g);
+    `test_trace_contains_only_schema_fields` (i);
+    `test_native_trace_independent_of_budget` (the `batch` lines of a native
+    run are the same whatever `n_qpus`, memory budget and threads, as C-7
+    requires; only its waves follow the memory budget);
+  - `tests/python/test_call_trace_schema.py`: `test_trace_schema` (the traces
+    of every optimizer and of a circuit run, on one QPU and on several,
+    validate against the schema above),
+    `test_the_schema_rejects_what_v1_does_not_allow` and
+    `test_read_trace_validates_every_whole_line_that_is_json` (a);
+  - `tests/python/test_typing_stubs.py`: `TestTraceType` (the stub type of
+    `trace`, and the training guide's example type-checks);
+  - `tests/python/test_interrupt.py`: `test_trace_on_interrupt` (h: Ctrl+C
+    during a traced run closes its trace `cancelled`, a complete trace that
+    validates against the schema).

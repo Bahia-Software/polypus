@@ -1,7 +1,7 @@
 use crate::attach::{attach_for_cleanup, attach_or, InterpreterUnavailable};
 use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
-use crate::{record_cleanup_failure, BoundCircuit, QuantumBackend, RunParams};
+use crate::{record_cleanup_failure, BoundCircuit, CallSeeds, QuantumBackend, RunParams};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
@@ -111,6 +111,9 @@ pub struct CunqaBackend {
     /// (holding the family handle) so `Drop` needs nothing but this field, and
     /// so panic-safety is testable with an injected operation.
     release: ReleaseFn,
+    /// The seed of each call: the run's on the first, then one derived from it
+    /// and the call's index (contract C-7). QPU `k` of a call adds `k`.
+    seeds: CallSeeds,
 }
 
 /// Groups consecutive replicas that request the same shot count, as
@@ -132,8 +135,17 @@ fn shot_groups(shot_batches: &[u32]) -> Vec<(usize, u32, usize)> {
 }
 
 impl CunqaBackend {
+    /// The parameters of one call: `config` with the call's seed (C-7).
+    fn call_params(&self, config: &RunParams) -> RunParams {
+        RunParams {
+            seed: self.seeds.next(config.seed),
+            ..config.clone()
+        }
+    }
+
     /// Runs `qcs` on QPUs `qpu_offset..qpu_offset + qcs.len()` of the family,
-    /// the circuit on QPU `k` with seed `seed + k` (contracts C-1, C-7).
+    /// the circuit on QPU `k` with seed `seed + k`, `seed` the call's (contracts
+    /// C-1, C-7).
     fn submit(
         &self,
         qcs: &[BoundCircuit],
@@ -178,11 +190,10 @@ impl CunqaBackend {
                 kwargs
                     .set_item("sim_method", &self.sim_method)
                     .map_err(conv)?;
-                // Forwarded to each QPU's `run(..., seed=...)` on the Python side
-                // (contract C-7); `None` is simply omitted, so CUNQA's own
-                // unseeded default behavior is unchanged. Unlike the identical
-                // arrangement for Aer (`local.rs`), this seam is unverified — see
-                // `python/polypus_python/cunqa.py` for the caveats.
+                // The call's seed, forwarded to each QPU's `run(..., seed=...)`
+                // on the Python side with the QPU's offset (contract C-7); `None`
+                // is simply omitted, so CUNQA's own unseeded default behavior is
+                // unchanged.
                 if let Some(seed) = config.seed {
                     kwargs.set_item("seed", seed).map_err(conv)?;
                 }
@@ -213,18 +224,20 @@ impl QuantumBackend for CunqaBackend {
         qcs: &[BoundCircuit],
         config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
-        self.submit(qcs, config, 0)
+        self.submit(qcs, &self.call_params(config), 0)
     }
 
-    /// The default grouping (one call per batch size), with each call's QPU and
-    /// seed offset set to its first replica's index, so replica `i` runs on QPU
-    /// `i` with seed `seed + i` however the shots split (contract C-7).
+    /// The default grouping (one submission per batch size), with each
+    /// submission's QPU and seed offset set to its first replica's index, so
+    /// replica `i` runs on QPU `i` with seed `seed + i`, `seed` this call's,
+    /// however the shots split (contract C-7).
     fn run_shots_distributed(
         &self,
         qc: &BoundCircuit,
         shot_batches: &[u32],
         params: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+        let params = self.call_params(params);
         let mut out = Vec::with_capacity(shot_batches.len());
         for (start, shots, len) in shot_groups(shot_batches) {
             if shots == 0 {
@@ -324,6 +337,7 @@ impl CunqaBackend {
             walltime,
             transpiler: Box::new(IdentityTranspiler),
             release,
+            seeds: CallSeeds::new(),
         })
     }
 
@@ -340,6 +354,7 @@ impl CunqaBackend {
             walltime: None,
             transpiler: Box::new(IdentityTranspiler),
             release,
+            seeds: CallSeeds::new(),
         }
     }
 }
@@ -563,6 +578,15 @@ mod tests {
             seed: None,
             opt_level: OptLevel::default(),
         };
+        // An empty batch, and replicas apportioned no shots, have nothing to
+        // run, so they need no interpreter.
+        assert!(backend.run_circuits(&[], &params).unwrap().is_empty());
+        assert_eq!(
+            backend
+                .run_shots_distributed(&circuit, &[0, 0], &params)
+                .unwrap(),
+            [HashMap::new(), HashMap::new()]
+        );
         assert!(unavailable(
             backend.run_circuits(&[circuit], &params).map(|_counts| ())
         ));

@@ -1,11 +1,11 @@
 # Build the `polypus-quantum` distribution (the `polypus` PyO3 extension plus the
 # bundled `polypus_python` helpers) for every supported platform and publish it
 # to PyPI via Trusted Publishing (OIDC — no API tokens stored in the repo). On a
-# tag, the Rust crates are also published to crates.io (`publish-crates`, with
-# the CARGO_REGISTRY_TOKEN secret).
+# tag, the Rust crates are also published to crates.io (`publish-crates`, via
+# Trusted Publishing, or the CARGO_REGISTRY_TOKEN secret while one is set).
 #
 #   • Push a tag `vX.Y.Z`   → build everything and publish to PyPI and crates.io.
-#   • Either way the `gate` job runs first (tag ↔ Cargo.toml version, green
+#   • Either way the `gate` job runs first (version rules, green
 #     ci.yml for the commit) — see its comment for what is enforced when.
 #   • Manual "Run workflow" → build everything; the `target` input picks the index
 #                             (testpypi = default dry run, or pypi).
@@ -17,6 +17,9 @@
 #   Environment: `pypi` for PyPI, `testpypi` for TestPyPI (must match below).
 #
 # No abi3 is used, so wheels are built per CPython version (3.10–3.13).
+#
+# Rust is the version rust-toolchain.toml pins: maturin-action reads that file,
+# and `publish-crates` installs it.
 name: Release
 
 on:
@@ -39,10 +42,15 @@ jobs:
   # job, so a release that would be refused aborts before spending build minutes
   # (publish-* and the post-publish checks inherit it through their `needs`).
   #
-  #   1. Tag ↔ version. On a tag push the tag must be exactly `vX.Y.Z` (so a
-  #      malformed tag like `v.0.5.0` is rejected) and equal `v` + the
-  #      `[workspace.package].version` in the root Cargo.toml — the single source
-  #      of truth (docs/CONTRIBUTING.md). A manual run has no tag: skipped.
+  #   1. Version rules (.github/scripts/release_check.py). Always: the
+  #      `[workspace.package].version` in the root Cargo.toml — the single
+  #      source of truth (docs/CONTRIBUTING.md) — is `X.Y.Z` or `X.Y.Z-dev`, and
+  #      every internal pin in `[workspace.dependencies]` equals it. On a tag
+  #      push or a manual run with target=pypi, also: no `-dev` version, a
+  #      `## [X.Y.Z] - date` section in CHANGELOG.md, and the same version and
+  #      date in CITATION.cff. On a tag push, the tag is exactly `v` + the
+  #      version (so a malformed tag like `v.0.5.0` is rejected). A TestPyPI
+  #      dry run accepts a `-dev` version (published as `X.Y.Z.dev0`).
   #   2. Green CI for this exact commit. ci.yml never runs on a tag push, so we
   #      ask the Actions API for a successful ci.yml run whose head_sha is the
   #      commit this workflow builds (`github.sha`, the one every build job checks
@@ -69,33 +77,20 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # release_check.py needs tomllib (Python 3.11+).
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
       - id: version
-        name: Read workspace version
-        run: |
-          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Could not read an X.Y.Z version from Cargo.toml (got '$version')"
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Tag matches Cargo.toml version
+        name: Version, pins, CHANGELOG.md and CITATION.cff
         env:
-          TAG: ${{ github.ref_name }}
-          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          PUBLISH: ${{ github.event_name == 'push' || inputs.target == 'pypi' }}
         run: |
-          if [[ "$GITHUB_REF_TYPE" != tag ]]; then
-            echo "::notice::Not a tag push ($GITHUB_EVENT_NAME on $GITHUB_REF): tag/version check does not apply"
-            exit 0
-          fi
-          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::Tag '$TAG' is not of the form vX.Y.Z"
-            exit 1
-          fi
-          if [[ "$TAG" != "v$VERSION" ]]; then
-            echo "::error::Tag '$TAG' does not match Cargo.toml [workspace.package].version '$VERSION' (expected 'v$VERSION')"
-            exit 1
-          fi
-          echo "Tag $TAG matches Cargo.toml version $VERSION"
+          args=()
+          [[ -z "$TAG" ]] || args+=(--tag "$TAG")
+          [[ "$PUBLISH" != true ]] || args+=(--publish)
+          python .github/scripts/release_check.py "${args[@]}"
       - name: ci.yml is green for this commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -142,6 +137,7 @@ jobs:
     name: wheels (linux ${{ matrix.target }})
     needs: gate
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -182,13 +178,14 @@ jobs:
     name: wheels (macos-arm64 py${{ matrix.python-version }})
     needs: gate
     runs-on: macos-14
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
       - name: Build wheel
@@ -205,13 +202,14 @@ jobs:
     name: wheels (windows py${{ matrix.python-version }})
     needs: gate
     runs-on: windows-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
       - name: Build wheel
@@ -228,6 +226,7 @@ jobs:
     name: sdist
     needs: gate
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build sdist
@@ -239,6 +238,65 @@ jobs:
         with:
           name: wheels-sdist
           path: dist
+
+  # ── Pre-publish sdist smoke test ────────────────────────────────────────────
+  # The sdist is what Spack, EasyBuild and platforms without a wheel build from,
+  # and a broken one cannot be replaced on PyPI. Build it from source in a clean
+  # container (gcc, but no Rust, no ZeroMQ and no checkout of the sources) with
+  # the toolchain rust-toolchain.toml pins: the sdist does not ship that file, so
+  # it is read from the repository and installed as rustup's default. Then run
+  # the README Bell example, as `smoke` does for the wheels.
+  sdist-smoke:
+    name: smoke (sdist, build from source)
+    needs: sdist
+    runs-on: ubuntu-latest
+    container: python:3.11
+    timeout-minutes: 45
+    env:
+      POLYPUS_NO_AUTOCALIBRATE: "1"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: rust-toolchain.toml
+          sparse-checkout-cone-mode: false
+          path: repo
+      - name: Install Rust (rust-toolchain.toml channel)
+        run: |
+          set -eux
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' repo/rust-toolchain.toml)
+          test -n "$channel"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain "$channel"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wheels-sdist
+          path: dist
+      - name: Install the sdist (build from source)
+        run: |
+          set -eux
+          rustc --version
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir dist/*.tar.gz
+          python - <<'PY'
+          import importlib.util as u
+          assert u.find_spec("zmq") is None, "pyzmq leaked into the sdist build"
+          assert u.find_spec("cunqa") is None, "cunqa leaked into the sdist build"
+          PY
+      - name: Import and run the README Bell example
+        run: |
+          python - <<'PY'
+          import polypus
+          print("polypus", polypus.__version__)
+          bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+          result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
+          counts = result.counts[0]
+          print("counts:", counts)
+          assert sum(counts.values()) == 1000, counts
+          assert set(counts) == {"00", "11"}, counts
+          PY
 
   # ── Pre-publish wheel smoke test ────────────────────────────────────────────
   # ci.yml runs the test suite on Linux x86_64 only, so every built wheel is
@@ -276,7 +334,7 @@ jobs:
       # Importing polypus would otherwise calibrate the machine (#176).
       POLYPUS_NO_AUTOCALIBRATE: "1"
     steps:
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -306,11 +364,12 @@ jobs:
   # Publish to PyPI on a version tag, or a manual run with target=pypi.
   publish-pypi:
     name: Publish to PyPI
-    needs: [linux, macos, windows, sdist, smoke]
+    needs: [linux, macos, windows, sdist, sdist-smoke, smoke]
     if: >-
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
       (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment:
       name: pypi
       url: https://pypi.org/p/polypus-quantum
@@ -323,16 +382,18 @@ jobs:
           merge-multiple: true
           path: dist
       - name: Publish
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2, tip of release/v1
+        # Release tags of this action are cut from its release/v1 branch.
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           skip-existing: true
 
   # Manual dry run: publish to TestPyPI (the default target for a manual run).
   publish-testpypi:
     name: Publish to TestPyPI
-    needs: [linux, macos, windows, sdist, smoke]
+    needs: [linux, macos, windows, sdist, sdist-smoke, smoke]
     if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment:
       name: testpypi
       url: https://test.pypi.org/p/polypus-quantum
@@ -345,7 +406,8 @@ jobs:
           merge-multiple: true
           path: dist
       - name: Publish
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2, tip of release/v1
+        # Release tags of this action are cut from its release/v1 branch.
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           repository-url: https://test.pypi.org/legacy/
           skip-existing: true
@@ -354,11 +416,16 @@ jobs:
   # as PyPI. Every workspace crate is published, in dependency order (dev-deps
   # included), by .github/scripts/publish_crates.py; versions already on
   # crates.io are skipped, so "Re-run failed jobs" resumes a partial publish.
-  # Needs the CARGO_REGISTRY_TOKEN secret (repository or `crates-io`
-  # environment); the token is only exposed to the publish step.
+  #
+  # Authentication: crates.io Trusted Publishing (OIDC, no stored token) when no
+  # CARGO_REGISTRY_TOKEN secret is set (repository or `crates-io` environment),
+  # that secret otherwise. Trusted Publishing cannot create a crate, so a release
+  # that adds one needs the secret; without it the plan step refuses to start
+  # rather than leave the crate set half-published. One-time setup:
+  # docs/RELEASING.md#cratesio. The token is only exposed to the publish step.
   publish-crates:
     name: Publish to crates.io
-    needs: [gate, linux, macos, windows, sdist, smoke]
+    needs: [gate, linux, macos, windows, sdist, sdist-smoke, smoke]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -367,27 +434,48 @@ jobs:
       url: https://crates.io/crates/polypus
     permissions:
       contents: read
+      id-token: write   # OIDC token for crates.io Trusted Publishing
+    env:
+      USE_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # `cargo publish` verifies each crate by building it; the PyO3 crates'
       # build scripts need an interpreter.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
+      # Build every .crate against the others before anything is uploaded. On
+      # the Trusted Publishing path the uploads then skip their own
+      # verification build, which would not fit in the token's 30 minutes.
+      - name: Package and verify every crate
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo package --workspace --locked
       - name: Publish plan
-        run: python .github/scripts/publish_crates.py --plan
+        run: |
+          args=()
+          if [[ "$USE_TOKEN" != true ]]; then
+            echo "No CARGO_REGISTRY_TOKEN secret: using crates.io Trusted Publishing"
+            args=(--trusted-publishing)
+          fi
+          python .github/scripts/publish_crates.py --plan "${args[@]}"
+      - name: Authenticate with crates.io (Trusted Publishing)
+        id: auth
+        if: env.USE_TOKEN != 'true'
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
       - name: Publish in dependency order
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
+          # Each crate's verification build is a one-off.
+          CARGO_INCREMENTAL: "0"
         run: |
-          if [[ -z "$CARGO_REGISTRY_TOKEN" ]]; then
-            echo "::error::The CARGO_REGISTRY_TOKEN secret is not set"
-            exit 1
-          fi
-          python .github/scripts/publish_crates.py
+          args=()
+          [[ "$USE_TOKEN" == true ]] || args=(--trusted-publishing)
+          python .github/scripts/publish_crates.py "${args[@]}"
 
   # ── Post-publish clean-room smoke test ──────────────────────────────────────
   # Guarantee `pip install polypus-quantum` works for someone with NO relation to

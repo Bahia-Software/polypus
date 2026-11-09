@@ -17,13 +17,22 @@ import pytest
 
 # Each stubbed module of the package, with its stub relative to the package dir.
 # The submodules are created by the extension at import time (they are not
-# files), so their stubs are the only on-disk description of them.
+# files), so their stubs are the only on-disk description of them, except
+# `polypus.ask_tell`, `polypus.shor` and `polypus.torch`, pure-Python modules
+# typed inline.
 STUBS = {
     "polypus": "__init__.pyi",
     "polypus.qml": "qml.pyi",
     "polypus.circuits": "circuits/__init__.pyi",
     "polypus.circuits.templates": "circuits/templates.pyi",
+    "polypus.ask_tell": "ask_tell.py",
+    "polypus.shor": "shor.py",
+    "polypus.torch": "torch.py",
 }
+# The library a module needs to be imported: without it, the tests that import
+# the module skip (CI's latest leg installs it; POLYPUS_ALLOWED_SKIPS lists the
+# skips on the others).
+NEEDS = {"polypus.torch": "torch"}
 
 
 def _package_dir():
@@ -64,9 +73,270 @@ class TestStubFilesShipped:
 class TestStubsCoverPublicApi:
     @pytest.mark.parametrize("module_name", sorted(STUBS))
     def test_every_exported_name_has_a_stub(self, module_name):
+        if module_name in NEEDS:
+            pytest.importorskip(NEEDS[module_name])
         module = importlib.import_module(module_name)
         stub = _package_dir() / STUBS[module_name]
         missing = sorted(set(module.__all__) - _stub_names(stub))
         assert not missing, (
             f"{module_name}.__all__ names with no stub in {stub.name}: {missing}"
         )
+
+
+def _mypy(source, tmp_path):
+    """mypy's report on `source`, checked against the installed stubs."""
+    api = pytest.importorskip("mypy.api")
+    path = tmp_path / "snippet.py"
+    path.write_text(source, encoding="utf-8")
+    config = Path(__file__).resolve().parent / "stubtest_mypy.ini"
+    stdout, stderr, status = api.run(
+        [
+            "--config-file",
+            str(config),
+            "--cache-dir",
+            str(tmp_path / "mypy-cache"),
+            "--no-error-summary",
+            str(path),
+        ]
+    )
+    return status, stdout + stderr
+
+
+def _python_block(markdown, marker):
+    """The first ```python block of `markdown` that contains `marker`."""
+    for block in markdown.split("```python\n")[1:]:
+        code = block.split("```", 1)[0]
+        if marker in code:
+            return code
+    raise AssertionError(f"no python block contains {marker!r}")
+
+
+class TestOptionsType:
+    """`options` values are a `str` or a list/tuple of `str` (ADR 0005)."""
+
+    def test_the_documented_subprocess_example_type_checks(self, tmp_path):
+        docs = Path(__file__).resolve().parents[2] / "docs" / "backends.md"
+        example = _python_block(docs.read_text(encoding="utf-8"), "options={")
+        source = "from typing import Any\nqc: Any = None\n" + example
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+    def test_a_value_the_runtime_rejects_does_not_type_check(self, tmp_path):
+        # Proves the check above reads the stubs: an `int` value is a TypeError
+        # at run time, so mypy must reject it too.
+        source = (
+            "import polypus\n"
+            "polypus.run_quantum_circuit(\n"
+            '    "", shots=1, infrastructure="subprocess", options={"cwd": 1}\n'
+            ")\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 1 and "snippet.py:3: error" in report, report
+
+
+class TestAnsatzTypes:
+    """`Ansatz.strongly_entangling` takes any sequence of ranges and the
+    entangler `Literal` that `hardware_efficient` takes."""
+
+    def test_its_arguments_type_check(self, tmp_path):
+        source = (
+            "from polypus import qml\n"
+            "a: qml.Ansatz = qml.Ansatz(4).strongly_entangling(2)\n"
+            'a = a.strongly_entangling(2, ranges=(1, 3), entangler="cz")\n'
+            'a = a.strongly_entangling(1, ranges=[2], entangler="cx")\n'
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+    def test_an_unknown_entangler_does_not_type_check(self, tmp_path):
+        # A ValueError at run time, so mypy must reject it too.
+        source = (
+            "from polypus import qml\n"
+            'qml.Ansatz(4).strongly_entangling(1, entangler="cy")\n'
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 1 and "snippet.py:2: error" in report, report
+
+
+class TestFitTypes:
+    """`Model.fit` types `initial_point` and `final_shots` as `train` does."""
+
+    _FIT = (
+        "import numpy as np\n"
+        "import polypus\n"
+        "from polypus import qml\n"
+        "model = qml.Model(\n"
+        '    qml.Encoder(1).angle_encoder("ry"),\n'
+        "    qml.Ansatz(1).real_amplitudes(1),\n"
+        "    qml.Readout([qml.Z(0)]),\n"
+        ")\n"
+    )
+
+    def test_a_point_and_numpy_integer_shots_type_check(self, tmp_path):
+        source = self._FIT + (
+            "trained = qml.load('model.json')\n"
+            "model.fit([[0.1]], method=polypus.Adam(), initial_point=trained.params)\n"
+            "model.fit(\n"
+            "    [[0.1]], method=polypus.Adam(), initial_point=np.array([0.1, 0.2]),\n"
+            "    final_shots=np.int64(4096),\n"
+            ")\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+    def test_a_float_final_shots_does_not_type_check(self, tmp_path):
+        # A TypeError at run time, so mypy must reject it too.
+        source = self._FIT + (
+            "model.fit([[0.1]], method=polypus.Adam(), final_shots=4096.0)\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 1 and "snippet.py:9: error" in report, report
+
+
+class TestPrimitiveTypes:
+    """`qml.expval` returns an array; `qml.jacobian` an array, or a pair of
+    them with `wrt="both"`, and only the three `wrt` values type-check."""
+
+    _MODEL = (
+        "import numpy as np\n"
+        "import numpy.typing as npt\n"
+        "from polypus import qml\n"
+        "model = qml.Model(\n"
+        '    qml.Encoder(1).angle_encoder("ry"),\n'
+        "    qml.Ansatz(1).real_amplitudes(1),\n"
+        "    qml.Readout([qml.Z(0)]),\n"
+        ")\n"
+    )
+
+    def test_each_wrt_types_its_result(self, tmp_path):
+        source = self._MODEL + (
+            "values: npt.NDArray[np.float64] = qml.expval(\n"
+            "    model, qml.Dataset([[0.1]]), np.array([0.1, 0.2]), exact=True\n"
+            ")\n"
+            "by_params: npt.NDArray[np.float64] = qml.jacobian(model, [[0.1]], [0.1, 0.2])\n"
+            "by_inputs: npt.NDArray[np.float64] = qml.jacobian(\n"
+            '    model, [[0.1]], [0.1, 0.2], wrt="inputs", shots=64, seed=1\n'
+            ")\n"
+            "pair: tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]] = (\n"
+            '    qml.jacobian(model, [[0.1]], (0.1, 0.2), wrt="both")\n'
+            ")\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+    def test_both_is_not_an_array_and_an_unknown_wrt_does_not_type_check(
+        self, tmp_path
+    ):
+        # Both are errors at run time (a tuple, a ConfigurationError).
+        source = self._MODEL + (
+            "bad: npt.NDArray[np.float64] = qml.jacobian(\n"
+            '    model, [[0.1]], [0.1, 0.2], wrt="both"\n'
+            ")\n"
+            'qml.jacobian(model, [[0.1]], [0.1, 0.2], wrt="theta")\n'
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 1, report
+        assert "snippet.py:9: error" in report, report
+        assert "snippet.py:12: error" in report, report
+
+
+class TestAskTellTypes:
+    def test_only_the_optuna_adapter_types_close(self, tmp_path):
+        # `from_optuna` returns an `OptunaAskTell`, the other adapters an
+        # `AskTell`, which has no `close()`.
+        source = (
+            "from typing import Any\n"
+            "from polypus.ask_tell import from_optuna, from_pycma\n"
+            "library: Any = None\n"
+            "from_optuna(library, 2, 2).close()\n"
+            "from_pycma(library).close()\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 1, report
+        assert "snippet.py:4:" not in report, report
+        assert 'snippet.py:5: error: "AskTell" has no attribute "close"' in report
+
+
+class TestTraceType:
+    """`trace` is `str | os.PathLike[str] | None`, keyword-only (contract C-12)."""
+
+    PRELUDE = (
+        "import pathlib\n"
+        "from typing import Any\n"
+        "import polypus\n"
+        "qc: Any = None\n"
+        "f: Any = None\n"
+    )
+    TRAIN = (
+        "polypus.train(qc, polypus.SPSA(), 64, 1, 2, f, 'local', 1, 1, 'x', trace={})\n"
+    )
+    RUN = "polypus.run_quantum_circuit(qc, 64, 'local', trace={})\n"
+
+    def test_paths_type_check(self, tmp_path):
+        source = self.PRELUDE
+        for call in (self.TRAIN, self.RUN):
+            source += call.format("'t.jsonl'") + call.format("pathlib.Path('t.jsonl')")
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+    def test_a_number_does_not_type_check(self, tmp_path):
+        # Proves the check above reads the stubs: an `int` is a TypeError at
+        # run time, so mypy must reject it too, as a value of the wrong type.
+        source = self.PRELUDE + self.TRAIN.format("1") + self.RUN.format("1")
+        status, report = _mypy(source, tmp_path)
+        assert status != 0 and "trace" in report, report
+        for function in ("train", "run_quantum_circuit"):
+            message = f'Argument "trace" to "{function}" has incompatible type "int"'
+            assert message in report, report
+
+    def test_the_documented_trace_example_type_checks(self, tmp_path):
+        docs = Path(__file__).resolve().parents[2] / "docs" / "guide" / "training.md"
+        example = _python_block(docs.read_text(encoding="utf-8"), 'trace="run1.jsonl"')
+        source = (
+            "import json\n"
+            "from typing import Any\n"
+            "import polypus\n"
+            "qc: Any = None\n"
+            "cost: Any = None\n"
+        ) + example
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+
+class TestTorchTypes:
+    """`polypus.torch` is typed inline against PyTorch's own types."""
+
+    _LAYER = (
+        "import torch\n"
+        "from polypus import qml\n"
+        "from polypus.torch import QuantumLayer, from_trained\n"
+        "model = qml.Model(\n"
+        '    qml.Encoder(1).angle_encoder("ry"),\n'
+        "    qml.Ansatz(1).real_amplitudes(1),\n"
+        "    qml.Readout([qml.Z(0)]),\n"
+        ")\n"
+    )
+
+    def test_the_layer_is_a_module_that_returns_a_tensor(self, tmp_path):
+        pytest.importorskip("torch")
+        source = self._LAYER + (
+            "layer: torch.nn.Module = QuantumLayer(model, exact=True, seed=1)\n"
+            "out: torch.Tensor = QuantumLayer(model)(torch.zeros(2, 1))\n"
+            "width: int = QuantumLayer(model).num_observables\n"
+            "net = torch.nn.Sequential(QuantumLayer(model), torch.nn.Linear(width, 1))\n"
+            "trained = from_trained(qml.load('model.json'), shots=64)\n"
+            "QuantumLayer(model, initial_params=torch.zeros(2))\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+    def test_a_model_is_not_a_trained_model(self, tmp_path):
+        # Both are TypeErrors at run time, so mypy must reject them too.
+        pytest.importorskip("torch")
+        source = self._LAYER + (
+            "from_trained(model)\nQuantumLayer(model.bind([0.1, 0.2]))\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 1, report
+        assert "snippet.py:9: error" in report, report
+        assert "snippet.py:10: error" in report, report

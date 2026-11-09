@@ -102,6 +102,7 @@ fn setup(f: Fitness, dimensions: u32, generations: u32, seed: u64) -> (Algorithm
         patience: 30,
         restarts: 0,
         seed: Some(seed),
+        initial_point: None,
     };
     (args, log)
 }
@@ -483,6 +484,7 @@ fn trajectory(
         patience: 10,
         restarts,
         seed: Some(9),
+        initial_point: None,
     });
     let candidates = log
         .lock()
@@ -608,6 +610,7 @@ fn constant_args(value: f64, restarts: u32) -> AlgorithmCmaEsArgs {
         patience: 10,
         restarts,
         seed: Some(11),
+        initial_point: None,
     }
 }
 
@@ -648,6 +651,7 @@ fn nan_and_infinite_candidates_rank_below_finite_ones() {
         patience: 30,
         restarts: 0,
         seed: Some(12),
+        initial_point: None,
     });
     // The NaN and -∞ candidates never become the best, and the finite ones
     // still drive the search to the sphere's optimum.
@@ -691,6 +695,7 @@ fn short_oracle_returns_an_error_not_a_panic() {
         patience: 2,
         restarts: 2,
         seed: Some(13),
+        initial_point: None,
     };
     // First batch: 4 + ⌊3 ln 4⌋ = 8 candidates.
     assert_eq!(
@@ -734,9 +739,10 @@ fn invalid_configuration_is_rejected_before_any_oracle_call() {
         patience: 5,
         restarts: 0,
         seed: Some(14),
+        initial_point: None,
     };
     type Tweak = fn(AlgorithmCmaEsArgs) -> AlgorithmCmaEsArgs;
-    let cases: [(&str, Tweak); 12] = [
+    let cases: [(&str, Tweak); 13] = [
         ("dimensions", |a| AlgorithmCmaEsArgs { dimensions: 0, ..a }),
         ("generations", |a| AlgorithmCmaEsArgs {
             generations: 0,
@@ -775,6 +781,8 @@ fn invalid_configuration_is_rejected_before_any_oracle_call() {
             restarts: 1,
             ..a
         }),
+        // 0 would compare the best fitness with itself and stop at once.
+        ("patience", |a| AlgorithmCmaEsArgs { patience: 0, ..a }),
     ];
     for (parameter, tweak) in cases {
         let calls = Arc::new(Mutex::new(0));
@@ -842,6 +850,7 @@ fn error_messages_name_the_rule() {
         patience: 5,
         restarts: 0,
         seed: None,
+        initial_point: None,
     };
     assert_eq!(
         message(AlgorithmCmaEsArgs {
@@ -892,4 +901,63 @@ fn unseeded_runs_work() {
         ..setup(sphere, 2, 300, 0).0
     });
     assert!(outcome.best_fitness > -1e-8, "{:e}", outcome.best_fitness);
+}
+
+#[test]
+fn check_preconditions_rejects_what_optimize_rejects() {
+    // The same rules, without running anything (`train` checks before any
+    // backend exists).
+    let check = |dimensions, generations, sigma0, patience, initial_point: Option<&[f64]>| {
+        AlgorithmCmaEs::check_preconditions(
+            dimensions,
+            None,
+            generations,
+            sigma0,
+            0,
+            patience,
+            initial_point,
+        )
+    };
+    assert_eq!(check(3, 10, 1.0, 5, None), Ok(()));
+    assert_eq!(check(3, 10, 1.0, 5, Some(&[0.1, 0.2, 0.3])), Ok(()));
+    for (parameter, result) in [
+        ("dimensions", check(0, 10, 1.0, 5, None)),
+        ("generations", check(3, 0, 1.0, 5, None)),
+        ("sigma0", check(3, 10, 0.0, 5, None)),
+        ("patience", check(3, 10, 1.0, 0, None)),
+        ("initial_point", check(3, 10, 1.0, 5, Some(&[0.1, 0.2]))),
+    ] {
+        assert!(
+            matches!(&result, Err(OptimizerError::InvalidConfig { parameter: p, .. }) if *p == parameter),
+            "{parameter}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn a_stop_in_the_last_generation_ends_the_run_converged() {
+    // patience 1 on a flat landscape: each run stagnates after 2 generations.
+    // With a budget of exactly 2 the stop comes in the last generation, and a
+    // restart has nothing left to run, so the run ends there, converged.
+    let (args, log) = setup(flat, 2, 2, 3);
+    let outcome = run(AlgorithmCmaEsArgs {
+        tolerance: 1e-9,
+        patience: 1,
+        restarts: 1,
+        ..args
+    });
+    assert_eq!(batch_sizes(&log), vec![6, 6]);
+    assert_eq!(outcome.iterations_run, 2);
+    assert!(outcome.converged);
+    // One generation more and the restart runs: a population of 12, cut short
+    // by the budget, so not converged.
+    let (args, log) = setup(flat, 2, 3, 3);
+    let outcome = run(AlgorithmCmaEsArgs {
+        tolerance: 1e-9,
+        patience: 1,
+        restarts: 1,
+        ..args
+    });
+    assert_eq!(batch_sizes(&log), vec![6, 6, 12]);
+    assert!(!outcome.converged);
 }

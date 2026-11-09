@@ -1507,6 +1507,55 @@ mod tests {
     }
 
     #[test]
+    fn config_json_maps_every_results_format_and_rejects_the_rest() {
+        for (format, processing, formatting) in [
+            ("binary_count", 1, 3),
+            ("raw", 1, 2),
+            ("binary", 2, 2),
+            ("squash_binary_result_arrays", 2, 6),
+        ] {
+            let config = build_config_json(100, None, format, 0).unwrap();
+            let results = &config["$data"]["results_format"]["$data"];
+            assert_eq!(results["format"]["$value"], processing, "{format}");
+            assert_eq!(results["transforms"]["$value"], formatting, "{format}");
+        }
+        match build_config_json(100, None, "csv", 0) {
+            Err(QmioError::Config(message)) => assert_eq!(
+                message,
+                "unsupported results format 'csv'; only 'binary_count' is implemented"
+            ),
+            other => panic!("expected QmioError::Config, got {other:?}"),
+        }
+    }
+
+    /// The config is built before any socket is opened, so an unknown results
+    /// format fails the run without contacting the endpoint.
+    #[test]
+    fn a_run_with_an_unknown_results_format_fails_before_connecting() {
+        let backend = QmioBackend::new(
+            "tcp://qmio.example:5556".to_string(),
+            QmioProgramFormat::OpenQasm,
+            0,
+            None,
+            "csv".to_string(),
+        )
+        .unwrap();
+        let params = RunParams {
+            id: "qmio-csv".to_string(),
+            shots: 8,
+            seed: None,
+            opt_level: crate::OptLevel::default(),
+        };
+        match backend.run_circuits(&[BoundCircuit::Native(bell())], &params) {
+            Err(BackendError::External(boxed)) => assert!(
+                matches!(boxed.downcast_ref::<QmioError>(), Some(QmioError::Config(m)) if m.contains("'csv'")),
+                "{boxed:?}"
+            ),
+            other => panic!("expected BackendError::External(QmioError::Config), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn pickle_request_text_roundtrips_to_str_tuple() {
         let payload =
             pickle_request(&ProgramPayload::Text("OPENQASM 3.0;".into()), "{\"a\":1}").unwrap();
@@ -1663,10 +1712,14 @@ mod tests {
         // native.rs and native_circuit_path.rs are unaffected).
         pyo3::Python::initialize();
         let circuit = pyo3::Python::attach(|py| crate::QiskitCircuit::into_bound(py.None()));
-        let err = backend(QmioProgramFormat::OpenQasm)
-            .serialize_program(&circuit)
-            .unwrap_err();
-        assert!(matches!(err, QmioError::UnsupportedCircuit));
+        for format in [
+            QmioProgramFormat::OpenQasm,
+            QmioProgramFormat::QirText,
+            QmioProgramFormat::QirBitcode,
+        ] {
+            let err = backend(format).serialize_program(&circuit).unwrap_err();
+            assert!(matches!(err, QmioError::UnsupportedCircuit), "{format:?}");
+        }
     }
 
     #[test]
@@ -1945,6 +1998,243 @@ mod tests {
         server.join().unwrap();
     }
 
+    /// An endpoint nothing listens on: `zeromq` keeps retrying the TCP connect
+    /// on its own, so each attempt ends at the receive timeout, the next one is
+    /// backed off, and once the retries are spent the call fails with the last
+    /// attempt's typed `Connect` error instead of hanging.
+    #[test]
+    fn an_unreachable_endpoint_fails_with_connect_after_the_retries() {
+        // A port that was just free: connecting to it is refused.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let endpoint = format!("tcp://127.0.0.1:{port}");
+        let backend = QmioBackend::new(
+            endpoint.clone(),
+            QmioProgramFormat::OpenQasm,
+            0,
+            None,
+            "binary_count".to_string(),
+        )
+        .unwrap()
+        .with_test_timeouts(100, 1, 10_000);
+        let params = RunParams {
+            id: "qmio-unreachable".to_string(),
+            shots: 8,
+            seed: None,
+            opt_level: crate::OptLevel::default(),
+        };
+        let started = Instant::now();
+        let err = backend
+            .run_circuits(&[BoundCircuit::Native(bell())], &params)
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5), "{err:?}");
+        let qmio_err = match &err {
+            BackendError::External(boxed) => boxed
+                .downcast_ref::<QmioError>()
+                .expect("the boxed error must be the original QmioError"),
+            other => panic!("expected BackendError::External(QmioError), got: {other:?}"),
+        };
+        match qmio_err {
+            QmioError::Connect {
+                endpoint: reported,
+                source,
+            } => {
+                assert_eq!(reported, &endpoint);
+                assert_eq!(source, "connect timed out after 100 ms");
+            }
+            other => panic!("expected QmioError::Connect, got: {other:?}"),
+        }
+        assert_eq!(
+            qmio_err.to_string(),
+            format!(
+                "could not connect to QMIO endpoint {endpoint}: connect timed out after 100 ms"
+            )
+        );
+    }
+
+    /// An endpoint without a transport (`tcp://`) is refused by `zeromq` before
+    /// any network IO, so no attempt waits for the receive timeout and the call
+    /// fails with a typed `Connect` error that names the problem.
+    #[test]
+    fn a_malformed_endpoint_fails_with_connect_naming_the_problem() {
+        let backend = QmioBackend::new(
+            "qmio.example:5556".to_string(),
+            QmioProgramFormat::OpenQasm,
+            0,
+            None,
+            "binary_count".to_string(),
+        )
+        .unwrap()
+        .with_test_timeouts(60_000, 1, 120_000);
+        let params = RunParams {
+            id: "qmio-malformed".to_string(),
+            shots: 8,
+            seed: None,
+            opt_level: crate::OptLevel::default(),
+        };
+        let started = Instant::now();
+        let err = backend
+            .run_circuits(&[BoundCircuit::Native(bell())], &params)
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5), "{err:?}");
+        match &err {
+            BackendError::External(boxed) => match boxed.downcast_ref::<QmioError>() {
+                Some(QmioError::Connect { endpoint, source }) => {
+                    assert_eq!(endpoint, "qmio.example:5556");
+                    assert!(source.contains("Could not parse transport"), "{source}");
+                }
+                other => panic!("expected QmioError::Connect, got: {other:?}"),
+            },
+            other => panic!("expected BackendError::External(QmioError), got: {other:?}"),
+        }
+    }
+
+    /// The whole-call budget caps the retries: with a thousand allowed against an
+    /// endpoint nothing listens on, the call stops at the first attempt that would
+    /// start past the deadline and fails with the last attempt's error.
+    #[test]
+    fn the_global_timeout_stops_the_retries() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let backend = QmioBackend::new(
+            format!("tcp://127.0.0.1:{port}"),
+            QmioProgramFormat::OpenQasm,
+            0,
+            None,
+            "binary_count".to_string(),
+        )
+        .unwrap()
+        .with_test_timeouts(50, 1_000, 300);
+        let params = RunParams {
+            id: "qmio-deadline".to_string(),
+            shots: 8,
+            seed: None,
+            opt_level: crate::OptLevel::default(),
+        };
+        let started = Instant::now();
+        let err = backend
+            .run_circuits(&[BoundCircuit::Native(bell())], &params)
+            .unwrap_err();
+        // A thousand attempts with the linear backoff would take hours.
+        assert!(started.elapsed() < Duration::from_secs(5), "{err:?}");
+        match &err {
+            BackendError::External(boxed) => match boxed.downcast_ref::<QmioError>() {
+                Some(QmioError::Connect { source, .. }) => {
+                    assert_eq!(source, "connect timed out after 50 ms");
+                }
+                other => panic!("expected QmioError::Connect, got: {other:?}"),
+            },
+            other => panic!("expected BackendError::External(QmioError), got: {other:?}"),
+        }
+    }
+
+    /// One circuit per call over the single REQ endpoint, and `close` is
+    /// idempotent (nothing was ever connected here).
+    #[test]
+    fn capabilities_and_an_idempotent_close() {
+        let backend = QmioBackend::new(
+            "tcp://qmio.example:5556".to_string(),
+            QmioProgramFormat::OpenQasm,
+            0,
+            None,
+            "binary_count".to_string(),
+        )
+        .unwrap();
+        let capabilities = backend.capabilities();
+        assert_eq!(capabilities.max_concurrency, 1);
+        assert!(capabilities.supports_shot_distribution);
+        backend.close();
+        backend.close();
+    }
+
+    /// The message of every error names what failed, with its context.
+    #[test]
+    fn every_error_message_names_what_failed() {
+        let endpoint = || "tcp://qmio.example:5556".to_string();
+        let cases = [
+            (
+                QmioError::Circuit("bad".to_string()),
+                "could not build a circuit for QMIO: bad",
+            ),
+            (
+                QmioError::QirBitcode("no llvm-as".to_string()),
+                "QIR bitcode export failed: no llvm-as",
+            ),
+            (
+                QmioError::Config("bad option".to_string()),
+                "invalid QMIO config: bad option",
+            ),
+            (
+                QmioError::Pickle("truncated".to_string()),
+                "pickle error: truncated",
+            ),
+            (
+                QmioError::Json("not JSON".to_string()),
+                "reply JSON error: not JSON",
+            ),
+            (
+                QmioError::Schema("no counts".to_string()),
+                "unexpected QMIO reply schema: no counts",
+            ),
+            (
+                QmioError::Connect {
+                    endpoint: endpoint(),
+                    source: "refused".to_string(),
+                },
+                "could not connect to QMIO endpoint tcp://qmio.example:5556: refused",
+            ),
+            (
+                QmioError::Send("closed".to_string()),
+                "failed to send request to QMIO: closed",
+            ),
+            (
+                QmioError::Recv("closed".to_string()),
+                "failed to receive reply from QMIO: closed",
+            ),
+            (
+                QmioError::Timeout {
+                    endpoint: endpoint(),
+                    attempts: 3,
+                    millis: 250,
+                },
+                "no reply from QMIO endpoint tcp://qmio.example:5556 within 250 ms after 3 attempt(s)",
+            ),
+            (
+                QmioError::ResultUnknown {
+                    endpoint: endpoint(),
+                    detail: "no reply within 250 ms".to_string(),
+                },
+                "the request to QMIO endpoint tcp://qmio.example:5556 was delivered but no reply \
+                 was received (no reply within 250 ms); the QPU may have executed it, so it was \
+                 not resent (to avoid a double execution)",
+            ),
+            (
+                QmioError::ResponseTooLarge {
+                    bytes: 2048,
+                    limit: 1024,
+                },
+                "QMIO reply of 2048 bytes exceeds the 1024-byte safety limit",
+            ),
+            (
+                QmioError::Runtime("no threads".to_string()),
+                "could not build the Tokio runtime for the QMIO backend: no threads",
+            ),
+            (
+                QmioError::Internal("socket absent".to_string()),
+                "internal QMIO backend error: socket absent",
+            ),
+        ];
+        for (error, message) in cases {
+            assert_eq!(error.to_string(), message);
+        }
+    }
+
     /// Two callers hitting the **same** [`QmioBackend`] concurrently must be
     /// serialised over the single REQ socket and both complete correctly — the
     /// property the async-mutex hardening protects. It exercises the guard being
@@ -2167,6 +2457,17 @@ mod tests {
         matches!(result, Err(QmioError::Schema(_)))
     }
 
+    /// `results` and `data` are tried as register maps first; a list or an empty
+    /// object is none, so the counts come from the fallback scan.
+    #[test]
+    fn counts_from_json_falls_back_when_results_and_data_are_no_register_maps() {
+        let reply = json!({"data": {}, "payload": {"01": 4}, "results": []});
+        assert_eq!(
+            counts_from_json(&reply).unwrap(),
+            HashMap::from([("01".to_string(), 4)])
+        );
+    }
+
     #[test]
     fn counts_from_json_skips_integer_metric_blocks_before_the_counts() {
         // `data` is tried before the register scan and `execution_metrics` sorts
@@ -2361,6 +2662,77 @@ mod tests {
             value = PickleValue::List(vec![value]);
         }
         assert!(is_schema_err(pickle_to_json(&value)));
+    }
+
+    /// Set members and dict keys are hashable values; each kind has a JSON image
+    /// too, so an odd set or key elsewhere in a reply never rejects it.
+    #[test]
+    fn pickle_to_json_converts_every_hashable_kind() {
+        use serde_pickle::HashableValue as H;
+        let hashable = |value: PickleValue| value.into_hashable().unwrap();
+        let cases = [
+            (H::None, json!(null)),
+            (H::Bool(true), json!(true)),
+            (H::I64(-3), json!(-3)),
+            (
+                hashable(big_int_value("18446744073709551615")),
+                json!(18446744073709551615u64),
+            ),
+            (
+                hashable(big_int_value("123456789012345678901234567890")),
+                json!("123456789012345678901234567890"),
+            ),
+            (H::F64(1.5), json!(1.5)),
+            (H::String("s".into()), json!("s")),
+            (H::Bytes(vec![9]), json!(null)),
+            (
+                hashable(PickleValue::Tuple(vec![
+                    PickleValue::I64(1),
+                    PickleValue::String("a".into()),
+                ])),
+                json!([1, "a"]),
+            ),
+            (
+                hashable(PickleValue::FrozenSet([H::I64(7)].into())),
+                json!([7]),
+            ),
+        ];
+        for (member, expected) in cases {
+            let set = PickleValue::Set([member.clone()].into());
+            assert_eq!(
+                pickle_to_json(&set).unwrap(),
+                json!([expected]),
+                "{member:?}"
+            );
+        }
+
+        // A key that is neither a string nor an integer keeps its Debug form.
+        let tuple_key = H::Tuple(vec![H::I64(1)]);
+        let dict = PickleValue::Dict(
+            [
+                (H::I64(3), PickleValue::I64(1)),
+                (tuple_key.clone(), PickleValue::I64(2)),
+            ]
+            .into(),
+        );
+        let mut expected = serde_json::Map::new();
+        expected.insert("3".to_string(), json!(1));
+        expected.insert(format!("{tuple_key:?}"), json!(2));
+        assert_eq!(
+            pickle_to_json(&dict).unwrap(),
+            serde_json::Value::Object(expected)
+        );
+    }
+
+    #[test]
+    fn pickle_to_json_bounds_the_nesting_of_hashable_values_too() {
+        use serde_pickle::HashableValue as H;
+        let mut member = H::I64(0);
+        for _ in 0..(MAX_PICKLE_DEPTH + 10) {
+            member = H::Tuple(vec![member]);
+        }
+        let set = PickleValue::Set([member].into());
+        assert!(is_schema_err(pickle_to_json(&set)));
     }
 
     #[test]

@@ -1,0 +1,32 @@
+[package]
+name = "polypus-qml"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust quantum machine learning for Polypus: datasets, layered variational models (encoders, ansatz, convolution, pooling), Pauli readout and losses. Produces polypus-circuit circuits; execution and optimizers stay decoupled. No PyO3, no Python."
+
+[lib]
+name = "polypus_qml"
+
+[dependencies]
+polypus-circuit = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Statevector simulation and the DE optimizer drive the end-to-end native
+# training test (tests/end_to_end.rs); neither touches the public API.
+polypus-sim = { workspace = true }
+polypus-optimizers = { workspace = true }
+# Only for the serde round-trip tests; not a production dependency.
+# `float_roundtrip` is required for the θ vector to round-trip bit-for-bit:
+# serde_json's default parser trades last-ULP accuracy for speed, so a plain
+# `1.0` would fail the exact-equality round-trip assertions.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+
+[features]
+default = []
+serde = ["dep:serde"] # opt-in serialization of compiled models (design doc §17)

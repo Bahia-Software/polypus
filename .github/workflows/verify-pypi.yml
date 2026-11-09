@@ -5,6 +5,9 @@
 # (e.g. a new qiskit/qiskit-aer) rather than only by our own publishes.
 #
 # It reuses the exact same checks as the release verification (_verify-pypi.yml).
+# Nobody watches a scheduled run, so a failed one opens an issue, or comments on
+# the one still open from an earlier failure (#392). A manual run reports only
+# here.
 name: Verify PyPI (scheduled / on-demand)
 
 on:
@@ -26,3 +29,42 @@ jobs:
     uses: ./.github/workflows/_verify-pypi.yml
     with:
       version: ${{ inputs.version || 'latest' }}
+
+  report-failure:
+    name: Open or update the failure issue
+    needs: verify
+    # always(): a timed-out job ends as cancelled, and must still be reported.
+    if: ${{ always() && github.event_name == 'schedule' && needs.verify.result != 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      RESULT: ${{ needs.verify.result }}
+      TITLE: "verify-pypi: the scheduled clean-room install check failed"
+    steps:
+      - name: Open an issue, or comment on the open one
+        run: |
+          set -euo pipefail
+          number=$(gh issue list --state open --limit 1000 --json number,title \
+            | jq -r --arg title "$TITLE" 'map(select(.title == $title)) | first | .number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "The scheduled run ended with \`$RESULT\` again: $RUN_URL"
+            exit 0
+          fi
+          {
+            echo "The scheduled \`verify-pypi.yml\` run ended with \`$RESULT\`: $RUN_URL"
+            echo
+            cat <<'EOF'
+          It installs the latest `polypus-quantum` from PyPI in clean `python:*-slim` containers (wheel) and in `python:3.11` (sdist), then runs the README Bell example on the native backend and on Aer. The run's log names the failing job and step; dependency drift on PyPI (a new Qiskit or qiskit-aer) is the usual cause.
+
+          This issue was opened by `.github/workflows/verify-pypi.yml`. While it stays open, a later failure adds a comment here instead of opening another issue. Close it once the cause is fixed.
+          EOF
+          } > "$RUNNER_TEMP/issue.md"
+          if ! gh issue create --title "$TITLE" --body-file "$RUNNER_TEMP/issue.md" --label bug --label "area: release" --label github_actions; then
+            echo "::warning::could not apply the labels; opening the issue without them"
+            gh issue create --title "$TITLE" --body-file "$RUNNER_TEMP/issue.md"
+          fi

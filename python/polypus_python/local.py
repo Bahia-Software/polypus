@@ -127,6 +127,16 @@ def _lower_to_aer_basis(qc):
     return _rewrite_into_aer_basis(qc, supported)
 
 
+# Qiskit's ``SessionEquivalenceLibrary`` is one object for the whole process,
+# and both lowering passes use it. Qiskit 2.0's ``BasisTranslator`` holds a
+# mutable borrow of it for its whole run and calls back into Python meanwhile,
+# so another thread's ``HighLevelSynthesis`` borrowing it panics with
+# "Already mutably borrowed" (issue #468). Every Polypus use of the library
+# (here and in ``cunqa.py``) takes this lock. The passes hold the GIL for
+# nearly their whole run, so lowerings already ran one after another.
+_SESSION_EQUIVALENCE_LOCK = threading.Lock()
+
+
 def _rewrite_into_aer_basis(qc, supported):
     """Synthesis and basis translation into ``supported``, nothing else: the
     translation stage of ``transpile(qc, AerSimulator(), optimization_level=0)``,
@@ -136,8 +146,9 @@ def _rewrite_into_aer_basis(qc, supported):
     so it rejected wide circuits Aer runs, Clifford ones on the stabilizer
     method among them. The names are Aer's own, not only Qiskit's standard
     gates: ``mcx`` (Qiskit's ``c3x``/``c4x``) stays ``mcx``. A fresh pass
-    manager per call shares no state between threads. Returns a new circuit:
-    the caller's is never modified.
+    manager per call, run under ``_SESSION_EQUIVALENCE_LOCK``: the pass managers
+    share the session equivalence library. Returns a new circuit: the caller's
+    is never modified.
 
     A control-flow operation outside ``supported`` (today ``box``), at any
     depth, cannot be rewritten: it is refused first, with the
@@ -151,14 +162,16 @@ def _rewrite_into_aer_basis(qc, supported):
             "backend."
         )
     names = sorted(supported)
-    return PassManager(
+    passes = PassManager(
         [
             HighLevelSynthesis(
                 equivalence_library=SessionEquivalenceLibrary, basis_gates=names
             ),
             BasisTranslator(SessionEquivalenceLibrary, names),
         ]
-    ).run(qc)
+    )
+    with _SESSION_EQUIVALENCE_LOCK:
+        return passes.run(qc)
 
 
 def _control_flow_outside(qc, supported):

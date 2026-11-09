@@ -157,6 +157,11 @@ impl PlannerRequirements {
 
 /// Plans *how* a batch of [`CircuitTask`]s runs on a backend. Object-safe
 /// (`&self`, no generics) so it can be held as `Arc<dyn Planner>`.
+///
+/// `TracingPlanner` in `polypus_orchestration::trace` forwards every method of
+/// this trait, so that a traced run makes the same calls as an untraced one: a
+/// method added here must be forwarded there too, with its test, in the same
+/// change (contract C-12(c)).
 pub trait Planner: Send + Sync {
     /// What this planner needs of its backend.
     fn requirements(&self) -> PlannerRequirements;
@@ -374,10 +379,11 @@ impl Planner for ShotDistributingPlanner {
         // Cap the in-flight replicas at the backend's concurrency (QMIO: 1,
         // CUNQA: `n_qpus`; unbounded backends run the whole array in one chunk),
         // running the interrupt check after every chunk so a slow/real-hardware run
-        // stays interruptible between waves. Chunking is numerically transparent:
-        // `run_shots_distributed` seeds each replica from a per-backend contiguous
-        // block, independent of how the batch is chunked (C-7), and the replicas
-        // are collected in apportionment order across chunks.
+        // stays interruptible between waves. The replicas are collected in
+        // apportionment order across chunks. On the native backend chunking is
+        // numerically transparent (each replica's seed comes from a per-backend
+        // contiguous block); on a backend that seeds per call, each chunk is a
+        // call with its own seed (C-7, "The seed across the calls of one run").
         let wave = backend.capabilities().max_concurrency.max(1);
         let mut replicas: Vec<Counts> = Vec::with_capacity(shot_batches.len());
         for chunk in shot_batches.chunks(wave) {
@@ -842,6 +848,158 @@ mod tests {
             .check(&caps)
             .is_ok());
         assert!(SequentialPlanner.requirements().check(&caps).is_ok());
+    }
+
+    #[test]
+    fn requirements_need_at_least_the_minimum_concurrency() {
+        let needs_two = PlannerRequirements {
+            needs_shot_distribution: false,
+            min_concurrency: 2,
+        };
+        let caps = |max_concurrency| BackendCapabilities {
+            max_concurrency,
+            supports_shot_distribution: false,
+        };
+        let err = needs_two.check(&caps(1)).unwrap_err();
+        assert!(
+            matches!(&err, InfrastructureError::IncompatiblePlanner(m)
+                if m.contains("at least 2") && m.contains("offers 1")),
+            "got {err:?}"
+        );
+        assert!(
+            needs_two.check(&caps(2)).is_ok(),
+            "the minimum itself is enough"
+        );
+        assert!(needs_two.check(&caps(3)).is_ok());
+    }
+
+    #[test]
+    fn only_the_shot_distributing_planner_fixes_a_replica_count() {
+        assert_eq!(SequentialPlanner.required_replicas(), None);
+        assert_eq!(ShotDistributingPlanner::new(4).required_replicas(), Some(4));
+        assert_eq!(ShotDistributingPlanner::new(7).required_replicas(), Some(7));
+    }
+
+    #[test]
+    fn evaluate_reduces_the_executed_counts_in_task_order() {
+        use polypus_observable::QuboObservable;
+        // f(x) = 0.5 + 2·x0, and a backend that measures every shot as the bit
+        // its (stand-in) circuit text names: the value of each task tells
+        // which counts it was reduced from.
+        struct BitFromText;
+        impl QuantumBackend for BitFromText {
+            fn run_circuits(
+                &self,
+                qcs: &[BoundCircuit],
+                params: &RunParams,
+            ) -> Result<Vec<Counts>, BackendError> {
+                Ok(qcs
+                    .iter()
+                    .map(|qc| match qc {
+                        BoundCircuit::Qasm2(bit) => {
+                            HashMap::from([(bit.clone(), u64::from(params.shots))])
+                        }
+                        _ => unreachable!("the test submits OpenQASM text only"),
+                    })
+                    .collect())
+            }
+        }
+        let reducer = QuboObservable::new(1, vec![(0, 2.0)], vec![], 0.5, 1.0).unwrap();
+        let (one, zero) = (
+            BoundCircuit::Qasm2("1".to_string()),
+            BoundCircuit::Qasm2("0".to_string()),
+        );
+        let tasks = [
+            CircuitTask {
+                circuit: &one,
+                shots: 4,
+            },
+            CircuitTask {
+                circuit: &zero,
+                shots: 4,
+            },
+            CircuitTask {
+                circuit: &one,
+                shots: 4,
+            },
+        ];
+        let values = SequentialPlanner
+            .evaluate(
+                &BitFromText,
+                &tasks,
+                &reducer,
+                &params(4),
+                &CancelToken::default(),
+            )
+            .unwrap();
+        assert_eq!(values, vec![2.5, 0.5, 2.5]);
+    }
+
+    /// A backend whose every call fails with a provider error, optionally
+    /// cancelling `token` first (a blocked call the watcher aborted).
+    struct Failing {
+        cancel_first: Option<CancelToken>,
+    }
+
+    impl Failing {
+        fn fail(&self) -> BackendError {
+            if let Some(token) = &self.cancel_first {
+                token.cancel();
+            }
+            BackendError::Cunqa("provider failure".to_string())
+        }
+    }
+
+    impl QuantumBackend for Failing {
+        fn run_circuits(
+            &self,
+            _qcs: &[BoundCircuit],
+            _params: &RunParams,
+        ) -> Result<Vec<Counts>, BackendError> {
+            Err(self.fail())
+        }
+        fn run_shots_distributed(
+            &self,
+            _qc: &BoundCircuit,
+            _shot_batches: &[u32],
+            _params: &RunParams,
+        ) -> Result<Vec<Counts>, BackendError> {
+            Err(self.fail())
+        }
+    }
+
+    #[test]
+    fn a_backend_error_without_cancellation_is_reported_as_itself() {
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let tasks = one_task(&circuit, 8);
+        let backend = Failing { cancel_first: None };
+        let token = CancelToken::default();
+        let sequential = SequentialPlanner
+            .execute(&backend, &tasks, &params(8), &token)
+            .unwrap_err();
+        let distributed = ShotDistributingPlanner::new(2)
+            .execute_replicas(&backend, &tasks, &params(8), &token)
+            .unwrap_err();
+        for err in [sequential, distributed] {
+            assert!(
+                matches!(&err, InfrastructureError::Backend(BackendError::Cunqa(m))
+                    if m == "provider failure"),
+                "got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shot_distributed_backend_error_while_cancelled_is_reported_as_cancelled() {
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let token = CancelToken::default();
+        let backend = Failing {
+            cancel_first: Some(token.clone()),
+        };
+        let err = ShotDistributingPlanner::new(2)
+            .execute_replicas(&backend, &one_task(&circuit, 8), &params(8), &token)
+            .unwrap_err();
+        assert!(matches!(err, InfrastructureError::Cancelled), "got {err:?}");
     }
 
     /// An empty batch must still honour the cancellation checkpoint (issue #162):

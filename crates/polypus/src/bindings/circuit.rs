@@ -890,6 +890,60 @@ impl Circuit {
         push(slf, GateInstruction::MeasureAll)
     }
 
+    // ── Composition ──────────────────────────────────────────────────────
+
+    /// Append the instructions of `other`, placing its qubit `i` on
+    /// `qubits[i]` (by default its qubit `i` on qubit `i`), and return `self`.
+    ///
+    /// Use it to put a template on a subregister or to run one circuit after
+    /// another. Free parameters are shared by index: `Param(0)` of `other` is
+    /// `Param(0)` here, so a parameter both circuits use is bound once, and the
+    /// result takes the names `other` gives to parameters this circuit does not
+    /// name. Classical bits are not renumbered: a measurement keeps its bit,
+    /// and `measure_all` placed on a subregister measures `qubits[i]` into bit
+    /// `i`. `qc.compose(qc)` appends a copy of `qc`.
+    ///
+    /// ```python
+    /// import polypus
+    /// from polypus.circuits.templates import qft
+    ///
+    /// qc = polypus.Circuit(3).x(0).compose(qft(2), qubits=[1, 2])
+    /// assert repr(qc) == "Circuit(num_qubits=3, num_params=0, gates=5)"
+    /// ```
+    ///
+    /// Raises `ValueError`, leaving the circuit unchanged, when `qubits` does
+    /// not give one distinct qubit of this circuit per qubit of `other`, when
+    /// an instruction acts on a qubit this circuit has measured, or when
+    /// `other` names a parameter differently; `TypeError` when `other` is not
+    /// a `Circuit`.
+    #[pyo3(signature = (other, qubits = None))]
+    fn compose<'py>(
+        slf: &Bound<'py, Self>,
+        other: &Bound<'py, Circuit>,
+        qubits: Option<Vec<usize>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        // `qc.compose(qc)` would borrow the same object twice: copy it first.
+        // A circuit a call in progress holds (an argument's `__index__` that
+        // composes it) raises `RuntimeError` instead of panicking.
+        let copy;
+        let borrowed;
+        let other = if other.is(slf) {
+            copy = other.try_borrow()?.inner.clone();
+            &copy
+        } else {
+            borrowed = other.try_borrow()?;
+            &borrowed.inner
+        };
+        let qubits = qubits.unwrap_or_else(|| (0..other.num_qubits()).collect());
+        let mut this = slf.try_borrow_mut()?;
+        let target = &mut this.inner;
+        slf.py()
+            .detach(|| target.try_compose(other, &qubits))
+            .map_err(to_py_err)?;
+        drop(this);
+        Ok(slf.clone())
+    }
+
     // ── Export ───────────────────────────────────────────────────────────
 
     /// Serialize to OpenQASM 2.0.
@@ -1053,9 +1107,56 @@ impl Circuit {
 /// ```
 #[pyfunction]
 #[pyo3(signature = (num_qubits, inverse = false, swaps = true))]
-pub fn qft(num_qubits: usize, inverse: bool, swaps: bool) -> PyResult<Circuit> {
-    Ok(Circuit {
-        inner: polypus_circuit::templates::qft_with_options(num_qubits, inverse, swaps)
-            .map_err(to_py_err)?,
-    })
+pub fn qft(py: Python<'_>, num_qubits: usize, inverse: bool, swaps: bool) -> PyResult<Circuit> {
+    let inner = py
+        .detach(|| polypus_circuit::templates::qft_with_options(num_qubits, inverse, swaps))
+        .map_err(to_py_err)?;
+    Ok(Circuit { inner })
+}
+
+/// The order-finding circuit of Shor's algorithm, as a `polypus.Circuit`:
+/// measuring its counting register estimates the order `r` of `a` modulo
+/// `modulus`, the smallest `r > 0` with `a**r % modulus == 1`.
+///
+/// With `n = modulus.bit_length()` and `t = counting_qubits` (`2n` by
+/// default), the qubits are the counting register `0..t`, then `x` (`n`
+/// qubits, set to 1), `b` (`n + 1` qubits) and one ancilla: `t + 2n + 2` in
+/// all. The circuit is Beauregard's: Hadamards on the counting register, a
+/// multiplication of `x` by `a**(2**k) % modulus` controlled by counting qubit
+/// `k`, and the inverse QFT of the counting register. Read as an integer
+/// (qubit 0 is the least-significant bit), the counting register concentrates
+/// on the values closest to `s * 2**t / r` for `s` in `range(r)`.
+///
+/// The circuit has no free parameters and no measurements: measure the
+/// counting register yourself. It is built without the GIL. Moduli go up to 24
+/// bits (98 qubits and 3.7 million gates), the largest whose circuit the
+/// OpenQASM importers read back; with the default counting register `to_qasm3`
+/// exports up to 16 bits, beyond which the text passes 32 MiB. Raises
+/// `ValueError` for a `modulus` below 3 or above 24 bits, an `a` that is not
+/// between 1 and `modulus - 1` or shares a factor with `modulus` (that factor
+/// already divides it), and a `counting_qubits` not between 1 and `2n`.
+///
+/// ```python
+/// import polypus
+/// from polypus.circuits.templates import shor_order_finding
+///
+/// qc = shor_order_finding(7, 15)  # 8 counting qubits, then x, b and the ancilla
+/// for k in range(8):
+///     qc.measure(k, k)
+/// result = polypus.run_quantum_circuit(qc, shots=1024,
+///                                      infrastructure="local", backend="polypus")
+/// counts = result.merged_counts   # peaks at 0, 64, 128 and 192: s * 256 / 4
+/// ```
+#[pyfunction]
+#[pyo3(signature = (a, modulus, counting_qubits = None))]
+pub fn shor_order_finding(
+    py: Python<'_>,
+    a: u64,
+    modulus: u64,
+    counting_qubits: Option<usize>,
+) -> PyResult<Circuit> {
+    let inner = py
+        .detach(|| polypus_circuit::templates::shor_order_finding(a, modulus, counting_qubits))
+        .map_err(to_py_err)?;
+    Ok(Circuit { inner })
 }

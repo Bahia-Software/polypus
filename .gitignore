@@ -11,12 +11,16 @@ __pycache__/
 *.pyd
 *.so
 
+# cargo-mutants output (`cargo mutants`; .github/workflows/mutation.yml)
+mutants.out*/
+
 # Benchmark results (generated at runtime)
 benchmarks/bench_*.csv
 benchmarks/bench_*/
 benchmarks/fusion_*.csv
 benchmarks/fusion_*.json
 benchmarks/fusion_*.out
+benchmarks/adjoint_*
 
 # Experiment outputs
 qaoa_results.csv
@@ -49,3 +53,16 @@ docs/IMPLEMENTATION_PROMPT.md
 # Internal notes (also blocked by .github/scripts/hygiene.py).
 CLAUDE_*.md
 AI_GUIDELINES*
+
+# Coverage and analysis reports (sonar.yml)
+.coverage
+.coverage.*
+coverage.xml
+lcov.info
+clippy.json
+.scannerwork/
+
+# Documentation site (mkdocs build)
+site/
+# MkDocs privacy plugin download cache
+.cache/

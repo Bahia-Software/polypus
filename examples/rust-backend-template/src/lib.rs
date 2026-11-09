@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use polypus_backend::{
     register_backend, validate_run_results, BackendBuildContext, BackendError, BoundCircuit,
-    Counts, QuantumBackend, RunParams,
+    CallSeeds, Counts, QuantumBackend, RunParams,
 };
 
 /// The name this backend registers itself under. A Python user selects it with
@@ -51,6 +51,10 @@ pub struct TemplateBackend {
     /// Set by [`cancel`](QuantumBackend::cancel) so a blocked [`transport`](Self::transport)
     /// call can notice and abort — the out-of-band cancellation hook.
     cancelled: AtomicBool,
+    /// Numbers the submissions to the device: `RunParams::seed` is the run's base
+    /// seed on every call, and each submission needs its own sampling stream
+    /// (contract C-7), or the circuits of every generation would share one.
+    seeds: CallSeeds,
 }
 
 impl TemplateBackend {
@@ -60,6 +64,7 @@ impl TemplateBackend {
         Ok(TemplateBackend {
             endpoint: endpoint.to_string(),
             cancelled: AtomicBool::new(false),
+            seeds: CallSeeds::new(),
         })
     }
 
@@ -168,7 +173,7 @@ impl QuantumBackend for TemplateBackend {
         self.cancelled.store(false, Ordering::SeqCst);
         let counts: Vec<Counts> = qcs
             .iter()
-            .map(|qc| self.sample_one(qc, params.shots, params.seed))
+            .map(|qc| self.sample_one(qc, params.shots, self.seeds.next(params.seed)))
             .collect::<Result<_, _>>()?;
         // Recommended: self-check your output against the contract before returning
         // it, so a device/serialisation bug surfaces here as InvalidResults rather

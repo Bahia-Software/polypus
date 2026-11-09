@@ -1,0 +1,187 @@
+name: Mutation testing
+
+# Weekly `cargo mutants` over the pure-Rust crates, report-only (#409): line
+# coverage says which code the tests run, mutation testing whether they would
+# notice it change. Each job runs one shard of one crate and writes caught /
+# missed / timeout / unviable and the score, caught / (caught + missed), in its
+# summary, and keeps `missed.txt` and `outcomes.json` as an artifact. Surviving
+# mutants never fail a job; cargo-mutants failing to run does (the unmutated
+# tests failing, a build error, the step timing out). The scheduled run, or a
+# manual one with `comment` set, then comments one row per crate on the
+# tracking issue (`report`), the only job that can write to issues.
+#
+# The scripts are .github/scripts/mutation_report.py (tested by
+# test_mutation_report.py, run by hygiene.yml). docs/CONTRIBUTING.md
+# ("Mutation testing") shows how to reproduce a crate's run locally.
+
+on:
+  schedule:
+    # Sundays 02:00 UTC, away from the Monday verify-pypi run.
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      comment:
+        description: "Also comment the results on the tracking issue"
+        type: boolean
+        default: false
+
+# One run at a time; a second one waits instead of cancelling a run that may
+# be hours in.
+concurrency:
+  group: mutation
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The two slowest crates are split into round-robin shards (every N-th
+  # mutant), so that no job comes near the 6 h limit of a hosted runner. Each
+  # crate's full run, estimated from a measured 10 % round-robin sample on 4
+  # CPUs with --jobs 2 (#409): circuit ~3.1 h (2042 mutants), sim ~4.3 h (659;
+  # its unmutated tests alone take ~65 s), physics ~70 min, optimizers ~55 min,
+  # backend ~8 min, observable ~3 min. So every job is estimated at under 100
+  # minutes; the step stops cargo-mutants at 180, leaving the job 15 more to
+  # summarise and upload what it got. Keep `CRATES` in `report` in step with
+  # this matrix.
+  mutants:
+    name: cargo-mutants (${{ matrix.crate }} ${{ matrix.shard }}/${{ matrix.shards }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 195
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { crate: polypus-circuit, shard: 0, shards: 2 }
+          - { crate: polypus-circuit, shard: 1, shards: 2 }
+          - { crate: polypus-sim, shard: 0, shards: 3 }
+          - { crate: polypus-sim, shard: 1, shards: 3 }
+          - { crate: polypus-sim, shard: 2, shards: 3 }
+          - { crate: polypus-physics, shard: 0, shards: 1 }
+          - { crate: polypus-optimizers, shard: 0, shards: 1 }
+          - { crate: polypus-observable, shard: 0, shards: 1 }
+          - { crate: polypus-backend, shard: 0, shards: 1 }
+    env:
+      CRATE: ${{ matrix.crate }}
+      SHARD: ${{ matrix.shard }}/${{ matrix.shards }}
+      # The QIR tests of polypus-circuit assemble their output with llvm-as;
+      # without it they would skip and every QIR mutant would survive.
+      POLYPUS_REQUIRE_LLVM_AS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends llvm
+          llvm-as --version
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+        with:
+          tool: cargo-mutants@27.1.0
+      # Every feature, as in the all-features pass of `test (Rust)` (ci.yml):
+      # polypus-sim's parallel kernels are behind `parallel`. Exit codes 2
+      # (missed mutants) and 3 (timeouts) are results, so they pass; any other
+      # non-zero code is cargo-mutants failing, and fails the job. The code is
+      # kept for the report, which tells a finished run from one that is not.
+      - name: cargo mutants -p ${{ matrix.crate }} --shard ${{ matrix.shard }}/${{ matrix.shards }}
+        timeout-minutes: 180
+        run: |
+          set +e
+          cargo mutants --package "$CRATE" --all-features --jobs 2 \
+            --shard "$SHARD" --sharding round-robin --cargo-arg=--locked --output .
+          code=$?
+          set -e
+          mkdir -p mutants.out
+          echo "$code" > mutants.out/exit-code.txt
+          case "$code" in
+            0 | 2 | 3) echo "cargo-mutants finished with exit code $code" ;;
+            *) echo "::error::cargo-mutants failed with exit code $code"; exit "$code" ;;
+          esac
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: >-
+          python3 .github/scripts/mutation_report.py summary "$CRATE" mutants.out
+          --shard "$SHARD" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          # artifact_name() in mutation_report.py, which `report` reads.
+          name: mutants-${{ matrix.crate }}-${{ matrix.shard }}of${{ matrix.shards }}
+          path: |
+            mutants.out/mutants.json
+            mutants.out/outcomes.json
+            mutants.out/missed.txt
+            mutants.out/timeout.txt
+            mutants.out/exit-code.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # One fixed issue, found by its exact title (open or closed; GitHub's search
+  # finds it, however many issues came after it), reopened if someone closed
+  # it, created if missing, and commented on every scheduled run with every
+  # crate of the matrix: a crate that did not run says so instead of
+  # disappearing from the table.
+  report:
+    name: Comment the score on the tracking issue
+    needs: mutants
+    # always(): a crate whose job failed or timed out is still reported.
+    if: ${{ always() && (github.event_name == 'schedule' || inputs.comment) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # contents: the sparse checkout of .github/scripts, declared rather than
+      # left to the repository being public.
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      TITLE: "mutation: weekly score"
+      # Every crate of the matrix, with its number of shards.
+      CRATES: >-
+        polypus-circuit:2 polypus-sim:3 polypus-physics polypus-optimizers
+        polypus-observable polypus-backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: mutants-*
+          path: artifacts
+      - name: Write the comment
+        run: |
+          # shellcheck disable=SC2086 # CRATES is a list of words
+          python3 .github/scripts/mutation_report.py comment \
+            --artifacts artifacts --run-url "$RUN_URL" $CRATES > "$RUNNER_TEMP/comment.md"
+          cat "$RUNNER_TEMP/comment.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Comment on the tracking issue
+        run: |
+          set -euo pipefail
+          found=$(gh issue list --state all --limit 100 --search "\"$TITLE\" in:title" \
+            --json number,title,state \
+            | jq -c --arg title "$TITLE" 'map(select(.title == $title)) | sort_by(.number) | first // empty')
+          if [ -z "$found" ]; then
+            cat > "$RUNNER_TEMP/issue.md" <<'EOF'
+          The mutation score of the pure-Rust crates, commented here by `.github/workflows/mutation.yml` after every weekly run (#409).
+
+          Each comment has one row per crate: caught, missed, timed-out and unviable mutants, and the score, caught / (caught + missed). A crate that could not be run that week is listed as **not run**, with the reason. The run linked in the comment keeps each crate's `missed.txt` and `outcomes.json` for 30 days, and `docs/CONTRIBUTING.md` ("Mutation testing") shows how to reproduce a crate's run locally. The run is report-only: a missed mutant fails nothing.
+
+          Keep this issue open: the workflow finds it by its title, and reopens it if it is closed.
+          EOF
+            number=$(gh issue create --title "$TITLE" --body-file "$RUNNER_TEMP/issue.md" | sed 's#.*/##')
+          else
+            number=$(jq -r '.number' <<< "$found")
+            if [ "$(jq -r '.state' <<< "$found")" != "OPEN" ]; then
+              gh issue reopen "$number"
+            fi
+          fi
+          gh issue comment "$number" --body-file "$RUNNER_TEMP/comment.md"

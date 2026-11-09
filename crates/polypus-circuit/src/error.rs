@@ -106,13 +106,57 @@ pub enum CircuitError {
     /// A circuit template was asked for more qubits than it builds (see
     /// [`templates::MAX_QFT_QUBITS`](crate::templates::MAX_QFT_QUBITS)).
     TemplateTooLarge {
-        /// The template (`qft`).
+        /// The template (`qft` or `phase_adder`).
         template: &'static str,
         /// Qubits asked for.
         num_qubits: usize,
         /// Most qubits the template builds.
         max_qubits: usize,
     },
+    /// A circuit template was given an argument it does not accept, such as a
+    /// third control for [`phase_adder`](crate::templates::arithmetic::phase_adder).
+    InvalidTemplateArgument {
+        /// The template (`phase_adder`).
+        template: &'static str,
+        /// The argument at fault, by its parameter name.
+        argument: &'static str,
+        /// What the template accepts instead. Boxed twice: a thin pointer keeps
+        /// the error at six words (see `GateNotExpressible`).
+        reason: Box<Box<str>>,
+    },
+    /// The qubits given to
+    /// [`ParameterizedCircuit::try_compose`](crate::ParameterizedCircuit::try_compose)
+    /// do not map the composed circuit one-to-one onto the target: there are
+    /// not as many as the composed circuit has qubits, or one is given twice.
+    InvalidQubitMap {
+        /// Human-readable description of the problem.
+        reason: String,
+    },
+    /// The composed circuit names a parameter differently from the target
+    /// circuit, or gives it a name that the target already gives to another
+    /// parameter
+    /// ([`ParameterizedCircuit::try_compose`](crate::ParameterizedCircuit::try_compose)).
+    ConflictingParamNames {
+        /// The first conflicting parameter of the composed circuit.
+        index: usize,
+        /// Its name in the composed circuit.
+        name: String,
+    },
+}
+
+impl CircuitError {
+    /// [`CircuitError::InvalidTemplateArgument`] for `argument` of `template`.
+    pub(crate) fn invalid_template_argument(
+        template: &'static str,
+        argument: &'static str,
+        reason: impl Into<Box<str>>,
+    ) -> Self {
+        CircuitError::InvalidTemplateArgument {
+            template,
+            argument,
+            reason: Box::new(reason.into()),
+        }
+    }
 }
 
 impl fmt::Display for CircuitError {
@@ -194,6 +238,18 @@ impl fmt::Display for CircuitError {
             } => write!(
                 f,
                 "the {template} template builds at most {max_qubits} qubits, got {num_qubits}"
+            ),
+            CircuitError::InvalidTemplateArgument {
+                template,
+                argument,
+                reason,
+            } => write!(f, "invalid {argument} for the {template} template: {reason}"),
+            CircuitError::InvalidQubitMap { reason } => {
+                write!(f, "invalid qubit map for compose: {reason}")
+            }
+            CircuitError::ConflictingParamNames { index, name } => write!(
+                f,
+                "cannot compose: the composed circuit names parameter {index} '{name}', which the target circuit names differently or gives to another parameter"
             ),
         }
     }

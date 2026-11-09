@@ -11,9 +11,439 @@ Entries were curated from the Conventional Commits history. Releases before
 
 ## [Unreleased]
 
-Changes on `main` since 0.7.2.
+### Added
+- `polypus.qml.Ansatz.strongly_entangling(reps, ranges=None, entangler="cx")`,
+  PennyLane's `StronglyEntanglingLayers`: per layer, a general rotation on
+  every qubit, emitted as `Rz(φ)`, `Ry(θ)`, `Rz(ω)`, in that order, so the
+  exact parameter-shift gradient still applies, then an entangler (`"cx"` or
+  `"cz"`) from each qubit `i` to `(i + r) mod n`, with PennyLane's default
+  ranges or one per layer; `3·n·reps` parameters. A range outside `1..=n−1`
+  for the qubits active at that point is a `ValueError` at the call, and the
+  layer saves and loads with `TrainedModel.save`/`qml.load` (format version
+  still 1). In `polypus-qml`: `StronglyEntanglingAnsatz`,
+  `Layer::StronglyEntangling`, `QuantumModel::strongly_entangling` and the
+  `ValidationError` variants `StronglyEntanglingRangesLength` and
+  `StronglyEntanglingRangeOutOfBounds`. The QML guide shows how `EfficientSU2`
+  and `BasicEntanglerLayers` map onto `hardware_efficient` (#505).
+- `polypus.qml.expval(model, x, params, *, ...)` and
+  `polypus.qml.jacobian(model, x, params, *, wrt="params", ...)` for a training
+  loop of your own over a native `Model`: the expectation of every readout
+  observable per row as a `float64` NumPy array `(rows, observables)`, and its
+  exact parameter-shift Jacobian with respect to the parameters
+  (`(rows, observables, num_params)`), the inputs of angle and IQP encoders
+  (`(rows, observables, features)`) or both (`wrt="both"`, a tuple). They take
+  `TrainedModel.run`'s execution arguments, check everything before a backend
+  exists, and run the rows in blocks over one backend per call. In
+  `polypus-qml`: `CompiledModel::jacobian` with `ExpectationJacobian`,
+  `JacobianBlock`, `Jacobian` and `JacobianWrt`,
+  `CompiledModel::expectations_from_counts`/`expectations_from_probabilities`
+  and `num_observables`, and `QmlError::NoInputGradient`. In
+  `polypus-evaluation`: `window_size` and `candidate_window_size`, the
+  `QmlOracle`'s window policy, now public, which also sizes the primitives'
+  blocks. See `examples/qml_expval_jacobian_loop.py`.
+- `polypus.torch.QuantumLayer(model, *, initial_params=None, seed=None, ...)`,
+  a `torch.nn.Module` over a native `qml.Model` for hybrid quantum-classical
+  networks: forward = `qml.expval` over the batch, backward = the
+  vector-Jacobian product of `qml.jacobian` (parameters, inputs or both), so
+  it trains with any `torch.optim` optimizer; float32 networks work as is (the
+  computation is float64 on the CPU), and a `seed` derives one per backend call
+  so a training replays. `polypus.torch.from_trained(trained, ...)` starts one
+  from a `TrainedModel`. PyTorch is the new optional extra
+  `pip install "polypus-quantum[torch]"` (`torch>=2.14.1,<3`); `import polypus`
+  does not import it (#502). See `examples/qml_torch_hybrid.py`.
+- Exact gradients of native QML by adjoint differentiation (#503): with
+  `exact=True` on the native backend, `Model.fit`'s Adam gradient,
+  `qml.jacobian` and `polypus.torch.QuantumLayer`'s backward pass take about
+  three simulations per row (and observable) whatever the number of
+  parameters, instead of two circuits per trainable gate; no API changes.
+  The result is the parameter-shift gradient to rounding; shots keep the
+  parameter shift, and so does exact mode when the memory budget holds one
+  statevector of the model's width but not the two the adjoint needs (logged
+  at `info` once per fit or `qml.jacobian` call). A Ctrl+C now also stops an
+  exact `qml.jacobian` inside a block. In `polypus-sim`:
+  `StatevectorSimulator::adjoint_gradient`, `AdjointGradient`,
+  `ADJOINT_STATEVECTORS` and four `SimError` variants (`GateIndexOutOfRange`,
+  `NotDifferentiable`, `PartialMeasurement`, `NonFiniteWeight`). In
+  `polypus-qml`: `QmlProblem::adjoint_runs`/`gradient_from_adjoint`,
+  `JacobianBlock::adjoint_runs`/`num_adjoint_runs`/`jacobian_from_adjoint` (and
+  `ExpectationJacobian`'s), `AdjointRun` and `DiagonalObservable`. In
+  `polypus-infrastructure`: `NativeStatevectorBackend::adjoint_fits`/
+  `run_adjoint` and `AdjointTask`. `benchmarks/bench_adjoint.py` measures it.
+- `polypus.qml.Model.num_observables`, the readout's observables (the columns
+  of `qml.expval`), and pickling of `Model`, so `copy.deepcopy` works: it
+  travels as the JSON of its spec, rebuilt through the checks of `qml.load`
+  (#502).
+- Multi-qubit Pauli sums and an exact H₂ Hamiltonian in `polypus-physics`
+  (#529), the reference for molecular simulation (#528). In
+  `hamiltonians`: `PauliString` (text form `"X0 X1 Y2 Y3"`, product with a
+  `Phase`), `PauliSum::new`/`simplified`/`chop`; `PauliSum::to_dense_real`,
+  `eigenvalues` and `ground_energy` (little-endian basis, up to
+  `MAX_DENSE_QUBITS` = 10, real matrices only; symmetric to within
+  `SYMMETRY_TOLERANCE` relative to the largest entry); `FermionOperator` and
+  `FermionHamiltonian` from spatial integrals (spin-orbitals in block order;
+  integral symmetries checked to `INTEGRAL_SYMMETRY_TOLERANCE` and
+  symmetrized); `FermionOperator::to_qubits` with `QubitMapping::JordanWigner`
+  or `Parity` (Hermitian to within `HERMITICITY_TOLERANCE` times the sum of
+  the operator's |coefficients|); `PauliSum::taper` and `parity_reduction_qubits`, which fix the
+  parities of `N↑` and `N`, not their values (exact for H₂; sector
+  diagonalization for larger molecules is #535). A new `chemistry` module:
+  STO-3G integrals over normalized s-type contracted Gaussians and
+  `H2Molecule` in `H2Encoding::JordanWigner` (4 qubits) or `ParityTapered`
+  (2 qubits), which implements `PhysicsHamiltonian`. Validated against
+  PySCF/OpenFermion data in `reference-data/h2-sto3g/` (FCI at 0.7414 Å:
+  −1.1372701747 Ha). `constants::BOHR_RADIUS_ANGSTROM`. New dependency:
+  `libm` (`erf` for the Boys function).
+
+### Changed
+- **BREAKING (Rust):** `polypus_qml::ValidationError` has two new variants,
+  `StronglyEntanglingRangesLength` and `StronglyEntanglingRangeOutOfBounds`,
+  so an exhaustive `match` on it outside its crate must handle them (#505).
+- **BREAKING (Rust):** `polypus_physics::hamiltonians::PauliTerm` is
+  `{ coefficient, string: PauliString }` instead of a single Pauli on one
+  qubit (`qubit`, `axis`), and `PauliSum`'s fields are private: build it with
+  `PauliSum::new`, which validates, and read it with `num_qubits()` and
+  `terms()` (#529).
+- **BREAKING (Rust):** `PauliAxis`, `PauliTerm` and `PauliSum` moved from
+  `hamiltonians::photon_polarization` to `hamiltonians::pauli`; the old
+  paths `hamiltonians::photon_polarization::{PauliAxis, PauliTerm, PauliSum}`
+  no longer exist. Import them from `polypus_physics::hamiltonians` (#529).
+- **BREAKING (Rust):** `photon_polarization_hamiltonian` returns
+  `Result<PauliSum, PhysicsError>`, rejecting non-finite parameters (#529).
+- **BREAKING (Rust):** `polypus_physics::error::PhysicsError` has new
+  variants, `InvalidPauliSum`, `UnsupportedOperation`,
+  `InvalidFermionOperator` and `InvalidIntegrals`, so an exhaustive `match`
+  on it outside its crate must handle them (#529).
+- **BREAKING (Rust):** `polypus_qml::ValidationError` has a new variant,
+  `TooManyParams`, so an exhaustive `match` on it outside its crate must
+  handle it (#505).
+- CI reports how well the tests check the code, not only what they run: the
+  SonarQube Cloud workflow's coverage jobs write Rust line coverage per crate
+  in their summary, and a weekly `mutation.yml` runs `cargo mutants` over the
+  pure-Rust crates (report only) and comments the score per crate on a
+  tracking issue. New tests catch the mutants that survived in
+  `polypus-observable`, CMA-ES and SHADE, and `polypus-backend`'s memory guard
+  and planner, and property tests check the OpenQASM round trip and that the
+  parallel kernels match the sequential ones on random circuits (#409).
+
+### Fixed
+- `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a
+  negative `reps` raised `OverflowError`, and with a `reps` whose parameter
+  count does not fit in 64 bits a `PanicException` (which `except Exception`
+  does not catch); both, and any integer too large for a count, are now a
+  `ValueError` at the call that leaves the `Ansatz` as it was. A layer added
+  after such a parameter count, and a saved file edited to one, fail the same
+  way. In `polypus-qml`, `QuantumModel::compile` returns the new
+  `ValidationError::TooManyParams` instead of panicking (#505).
+
+### Documentation
+- The documentation site (MkDocs Material) is published at the Pages root,
+  with the rustdoc of every crate under `/rust/`. Only the crate index pages
+  of the old rustdoc URLs (`.../polypus/<crate>/`) redirect to
+  `.../polypus/rust/<crate>/`; deeper rustdoc links change. The
+  `documentation` link of the `polypus` crate points at its new rustdoc home.
+- The site takes the Polypus cyan and octopus mark, Inter and JetBrains Mono
+  served from the site itself (no third-party font requests), and a new
+  landing page with a tabbed quickstart.
+
+## [0.8.0] - 2026-10-30
+
+### Upgrading from 0.7
+
+Breaking changes are marked **BREAKING** under *Changed* and *Fixed*. Where
+to look first:
+
+- **Python users.** Python 3.10 or newer (#360), `qiskit<3` and
+  `qiskit-aer<0.18` (#362), CUNQA 2.4 or newer (#204). Seeded results differ
+  from 0.7 on every backend (#348, #401, #410, #411, `rand` 0.10): re-run
+  stored baselines instead of expecting them to replay. Arguments that were
+  ignored now raise: `noise_model`, `sim_method` and `backend` where they do
+  not apply (#332, #334), `patience=0` in `polypus.DE` and `polypus.CMAES`
+  (#467), and counts that sum to zero in `expectation_value` (#227).
+  Configuration errors are `polypus.ConfigurationError`, still a `ValueError`
+  (#418), and Qiskit and Aer exceptions are raised as `polypus.BackendError`
+  or `polypus.EvaluationError` (#218). QMIO needs `ZMQ_SERVER` or
+  `options={"endpoint": ...}`, and `run_qc_in_qpu`, `run_qcs_in_qpu` and
+  `run_worker_qpu.py` are gone.
+- **Rust users.** The `polypus` crate has no default features (#414); the
+  circuit types' fields are private (#349); `GateInstruction`,
+  `CircuitError`, `SimError`, `BackendError`, `OptimizerError` and
+  `polypus_orchestration::Method` are `#[non_exhaustive]`, and
+  `EvaluationError` has new variants; the DE, PSO and QNG argument structs,
+  `DeConfig` and `TrainFlow` have new fields and `dispatch_optimizer` a new
+  argument (#395, #397, #410, #500); an `Optimizer` implemented outside
+  `polypus-optimizers` implements `optimize_observed` instead of `optimize`
+  (#500); `OracleFactory::build`, `templates::qft`,
+  `Statevector::expectation_z` and `polypus_sim::sample_projected` changed
+  their return types; `BackendConfig::Local` and `Cunqa` have no `backend`
+  field (#230); the `polypus-physics` samplers take rand 0.10's `Rng` (#273).
+- **Third-party backend authors.** `polypus-backend`,
+  `polypus-backend-conformance` and `polypus-subprocess-backend` are on
+  crates.io from this release; depend on `"0.8"`. Registry options are typed
+  (#293, migration in `docs/backends.md`), a backend gives each call of a run
+  its own seed (#411, contract C-7), `BackendError` is `#[non_exhaustive]`
+  and `circuits::as_qasm2` returns a `Result` (#350).
 
 ### Added
+- Native QML models in `polypus.qml`: `Model(encoder, ansatz, readout)`
+  built from an `Encoder` and an `Ansatz` (layer builders that check each call
+  without the data, with data re-uploading inside the ansatz) and a
+  `Readout(observables, decision="raw", threshold=None)`, with the readout
+  helpers `Z`/`X`/`Y`, `PauliTerm` (`Z(0) @ Z(1)`) and `Observable` (weighted
+  sums). `Model.fit(x, y=None, *, method, loss=None, ...)` trains it on rows or
+  a `Dataset(x, y=None)` (an unlabeled dataset stays marked as such across a
+  split) and returns a `TrainResult`: supervised with a named loss, or
+  unsupervised maximising the readout; Adam gets the exact parameter-shift
+  gradient; `polypus.Rotosolve` is accepted with `loss="expectation"` on a
+  model whose trainable parameters each sit in one rotation, and is otherwise
+  a `polypus.ConfigurationError` before anything runs, as in `train` (#398);
+  `exact=True` uses exact probabilities on the local native simulator;
+  `batch_size` trains on minibatches. `Model.bind(params)` gives an
+  immutable `TrainedModel` whose `predict` returns the readout's decisions
+  (`int` for sign, threshold and argmax, `float` for raw) and whose `run`
+  returns the counts per row, or an `ExactResult` of probabilities with
+  `exact=True`. `TrainedModel.save(path)` writes it as versioned JSON (read back
+  bit for bit) and `polypus.qml.load(path)` reads it, revalidating the model
+  and its parameters; loading never runs code. Execution arguments have
+  defaults, and `backend=None` is the native simulator on `local`. Options are
+  strings from closed sets. `qml.train` and `qml.predict`, which run Qiskit
+  circuits, reject an `Encoder` or `Ansatz` with `TypeError`.
+- `polypus_backend::CallSeeds`, which hands out the seed of each call a
+  backend receives (the run's on the first, then one derived from it and the
+  call's index), and `polypus_backend::stream_seed`, the SplitMix64 map
+  behind it and behind the native backend's per-circuit seeds (#411).
+- `polypus.DE(mutation_factor=None, crossover_rate=None)`: DE/rand/1/bin's
+  `F`, in `(0, 2]`, and `CR`, in `[0, 1]`; `None` keeps 0.8 and 0.7. A value
+  out of range, or any value with `strategy="shade"` or `"lshade"`, which
+  adapt both, raises `polypus.ConfigurationError` when the object is built or
+  the attribute set. Rust: `AlgorithmDifferentialEvolution::check_rates` and the
+  `DEFAULT_MUTATION_FACTOR` and `DEFAULT_CROSSOVER_RATE` constants (#410).
+- `polypus.External(optimizer, max_evaluations)`, accepted by `train` and
+  `qml.train`: runs an optimizer from outside Polypus, a library such as
+  Optuna, Nevergrad or pycma or an object of your own, through Polypus's
+  scheduler. The optimizer has `ask()`, which returns the next batch of rows
+  (`None` or an empty batch when it is done), and `tell(candidates, values)`,
+  which receives that batch and its fitness, to maximise. Each `ask()` is one
+  batch, spread over the QPUs. The run stops at an empty `ask()`
+  (`converged=True`) or before a batch that would take it past
+  `max_evaluations`, which is neither evaluated nor told, so the budget is
+  never exceeded. A row that is not `dimensions` finite real numbers (a
+  `bool` or a complex number is not one) raises `ValueError` naming its
+  batch and row; a batch and a row are read only up to one row or value
+  too many, so an endless iterator cannot hang the run. An exception from
+  `ask()` or `tell()`, `KeyboardInterrupt` included, is raised as itself.
+  `External` takes part in garbage collection, so an optimizer that refers
+  back to it is freed.
+  `best_params` is the best candidate Polypus measured, `iterations_run`
+  counts the batches, and `final_shots` re-evaluates five candidates. The
+  library owns its seed and its start: `External` has no `seed` (the run's
+  seed fixes the shot sampling) and `initial_point` raises `ValueError`
+  before anything runs (#399).
+- `polypus.ask_tell`, pure-Python adapters for `polypus.External`:
+  `from_optuna(study, dimensions, batch_size, bounds=(0, 2π),
+  initial_point=None)`, for example with Optuna's TPE sampler,
+  `from_nevergrad(optimizer, batch_size=None, initial_point=None)` and
+  `from_pycma(es)`, which call each library's public ask/tell methods only
+  and negate the values for a library that minimises; and `AskTell`, the
+  protocol as a `typing.Protocol`. None of the three libraries is a
+  dependency of Polypus, and the module imports none of them (#399); the pip
+  extras `optuna`, `nevergrad` and `cma` (`pip install
+  "polypus-quantum[optuna]"`) install one, from the version CI tests the
+  adapters with up to the next major. An adapter's `tell` raises
+  `ValueError` for other candidates than the batch it handed out, or the
+  same in another order, before the library is told anything. The Optuna
+  adapter, an `OptunaAskTell`, has `close()`, which marks the trials of a
+  batch handed out and never told `TrialState.FAIL`, so that a budget that
+  cuts a batch leaves no trial `RUNNING` (#467).
+- External optimizers in training runs (Rust, `polypus-orchestration`):
+  `Method::External` with `ExternalConfig`. The CUNQA walltime warning
+  projects `max_evaluations / n` batches after a first batch of `n`
+  candidates; `final_shots` re-evaluates five candidates (#399).
+- The ask/tell bridge in `polypus-optimizers`: the `AskTell` trait, with
+  `AskTellError`, and `AlgorithmExternal` with `AlgorithmExternalArgs`,
+  which run any optimizer that implements it against an `EvaluationOracle`,
+  one oracle batch per `ask` (#399).
+- `polypus.Rotosolve(sweeps=10, reevaluate_every=5, tolerance=0.01,
+  patience=2, seed=None)`, accepted by `train` and `qml.train`: the
+  Rotosolve of Ostaszewski, Grant and Benedetti (Quantum, 2021), with the
+  value reuse of the NFT method of Nakanishi, Fujii and Todo (Phys. Rev.
+  Research, 2020). When every trainable parameter is the angle of exactly
+  one single-Pauli rotation (any angle of `u`, `u2` or `u3` included, which
+  are `rz·ry·rz`, and in a Qiskit circuit the angle θ of `r`) and the cost
+  is an average over the shots, the
+  fitness is a sinusoid of each parameter, and Rotosolve moves one parameter
+  at a time to its maximum, in closed form. Each step is one batch of two
+  circuits, plus the current parameters on the first step and every
+  `reevaluate_every` steps, and after the last step the parameters it
+  reached are measured alone; `best_params` is the best of the points
+  measured. The run stops after `patience` sweeps that improve the best by
+  less than `tolerance`, or after `sweeps` sweeps. `train` and `qml.train`
+  check the circuit before anything runs (a `polypus.Circuit` or a Qiskit
+  circuit; in `qml.train` the ansatz only) and raise `ValueError` naming the
+  first gate or parameter that does not qualify; `qml.train` also rejects a
+  `polypus.SampleCost`. An `initial_point` is the first point measured. A
+  seeded run reproduces on the same platform only, as with CMA-ES. Invalid
+  settings raise `ValueError` before any circuit runs (#398).
+- Rotosolve in training runs (Rust, `polypus-orchestration`):
+  `Method::Rotosolve` with `RotosolveConfig`. The CUNQA walltime warning
+  counts `sweeps × dimensions` steps and the final point as one more;
+  `final_shots` re-evaluates
+  `best_params` alone (#398).
+- Rotosolve in `polypus-optimizers`: `AlgorithmRotosolve` and
+  `AlgorithmRotosolveArgs`, with an `initial_point` like every optimizer;
+  and in `polypus-circuit`, `ParameterizedCircuit::check_single_frequency`
+  with `SingleFrequencyError` and `AngleForm`, which say whether a circuit
+  qualifies; `tests/python/test_rotosolve.py` checks that it and the Python
+  check of a Qiskit circuit take the same angles and gates (#398).
+- `callback` in `train`, `qml.train` and `qml.Model.fit` (keyword-only):
+  called once per iteration of the optimizer with a read-only
+  `polypus.TrainProgress` (`iteration`, `best_fitness`, `best_params`,
+  `evaluations`), so a run can report its progress, write checkpoints or
+  stop on a criterion of its own. Returning `True` stops the run, which
+  returns the `TrainResult` it has reached (`converged=False`; the
+  `final_shots` batch is still sent); `None` or `False` go on, and any other
+  value raises `TypeError`. An exception in the callback propagates as
+  itself, with no result. Ctrl+C keeps working as before, and a seeded run
+  with a callback that never stops returns the same result as without one.
+  A `callback` that is not callable raises `TypeError` before anything runs
+  (#500).
+- Watching a run in Rust: `IterationObserver`, `IterationReport` and
+  `Optimizer::optimize_observed` (with `optimize` now its default, an
+  observer that never stops), and
+  `AlgorithmDifferentialEvolution::optimize_with_strategy_observed`
+  (`polypus-optimizers`); `TrainObserver`, `TrainProgress`,
+  `TrainFlow::observer` and `dispatch_optimizer_observed`, which counts the
+  evaluations (`polypus-orchestration`). Adam, SPSA and Rotosolve now
+  measure the point their last step reached inside their last iteration, with
+  the same oracle calls and outcome (#500).
+- `final_shots` in `train` and `qml.train` (keyword-only in `qml.train`):
+  once the optimizer has stopped, its best candidates are re-evaluated in
+  one more batch with that many shots per circuit, `best_params` and, for
+  DE, PSO and CMA-ES, the four best other distinct candidates they scored.
+  The new `TrainResult.final_params` is the one with the highest value and
+  `final_fitness` that value; both are `None` without it. This reduces the
+  winner's curse of `best_fitness`, the best of many noisy estimates:
+  `final_fitness` is a fresh estimate, without bias when `best_params` is
+  re-evaluated alone, and slightly optimistic still as the highest of five.
+  `best_fitness` keeps its meaning: `best_params`, `best_fitness` and
+  `fitness_history` are the optimizer's, and a seeded run sends the same
+  batches with and without `final_shots`. The final batch has shot noise of
+  its own (#411), so it does not repeat the training's counts for a
+  candidate. `best_params` and `best_fitness` are
+  logged before it, and as a warning if it fails. A value that is not an
+  integer `>= 1` raises `ValueError` before anything runs. The batch is not
+  part of the CUNQA walltime projection (#397).
+- `initial_point` and `final_shots` in a native model's `Model.fit`
+  (keyword-only), with `train`'s checks: a model read back with
+  `polypus.qml.load` keeps training from its `params`, and the final
+  re-evaluation scores every training sample, also with `batch_size`;
+  `final_shots` with `exact=True` is a `polypus.ConfigurationError`. `fit`
+  now checks the optimizer's configuration before any backend exists, as
+  `train` does (#498).
+- `Model.circuit(x, params=None)` and `TrainedModel.circuit(x)` return the
+  circuit a native model runs for one sample as a `polypus.Circuit`, measured
+  in the readout's basis; without `params` the trainable angles stay free,
+  named `theta_0`, `theta_1`, ... (#497).
+- The final batch in Rust: `EvaluationOracle::evaluate_batch_with_shots`
+  (`polypus-optimizers`), a provided method that `VqcOracle` and `QmlOracle`
+  implement by putting the shots in every task; `TrainFlow::final_shots`,
+  `TrainOutcome`, `FinalEvaluation` and `Method::final_candidates`
+  (`polypus-orchestration`) (#397).
+- `polypus.SPSA(max_iters=300, resamplings=1, perturbation=0.1,
+  target_step=0.63, alpha=0.602, gamma=0.101, eval_interval=20, seed=None)`,
+  accepted by `train` and `qml.train`: Spall's simultaneous perturbation
+  stochastic approximation (1992), with his gains `a/k^alpha` and
+  `c/k^gamma` and practical exponents (1998). It estimates the gradient from
+  two circuits per random perturbation whatever the number of parameters,
+  so it suits many parameters and few QPUs. A calibration batch of 50
+  circuits around the starting point sets the gain so that, with
+  `resamplings=1`, the first step moves each parameter by about
+  `target_step`, as Qiskit's `SPSA.calibrate` does; with more perturbations
+  the first step is usually shorter.
+  Each iteration is one batch of `2·resamplings` circuits, so `resamplings`
+  fills more QPUs and averages that many estimates; the parameters are
+  measured in the same batch on the first iteration and every
+  `eval_interval` iterations, and after the last step one circuit measures
+  the parameters it reached, so every step is measured; `best_params` is the
+  best of them. The run
+  makes `max_iters` iterations and reports `converged=False`. An
+  `initial_point` is the centre of the calibration and the first point
+  measured. A seeded run reproduces on the same platform only, as with
+  CMA-ES. Invalid settings
+  raise `ValueError` before any circuit runs. See the training guide for
+  when to prefer it and its sensitivity to `target_step` and `perturbation`
+  (#396).
+- SPSA in training runs (Rust, `polypus-orchestration`): `Method::Spsa` with
+  `SpsaConfig`. The CUNQA walltime warning leaves the calibration batch out
+  of the timing and adds its circuits at the first iteration's pace, and
+  counts the final parameters as one more iteration (#396).
+- SPSA in `polypus-optimizers`: `AlgorithmSPSA` and `AlgorithmSPSAArgs`,
+  with an `initial_point` like every optimizer (#396).
+- `polypus.Adam(max_iters=100, learning_rate=0.1, beta1=0.9, beta2=0.999,
+  epsilon=1e-8, bounds=(-math.pi, math.pi), tolerance=0.01, patience=20,
+  finite_difference_step=0.2, rule="adam", seed=None)`, accepted by `train`
+  and `qml.train`: gradient ascent, built on Kevin Pérez González's Adam
+  (#394). Each iteration is one batch of `2·dimensions + 1` circuits, the
+  current parameters and the central finite difference around them, so no
+  QPU waits on a one-circuit batch, and one step. After the last step one
+  circuit measures the parameters it reached, so every step is measured, and
+  `best_params` is the best of the parameters measured. `max_iters` and
+  `patience` are at least 1. `rule="adam"` is Kingma and Ba's Adam, whose step
+  does not depend on the scale of the cost; `rule="momentum"` is Polyak's
+  heavy-ball momentum, whose learning rate does. A seeded run over a backend
+  whose results do not depend on the platform reproduces on every platform
+  (C-7). Invalid settings, an unknown `rule` included, raise `ValueError`
+  before any circuit runs. See the training guide for the finite-difference
+  step and for starting from a global search (#395).
+- Adam in training runs (Rust, `polypus-orchestration`): `Method::Adam` with
+  `AdamConfig`. A factory now builds the run's `Oracles` (evaluation, and an
+  exact gradient when it has one); Adam uses the exact gradient or a finite
+  difference of the evaluation, and the CUNQA walltime warning counts one
+  batch per iteration, plus the call to an exact gradient, and the final
+  parameters as one more iteration (#394, #395).
+- Adam in `polypus-optimizers`: `AlgorithmAdam`, `AlgorithmAdamArgs` and
+  `AdamRule`, driven by a new `GradientOracle` contract (the fitness
+  gradient, uphill), with the same fitness-stagnation stop as DE and CMA-ES.
+  A gradient of the wrong length, or with a non-finite component (the new
+  `OptimizerError::NonFiniteGradient`), is an error.
+  `FiniteDifferenceGradient` turns any `EvaluationOracle` into a
+  `GradientOracle` by central differences, in one batch per gradient, and
+  through `GradientOracle::value_and_gradient` scores the parameters in the
+  same batch (#394, #395).
+- `polypus.backend_compatibility(circuit, *, resources=False)` lists, for each
+  backend, why it would reject a circuit, without running it (#218). It also
+  reports `"cunqa"` and `"qmio"` next to `"aer"` and `"polypus"` (#254). The CUNQA entry prepares the circuit as a run
+  does and converts it with CUNQA's own converter, without raising QPUs; the
+  QMIO entry reports a build without the `qmio` feature, a Qiskit circuit and a
+  program that is not a terminal-measurement circuit. The keyword-only
+  `resources=True` also checks the native qubit ceiling and memory budget, with
+  the message of the error the run raises.
+- The QML oracle (`QmlOracle`, Rust) trains a native `polypus-qml` problem as
+  well as Qiskit circuits (`QmlSource`), sampled or exact, with optional
+  per-call minibatches (`MinibatchConfig`, `evaluate_full`) and, for the native
+  source, the exact parameter-shift gradient, which `QmlOracleFactory` hands
+  to Adam through the run's `Oracles`. Without a minibatch the gradient also
+  returns the parameters' fitness from its own batch
+  (`GradientOracle::value_and_gradient`), so an Adam iteration on a native
+  model is one call. Both sources share the candidate windows. With a minibatch the `Oracles` also carry a full-dataset view
+  (`Oracles::full_evaluation`): Adam scores its parameters on it and takes
+  only the gradient from the minibatch, and the other optimizers'
+  `best_fitness` is re-scored on it at the end.
+- `NativeStatevectorBackend::run_circuits_exact` (Rust): the exact basis-state
+  probabilities of each circuit, keyed like its counts, with no sampling and
+  the same memory budget and windows as `run_circuits`. Only for a
+  full-register read-out.
+- `polypus-qml`, a pure-Rust crate for quantum machine learning: validated
+  datasets with deterministic splits and feature scaling; layered variational
+  models (angle, amplitude, IQP and basis encoders, a hardware-efficient
+  ansatz, QCNN convolution and pooling); Pauli readout with sign, threshold,
+  argmax or raw decisions; squared-error, binary and categorical
+  cross-entropy and hinge losses, and an unsupervised `Expectation` loss that
+  maximises the readout itself (no labels). It builds `polypus-circuit`
+  circuits and turns measurement counts into a fitness, and into an exact
+  parameter-shift gradient that stays exact when convolution and pooling reuse
+  a parameter across gates, but never runs them. A `TrainedModel` (model plus
+  trained parameters) saves as versioned JSON under the `serde` feature.
+  Python reaches it through `polypus.qml.Model`.
 - `polypus.CMAES(generations=100, population_size=None, sigma0=math.pi / 2,
   tolerance=0.01, patience=20, restarts=0, seed=None)`, accepted by `train`
   and `qml.train`: Hansen's (μ/μ_w, λ)-CMA-ES for periodic parameters, with
@@ -49,8 +479,114 @@ Changes on `main` since 0.7.2.
   DE, unchanged; an unknown name raises `ValueError`. In Rust, `DeStrategy`
   (with `max_generations`) and
   `AlgorithmDifferentialEvolution::optimize_with_strategy`.
+- `initial_point` in `train` and `qml.train` (keyword-only in `qml.train`)
+  starts the search from a given point, such as an earlier run's
+  `best_params`: `dimensions` finite numbers as a list, tuple or NumPy array,
+  otherwise `ValueError` before anything runs. DE (every `strategy`)
+  evaluates it, wrapped into `[0, 2π)`, as the first member of its initial
+  population; PSO as its first particle, which must lie within `bounds`; QNG
+  starts from it and Adam evaluates it first; CMA-ES centres its first run on
+  it and keeps its `sigma0`, so a refinement wants a smaller one. Without it
+  every optimizer behaves as before, seeded runs included (#395). In Rust, each
+  optimizer's `check_preconditions` checks its configuration and then the point
+  without running anything, and `polypus_orchestration::Method::check_preconditions`
+  calls the one the method names.
+- `polypus.ConfigurationError`, a `polypus.PolypusError` that is also a
+  `ValueError`. Every argument and configuration check of `run_quantum_circuit`,
+  `train`, `qml.train`, `qml.predict` and a native model's `Model.fit`,
+  `TrainedModel.predict` and `TrainedModel.run` raises it (an unknown
+  `infrastructure`, a bad `walltime`, an optimizer setting, `options` on
+  `local`/`cunqa`, a loss without labels, …), as do `polypus.DE(strategy=...)`,
+  `polypus.Adam(rule=...)` and the argument checks of the `polypus.ask_tell`
+  adapters, so `except polypus.PolypusError` catches them and
+  `except ValueError` still does (#418, #507). Building a native model
+  (`qml.Encoder`, `qml.Ansatz`, `qml.Readout`, `qml.Dataset`, `qml.load`)
+  raises a plain `ValueError`, as building a `polypus.Circuit` does.
+- `polypus.SPSA(stability_constant=0.0)`: Spall's stability constant `A`
+  of the step gain `a/(k + A)^alpha`, finite and `>= 0`. The calibration
+  keeps the first step at `target_step` whatever `A`, so a larger `A` makes
+  the early steps shrink more slowly; `0` keeps the previous gains, and
+  seeded runs are unchanged. It comes after `seed` in the positional order.
+  Rust: `AlgorithmSPSAArgs::stability_constant` and
+  `polypus_orchestration::SpsaConfig::stability_constant` (#467).
+- `Circuit.compose(other, qubits=None)` / `ParameterizedCircuit::compose`
+  (and `try_compose`) place a circuit onto chosen qubits of another: qubit `i`
+  of `other` lands on `qubits[i]`, free parameters are shared by index, and
+  classical bits are not renumbered. Every instruction is checked as its gate
+  method checks it (contract C-4) before any is appended, so a failed call
+  leaves the circuit unchanged; the errors are the new
+  `CircuitError::InvalidQubitMap` and `CircuitError::ConflictingParamNames`
+  (`ValueError` in Python) and those of the gate methods.
+- `shor_order_finding` template: Beauregard's order-finding circuit for
+  Shor's algorithm, moduli up to 24 bits.
+  `polypus.circuits.templates.shor_order_finding(a, modulus,
+  counting_qubits=None)` / `polypus_circuit::templates::shor_order_finding`
+  returns the circuit (2n counting qubits by default, no measurements) whose
+  counting register estimates the order of `a` modulo `modulus`;
+  `MAX_SHOR_MODULUS_BITS` is the 24-bit limit, the largest circuit the
+  OpenQASM importers read back. The arithmetic blocks it is built from are
+  public in Rust under `templates::arithmetic`: `phase_adder`,
+  `modular_phase_adder`, `controlled_modular_multiplier` and
+  `controlled_modular_multiplication`. Their invalid arguments are the new
+  `CircuitError::InvalidTemplateArgument` (`ValueError` in Python). `qft` and
+  `shor_order_finding` build without holding the GIL.
+- `polypus.shor.factor`: Shor's algorithm end to end, from the classical
+  shortcuts to the order-finding circuit. `factor(n, infrastructure=...,
+  shots=1024, a=None, counting_qubits=None, max_attempts=10, seed=None,
+  **run_kwargs)` splits a composite `n` below `2**24` on any backend and
+  returns a `ShorResult` (factors, method, base, order, attempts,
+  peak_share, uniform_peak_share, counts). `method="quantum"` says where
+  the order was read, not that the circuit worked: to judge the circuit,
+  compare `peak_share`, the share of the shots on the peaks of the order
+  (all but the one at 0), with the level of an ideal circuit and with
+  `uniform_peak_share`, the share uniformly random outcomes would put there.
+  `order_from_measurement` and `factors_from_order`, its classical
+  post-processing, are public in the same module.
 
 ### Changed
+- `polypus-quantum` requires `qiskit>=2.0,<3` and `qiskit-aer>=0.17,<0.18`,
+  the releases the execution seam is tested on (contract C-10); 0.7.2 set no
+  upper bound (#362).
+- Argument and configuration errors are now `polypus.ConfigurationError`, a
+  `polypus.PolypusError`, so an `except polypus.PolypusError` placed before an
+  `except ValueError` now catches them (#418).
+- **BREAKING:** a seed means the same across the calls of one run on every
+  backend: each call gets its own sampling stream. Aer, CUNQA and the
+  subprocess bridge received the run's seed on every call, so batch slot `i`
+  got the same random numbers in every generation; they now receive it on
+  the first call and a seed derived from it and the call's index on the
+  next ones, as the native backend already did per circuit. A
+  `run_quantum_circuit` that is one call is unchanged; seeded `train`,
+  `qml.train` and multi-call runs on those backends change. Contract C-7
+  states it, and `docs/backends.md` says what a third-party backend must do
+  (#411).
+- **BREAKING:** `polypus.Qubo`, `polypus.Ising` and a Python cost function sum
+  each candidate's count-weighted cost in ascending bitstring order instead of
+  `HashMap` iteration order, which differs between processes, and the cost
+  function is called in that order. The cost sums no longer depend on the
+  process, so a seeded native `train` replays bit for bit in another process
+  (contract C-7); fitness values of costs with inexact sums can move in the
+  last bit (#401).
+- **BREAKING:** `polypus.DE` treats the parameters as angles: every strategy
+  takes a difference between two members as the shorter arc, in `(−π, π]`,
+  so an optimum near 0 converges as well as one at π. `"rand1bin"` always
+  takes one coordinate of a trial from the mutant, so no trial is a plain
+  copy of its parent. Seeded DE results change (#410).
+- **BREAKING (Rust):** `AlgorithmDifferentialEvolutionArgs` and
+  `polypus_orchestration::DeConfig` have the fields `mutation_factor` and
+  `crossover_rate` (#410).
+- **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
+  `External`, so an exhaustive `match` on it outside its crate must handle
+  it (#399).
+- **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
+  `Rotosolve`, so an exhaustive `match` on it outside the crate must handle
+  it (#398).
+- **BREAKING (Rust):** an `Optimizer` implemented outside `polypus-optimizers`
+  now implements `optimize_observed`, which shows an `IterationObserver` each
+  iteration, instead of `optimize`, now its default with an observer that
+  never stops (#500).
+- **BREAKING (Rust):** `polypus_orchestration::TrainFlow` has an `observer`
+  field (`None` keeps the previous behaviour) (#500).
 - **BREAKING:** with `infrastructure="qmio"` or a registered backend
   (`"subprocess"` or a third-party one), a `noise_model` or a `sim_method`
   other than `"automatic"` raises `ValueError` instead of being ignored, and so
@@ -62,6 +598,11 @@ Changes on `main` since 0.7.2.
   (#334).
 - **BREAKING (Rust):** `polypus_backend_conformance::circuits::as_qasm2`
   returns a `Result` instead of panicking on an unexportable circuit (#350).
+- **BREAKING (Rust):** registry options carry a string or a list of strings:
+  `BackendBuildContext::option` is removed and `options` is
+  `HashMap<String, OptionValue>`; read them with `option_str` or
+  `option_list`. The subprocess backend's `command` takes a list as the exact
+  argv; Python callers passing strings need no change (#293, ADR 0005).
 - **BREAKING:** the native backend derives each circuit's seed from the base
   seed and the circuit's index with SplitMix64 instead of `seed + index`, so
   neighbouring seeds no longer share streams shifted by one circuit (circuit
@@ -88,10 +629,20 @@ Changes on `main` since 0.7.2.
   `SimError::UnsupportedInstruction` (#349).
 - **BREAKING:** the declared classical width is kept through circuit binding
   and export (`fix(circuit)!`).
-- **BREAKING:** migrated to the `rand` 0.10 API (`fix(deps)!`); seeded streams
-  may differ from earlier releases.
-- Native and Aer backends lower gates outside Aer's basis before running; the
-  Aer lowering of a repeated OpenQASM program is cached.
+- **BREAKING:** migrated to the `rand` 0.10 API; seeded streams may differ
+  from earlier releases, and the public `polypus-physics` samplers
+  (`EnergySpectrum::sample_energy_mev`, `BeamSource::sample_state`,
+  `DivergentBeam`/`ParallelBeam::sample`, `sample_step_length`,
+  `MonteCarloEngine::run*`, `interactions::*`) take rand 0.10's `rand::Rng`
+  (#273).
+- **BREAKING:** an exception Qiskit or Aer raises during a run is raised as
+  `polypus.BackendError`, or as `polypus.EvaluationError` while composing or
+  binding circuits, with the original as `__cause__`; `except QiskitError` no
+  longer catches it. In Rust, `polypus_evaluation::EvaluationError` has the
+  variants `Qiskit` and `Qml`, and `Python` carries a `DisplaySafePyErr`
+  (#218).
+- Native, Aer and CUNQA backends lower gates outside the target's basis
+  before running; the Aer lowering of a repeated OpenQASM program is cached.
 - **BREAKING:** `templates::qft` and `qft_with_options` return a `Result`:
   above `MAX_QFT_QUBITS` (2827) qubits, whose gates would exceed what the
   OpenQASM importers read back, they fail with
@@ -107,12 +658,71 @@ Changes on `main` since 0.7.2.
   `required_num_results`, as the OpenQASM exports do.
 - **BREAKING:** `expectation_value` and `expectation_values` raise `ValueError`
   for counts that sum to zero instead of returning `0.0`.
-- Rust no longer sends the `backend` and `id` kwargs that `run_qcs` never read
-  (contract C-1).
+- **BREAKING (Rust):** Rust no longer sends the `backend` and `id` kwargs that
+  `run_qcs` never read (contract C-1): `BackendConfig::Local` and
+  `BackendConfig::Cunqa` have no `backend` field, and `LocalBackend::new` and
+  `CunqaBackend::new` no longer take one (#230).
 - The QML candidate window also follows the backend's concurrency, within the
   memory bound.
 - **BREAKING (Rust):** `polypus_orchestration::DeConfig` has a `strategy`
   field; `DeStrategy::Rand1Bin` keeps the previous behaviour.
+- `train` and `qml.train` check the optimizer's configuration (a DE
+  `population_size` below 4, empty PSO or QNG `bounds`, an invalid CMA-ES
+  `sigma0`, ...) before any backend or CUNQA allocation exists, and before
+  `initial_point`, as the optimizer does. These `ValueError`s used to come
+  once the backend existed (#395).
+- **BREAKING (Rust):** `AlgorithmDifferentialEvolutionArgs`,
+  `AlgorithmPSOArgs`, `AlgorithmQNGArgs` and `AlgorithmCmaEsArgs` have an
+  `initial_point` field, `polypus_orchestration::dispatch_optimizer` takes
+  `initial_point` as its last argument and `TrainFlow` has an `initial_point`
+  field; `None` keeps the previous behaviour (#395).
+- **BREAKING (Rust):** the `polypus` crate has no default features, so it no
+  longer enables `log/max_level_info` for every dependent; choose a level with
+  `info-logs` or `debug-logs`. The wheel is built with `debug-logs`, so
+  `init_logger(level="debug")` shows the optimizers' progress without a
+  rebuild. The log-level aliases in `.cargo/config.toml` are removed (#414).
+- **BREAKING (Rust):** `polypus_orchestration::OracleFactory::build` returns
+  `Oracles`; a factory with only an evaluation oracle returns it `.into()`.
+  `dispatch_optimizer` takes `impl Into<Oracles>`, so a boxed oracle still
+  works, and `Method` has an `Adam` variant.
+- **BREAKING (Rust):** `polypus_optimizers::OptimizerError` has new variants,
+  `NonFiniteGradient` (#394), `InvalidCandidate` and `ExternalOptimizer`
+  (#399), and is `#[non_exhaustive]`; a `match` on it outside its crate needs
+  a wildcard arm, and later variants are not breaking.
+- **BREAKING (Rust):** `polypus_orchestration::Method` has a `Spsa` variant,
+  so an exhaustive `match` on it needs an arm for it (#396).
+- **BREAKING (Rust):** `polypus_orchestration::TrainFlow` has a
+  `final_shots` field (`None` keeps the previous behaviour), and its
+  `Flow::Output` is `TrainOutcome`, whose `optimization` field is the
+  `OptimizationOutcome` it returned before (#397).
+- `rust-toolchain.toml` pins the Rust that CI and the release builds use
+  (1.99.1), and that rustup selects in a checkout; a new Rust release can no
+  longer turn CI red under `-D warnings`. The MSRV stays 1.85, and the sdist
+  does not include the file. Fuzzing and Miri use a dated nightly, and the
+  docs, release and tutorial-sync jobs have a timeout (#415).
+- **BREAKING:** `polypus.DE`, with every `strategy`, and `polypus.CMAES`
+  refuse `patience=0` with `polypus.ConfigurationError` when `train` starts,
+  as `polypus.Adam` and `polypus.Rotosolve` already did: it compared a
+  generation's best fitness with itself, so any `tolerance > 0` ended the run
+  at once (#467).
+- A `final_shots` (`train`, `qml.train`), a `max_evaluations`
+  (`polypus.External`) or an adapter's `dimensions` or `batch_size`
+  (`polypus.ask_tell`) that is not an integer, such as `4096.0`, `True` or a
+  `str`, raises `TypeError` instead of `ValueError`, as `shots` and every
+  other integer argument do. An integer below 1 still raises
+  `polypus.ConfigurationError` (#467).
+- `repr(TrainResult)` shows `final_params` after `best_params` when the run
+  had `final_shots` (#467).
+- **BREAKING (Rust):** `polypus_orchestration::Method` is
+  `#[non_exhaustive]`: a `match` on it outside its crate needs a wildcard
+  arm, and a new optimizer is no longer a breaking change (#467).
+- With `polypus.External` on CUNQA, the walltime warning times the first
+  batch until the second starts, so the library's own time in `tell()` and
+  the next `ask()` is in the projection; it left that time out, which for a
+  model-based library can be much of the run. The warning comes when the
+  second batch starts, and a run of one batch gets none (#467).
+- `AlgorithmSPSAArgs` and `polypus_orchestration::SpsaConfig` have a
+  `stability_constant` field (#467).
 
 ### Deprecated
 - Rust: `ConcreteCircuit::to_qasm2` and `to_qir`, which panic on circuits
@@ -120,6 +730,74 @@ Changes on `main` since 0.7.2.
   internal caller uses the panicking exports any more (#350).
 
 ### Fixed
+- `backend="aer"` reads a circuit without measurements on the full register
+  (`num_qubits`-wide keys, C-3), as the native backend does, instead of
+  raising `QiskitError` (#218).
+- The `polypus_python` helpers no longer set their logger to DEBUG or write
+  log files to the working directory; `serialize_quantum_circuit` writes to a
+  private per-user temporary directory (or `directory=`) instead of
+  `<cwd>/temp`, and the helpers validate run ids as the Rust entry points do
+  (C-9, #219).
+- With `infrastructure="subprocess"`, a worker started from a short-lived
+  thread (a pool worker or a `threading.Thread`) is no longer killed when
+  that thread exits (#220).
+- The native backend refuses a measured circuit whose classical width exceeds
+  its counts key (`creg c[65536]`) with `polypus.NativeCircuitError` instead
+  of panicking (#346).
+- Sampling shots no longer builds a `2^n` cumulative table next to the
+  statevector, memory the budget did not count; the samples are unchanged
+  (#215).
+- A process waiting for the calibration cache lock behind other writers no
+  longer writes without it after a fixed 5 s and loses an entry: only a lock
+  with no write for the timeout counts as stale (#281).
+- A missing optional library is logged with its own message instead of the
+  generic Qiskit error (#256).
+- With `infrastructure="subprocess"`, a worker that answers with a frame that
+  is no protocol message (an unknown `op`, a field of the wrong type, a payload
+  that is not JSON) fails the call at once with a protocol error, and the
+  worker is killed. The bridge waited for the live worker to exit, so the call
+  hung forever, past `recv_timeout_ms` (#492).
+- `train` and `qml.train` convert `expectation_function` before creating the
+  backend, so an invalid one no longer requests a CUNQA allocation (`qraise`)
+  before failing; the optimizer configuration was already checked first.
+  `qml.train` rejects `infrastructure="qmio"` before anything runs, like
+  `qml.predict`. The stubs type `options` as a `dict` of `str` or
+  `list`/`tuple` of `str` values, which the runtime accepts, so mypy accepts
+  `options={"command": [...]}` (#418).
+- Runs on the local Aer backend or on CUNQA from several threads at once no
+  longer panic with `Already mutably borrowed: PyBorrowError` on Qiskit 2.0.
+  The circuit lowering shares Qiskit's session equivalence library between
+  threads, and Qiskit 2.0's `BasisTranslator` cannot share it; Polypus now
+  lowers one circuit at a time, which costs no parallelism since the passes
+  hold the GIL (#468).
+- The examples run as shipped. `polypus_cunqa_basic.py` passed
+  `infraestructure=` (a `TypeError`) and sent its CUNQA steps to `"qmio"`, the
+  teleportation examples called `.values()` on a `RunResult`, `qft.py` needed
+  pandas and `max_cut_qaoa.py` required `--method` (it now defaults to
+  `polypus_local`). The examples that need CESGA's CUNQA or QMIO are in
+  `examples/hpc/`, and a personal run script is gone. The new `examples.yml`
+  workflow type-checks every example against the typing stubs and runs the
+  local ones (#406).
+- `max_cut_qaoa.py` reads every counts key with qubit 0 rightmost: the mean
+  cut behind the approximation ratio and the plotted cut read it reversed,
+  which showed only on graphs that are not symmetric under node reversal (from
+  `--qubits 5`). The script now checks the mapping against Qiskit's key
+  order before it trains (#445).
+- `infraestructures.py` compares Aer and the native backend on the
+  Hamming-weight distribution, against a total-variation bound derived from the
+  shot count, and exits with an error on a mismatch. The full 4096-outcome
+  distribution with a fixed 0.05 threshold reported a mismatch on every run,
+  since two samples of 8192 shots differ by about 0.23 (#446).
+- The README quickstart runs on the native backend (`backend="polypus"`), so it
+  no longer loads Qiskit Aer, which failed to import on the `python:3.10-slim`
+  to `python:3.12-slim` images with Qiskit 2.6.0 (`cannot allocate memory in
+  static TLS block`; fixed in Qiskit 2.6.1). The running guide has a new
+  Troubleshooting section for the error (#392).
+- The `polypus-physics` tests cover the `POLYPUS_ENDF_DATA_DIR` override
+  without setting the variable, which raced the tests that read it and cache
+  what they read, and write their files to per-process scratch directories
+  instead of fixed paths in the temp directory. The crate no longer contains
+  `unsafe` (#420).
 - With `infrastructure="cunqa"`, a circuit without measurements is read out on
   the full quantum register (`num_qubits`-wide keys, contract C-3) instead of
   failing with CUNQA's `key 'counts' not found` (#253), and a circuit with
@@ -145,6 +823,11 @@ Changes on `main` since 0.7.2.
   qubit twice (`Cx(0, 0)` in a hand-built `ConcreteCircuit`) with the new
   `SimError::RepeatedQubit` instead of writing out of bounds; the kernels'
   operand checks are now `assert!`s (#342).
+- **BREAKING (Rust):** a measurement's classical bit index is bounded instead
+  of overflowing: `try_push` rejects a `cbit` from `MAX_REGISTER_BITS` up with
+  the new `CircuitError::ClbitOutOfRange`, and `polypus_sim::sample_projected`
+  returns a `Result`, with `SimError::ClbitOutOfRange` for a bit beyond the
+  counts key (#345).
 - **BREAKING (Rust):** `Statevector::expectation_z` returns
   `Result<f64, SimError>` and rejects a qubit outside the register instead of
   returning a wrong value or overflowing; a repeated qubit cancels (`Z·Z = I`).
@@ -172,9 +855,41 @@ Changes on `main` since 0.7.2.
 - The OpenQASM importers normalise the instructions in place instead of
   copying them; QIR bitcode export stops `llvm-as` after 120 s and always
   reaps it (#356).
-- CUNQA receives `cores_per_qpu` under the name CUNQA >= 2.4 expects.
+- **BREAKING:** CUNQA receives `cores_per_qpu` under the name CUNQA 2.4 and
+  later expect; CUNQA 2.3 is no longer supported (supported range
+  `>=2.4,<4`, #204).
 - Python errors and OS-entropy failures surface as typed errors, not panics.
 - Memory budget honours `K`/`M`/`G` suffixes and detects the cgroup/RAM limit.
+- CI runs every push to `main` to completion: the next push cancelled it, and
+  the release gate needs a successful push run for the commit it publishes
+  (#403).
+- CI tests the whole workspace (`cargo test --workspace`), so a crate added to
+  it is tested without editing the workflow, which listed the crates by hand
+  (#412).
+- CI runs tests it skipped without notice: the pinned-fixture test of the
+  OpenQASM 3 interop with Qiskit (contract C-10), in a leg with the Qiskit
+  that wrote the fixtures; the QIR checks with `llvm-as`; and the conformance
+  battery against Aer. There a missing tool fails those tests instead of
+  skipping them, and pytest lists every skip with its reason (#407).
+- An oracle failure that the optimizer detects, a batch answered with the
+  wrong number of values or a gradient with a `NaN` or an infinity, raises
+  `polypus.EvaluationError` instead of `polypus.ConfigurationError` (#467).
+- `polypus.SPSA` refuses a `resamplings` above 2147483647 with
+  `polypus.ConfigurationError`, so that an iteration's batch fits in 32 bits;
+  `resamplings=4294967295` aborted the process when it allocated the batch
+  (#467).
+- The stubs type `final_shots` and `External`'s `max_evaluations` as
+  `SupportsIndex`, which the runtime accepts, so mypy accepts a NumPy
+  integer (#467).
+- Rust: `dispatch_optimizer` checks Adam's `finite_difference_step` with an
+  exact gradient too, as `Method::check_preconditions` does, so the two
+  agree whatever oracles the run has (#467).
+- A Python test that CI skips now fails the run unless the leg's
+  `POLYPUS_ALLOWED_SKIPS` lists it (`tests/python/skip_guard.py`), so a test
+  that backs a contract cannot stop running unnoticed. The floors leg installs
+  LLVM too, and every leg replays the seeded native trainings of the C-7
+  determinism baseline in a second process and compares them byte for byte
+  (#407).
 
 ## [0.7.2] - 2026-09-30
 
@@ -277,7 +992,8 @@ Changes on `main` since 0.7.2.
 
 Initial release.
 
-[Unreleased]: https://github.com/Bahia-Software/polypus/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/Bahia-Software/polypus/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Bahia-Software/polypus/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/Bahia-Software/polypus/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/Bahia-Software/polypus/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Bahia-Software/polypus/compare/v0.6.0...v0.7.0

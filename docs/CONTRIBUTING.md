@@ -68,45 +68,134 @@ way.
 
 ## Running the checks
 
-Everything CI runs, you can run locally:
+These are the checks CI runs (`.github/workflows/ci.yml` and `hygiene.yml`);
+each can be run locally. They use the Rust that `rust-toolchain.toml` pins,
+which rustup selects in this checkout (`rustup toolchain install` installs
+it). Lints and builds:
 
 ```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                     # all crates, no hand-maintained list
+ruff check && ruff format --check          # ruff pinned in requirements-dev.txt
+cargo deny check                           # licenses + advisories (needs cargo-deny, deny.toml)
+cargo metadata --locked --format-version 1 > /dev/null   # Cargo.lock matches the manifests
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo clippy --locked -p polypus-infrastructure --features qmio --all-targets -- -D warnings
+cargo clippy --locked -p polypus --features qmio --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
+python .github/scripts/hygiene.py --base origin/main   # repository hygiene (commit first)
+cargo machete                              # unused dependencies (needs cargo-machete)
+```
+
+Declared dependency floors (the `rust-minimal-versions` and `python-floors`
+jobs). The first rewrites `Cargo.lock`; restore it afterwards with
+`git checkout Cargo.lock`. The second needs a fresh environment on Python 3.10
+and installs the build requirements at their floors first (see the job):
+
+```bash
+cargo +nightly-2026-10-22 update -Z direct-minimal-versions
+cargo check --workspace --all-targets
+uv pip install --resolution lowest-direct -r pyproject.toml -r requirements-dev.txt
+```
+
+Rust tests:
+
+```bash
+cargo test --locked --workspace            # every crate, default features
                                            # (polypus-subprocess-backend's tests spawn a Python
                                            #  worker; they skip gracefully if python3 is absent)
-cargo test -p polypus --features qmio      # QMIO backend (skips gracefully without QPU access)
-cargo deny check                           # licenses + advisories (needs cargo-deny, deny.toml)
-pytest tests/python                        # needs polypus installed (see Setting up)
+cargo test --locked --all-features -p polypus-circuit -p polypus-sim -p polypus-physics \
+  -p polypus-optimizers -p polypus-observable -p polypus-backend \
+  -p polypus-backend-conformance -p polypus-subprocess-backend
+                                           # pure-Rust crates, every feature
+CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \
+  cargo test --locked --release -p polypus-sim --features parallel --test memory_safety
+CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \
+  cargo test --locked --release -p polypus-sim --features parallel --lib kernels::
+cargo test --locked -p polypus-logger --features debug-logs   # the wheel's log level
+cargo test --locked -p polypus-infrastructure --features qmio
+cargo test --locked -p polypus --features qmio   # QMIO backend (skips gracefully without QPU access)
+cargo test --locked --manifest-path examples/rust-backend-template/Cargo.toml
+cargo test --locked --manifest-path examples/python-backend-template/Cargo.toml
+```
+
+Python tests, with the wheel installed (see Setting up):
+
+```bash
+python -m compileall -q examples benchmarks
+pytest tests/python -rs --strict-markers   # -rs lists every skip with its reason
 python -m mypy.stubtest polypus \
   --allowlist tests/python/stubtest_allowlist.txt \
   --mypy-config-file tests/python/stubtest_mypy.ini
                                            # typing stubs vs the installed extension
-                                           # (needs the wheel installed and mypy from
-                                           #  requirements-dev.txt)
-python .github/scripts/hygiene.py --base origin/main   # repository hygiene (commit first)
+                                           # (mypy from requirements-dev.txt)
+OMP_NUM_THREADS=1 cargo test --locked -p polypus-infrastructure --test conformance \
+  -- --ignored --exact local_aer_backend_conformance
+                                           # the conformance battery against Aer
 ```
+
+A few tests skip when what they need is missing. CI provides it and sets a
+variable that turns those skips into failures: `POLYPUS_REQUIRE_LLVM_AS=1`
+for the QIR tests that run `llvm-as` (Rust and Python), `POLYPUS_REQUIRE_AER=1`
+for the Aer conformance battery, and `POLYPUS_REQUIRE_FIXTURES_QISKIT=1` in the
+leg that installs the Qiskit `tests/python/qasm3_fixtures.py` names, for the
+pinned OpenQASM 3 fixtures (contract C-10). The other legs use the latest
+Qiskit, where those fixture tests skip. The latest-Python leg installs pinned
+Optuna, Nevergrad and pycma and sets `POLYPUS_REQUIRE_EXTERNAL_LIBRARIES=1`,
+so the tests of `polypus.ask_tell` that train through them run there
+(contract C-5); elsewhere they skip unless you install them. It also
+installs the CPU wheel of PyTorch, pinned, and sets `POLYPUS_REQUIRE_TORCH=1`,
+so the tests of `polypus.torch` (`tests/python/test_torch_quantum_layer.py`
+and the PyTorch cases of `test_typing_stubs.py`) run there (contract C-11);
+the examples job installs the same PyTorch on both its legs, since it runs
+`examples/qml_torch_hybrid.py`, and so does Sonar's coverage job, so that
+`polypus/torch.py` is covered. Those pins are the floors of the pip extras of
+the same names in `pyproject.toml`, which a test checks: bump a pin and its
+floor together.
+
+Every Python leg also sets `POLYPUS_ALLOWED_SKIPS` to the tests it may skip,
+separated by spaces: a file (`test_cunqa_real.py`) or a class or test in it
+(`test_determinism_baseline.py::TestSameBuildStrict`; a test covers its
+parametrized cases). Any other skip fails the run and is listed at its end
+(`tests/python/skip_guard.py`), as is an entry that matched no skip, which
+does not fail it. A test that needs something a leg lacks either gets it
+installed there or goes on that leg's list in `.github/workflows/ci.yml`.
+
+CI also builds the wheel on Linux, macOS and Windows and executes every
+notebook under `tutorials/` (`jupyter nbconvert --to notebook --execute`).
+Three jobs set another toolchain with `RUSTUP_TOOLCHAIN`: `msrv` checks the
+workspace with the MSRV (`rust-version` in `Cargo.toml`), and `fuzz` and
+`miri` fuzz the OpenQASM importers and run Miri over `polypus-sim`'s `unsafe`
+kernels on a dated nightly. Their jobs in `ci.yml` show the exact commands.
 
 A green run is a **precondition** for opening a PR, not something to fix
 afterwards.
 
-> Note: we intentionally use `--workspace` instead of listing crates one by
-> one — a hand-maintained crate list silently goes stale every time a crate is
-> added or split (it already happened once). The one deliberate exception is
-> CI's all-features pass over the pure-Rust crates (see
-> `.github/workflows/ci.yml`): `--workspace --all-features` would enable
-> `extension-module`, which breaks building the test targets.
+> Note: CI tests with `--workspace` instead of listing crates one by one — a
+> hand-maintained crate list silently goes stale every time a crate is added
+> or split (it already happened once). The one deliberate exception is the
+> all-features pass over the pure-Rust crates: `--workspace --all-features`
+> would enable `extension-module`, which breaks building the test targets.
 
 Performance claims have their own bar: before claiming a speed-up, back it
 with the scripts in `benchmarks/` (`run_benchmarks.py`,
 `bench_native_vs_qiskit.py`, `bench_batching.py`) and include the numbers in
 the PR description.
 
+## Building the docs
+
+```bash
+pip install -r requirements-docs.txt
+mkdocs serve
+```
+
+`mkdocs build --strict` is the check CI runs: any broken link or page missing
+from the nav fails it. The hook in `docs/_hooks/repo_files.py` turns links to
+files outside `docs/` into GitHub URLs; its tests run with `pytest tests/docs`.
+
 ## Repository hygiene
 
 `.github/workflows/hygiene.yml` runs `.github/scripts/hygiene.py` (standard
-library only, Python ≥ 3.9) on every pull request and push to `main`. It
+library only, Python ≥ 3.10) on every pull request and push to `main`. It
 rejects:
 
 - internal notes and local tool configuration that `.gitignore` already
@@ -116,7 +205,8 @@ rejects:
   GitHub tokens;
 - notebooks under `tutorials/` with outputs or execution counts;
 - blobs larger than 1 MiB;
-- a `CITATION.cff` version different from `Cargo.toml` (contract C-6);
+- a `CITATION.cff` version different from `Cargo.toml`, or not an earlier
+  release when `Cargo.toml` is `X.Y.Z-dev` (contract C-6);
 - submodules.
 
 Run it before pushing:
@@ -145,6 +235,84 @@ the public rules passed. A post-merge finding cannot undo the publication.
 The check covers the net diff only, not every intermediate commit nor the
 existing history, and does not replace checking your own changes before
 pushing.
+
+## Code quality dashboard
+
+`.github/workflows/sonar.yml` sends the code to SonarQube Cloud on every pull
+request and push to `main` (configuration in `sonar-project.properties`):
+Rust coverage from `cargo llvm-cov` over the `test (Rust)` passes and over the
+pytest suite, which runs against a wheel built with the same instrumentation,
+the clippy report, and Python coverage of `python/` from that pytest run. The
+instrumented wheel simulates several times slower, so that run sets
+`POLYPUS_TEST_TIME_SCALE=10`, which stretches the deadlines and timeouts of the
+Ctrl+C tests in `tests/python/test_interrupt.py` by that factor; `ci.yml` runs
+them with the bounds as written. The subprocess worker template
+(`crates/polypus-subprocess-backend/python/worker_template.py`) is left out of
+the coverage figures: it runs as a separate process spawned by the Rust
+integration tests, which no tool instruments. So are the diagnostic binaries
+under `crates/*/src/bin/`, which are run by hand. Sonar still analyses both
+for issues. On pull requests the `SonarQube Cloud scan` job waits for the
+quality gate and fails with it; pushes to `main` only report. Without the
+`SONAR_TOKEN` secret (pull requests from forks) the reports are still built
+but not uploaded, and the job passes without a gate. Python coverage locally,
+with the wheel installed:
+
+```bash
+python -m coverage run -m pytest tests/python && python -m coverage combine && python -m coverage report
+```
+
+Both coverage jobs also write their Rust line coverage **per crate** in the
+job summary of the run (`.github/scripts/coverage_summary.py`), with or
+without the token: the `rust` job for the `test (Rust)` passes, the `python`
+job for the Rust the pytest suite reaches (the bindings above all). The
+reports themselves are the run's `sonar-rust` and `sonar-python` artifacts,
+kept 14 days. Neither job has a coverage threshold. The same table locally,
+from a report of your own:
+
+```bash
+cargo llvm-cov --workspace --lcov --output-path lcov.info   # needs cargo-llvm-cov
+python .github/scripts/coverage_summary.py lcov.info
+```
+
+## Mutation testing
+
+Line coverage says which code the tests run, not whether they would notice it
+change. `.github/workflows/mutation.yml` runs
+[cargo-mutants](https://mutants.rs) every Sunday over `polypus-circuit`,
+`polypus-sim`, `polypus-physics`, `polypus-optimizers`, `polypus-observable`
+and `polypus-backend`, with every feature: it makes small changes to the code
+(a `+` into a `-`, a function body into a constant) and runs the crate's tests
+against each. A mutant the tests fail on is *caught*; one they pass on is
+*missed*, a behaviour no test checks. One job runs each crate, except the two
+slowest, which are split into round-robin shards so that no job comes near the
+runner's 6 h limit: `polypus-circuit` in two and `polypus-sim` in three
+(`--shard K/N --sharding round-robin`, every N-th mutant). Each job writes its
+caught, missed, timed-out and unviable mutants and the score, caught / (caught
++ missed), in its summary, and keeps `missed.txt` and `outcomes.json` as the
+`mutants-<crate>-<K>of<N>` artifact for 30 days. The scheduled run then
+comments one row per crate, its shards added up, on the issue titled
+`mutation: weekly score`, which the workflow creates (or reopens) itself; a
+crate one of whose shards did not run is listed as not run, with the reason.
+It is report-only: missed mutants fail nothing, but cargo-mutants failing to
+run (the unmutated tests failing, the step timing out) fails its job. A manual
+run (`workflow_dispatch`) reports in the summaries only, unless its `comment`
+input is set.
+
+To reproduce a crate's run, or to check that a new test catches a mutant,
+install the version the workflow pins and run it on that crate (it copies the
+tree to a temporary directory; `mutants.out/` is ignored by git):
+
+```bash
+cargo install cargo-mutants --locked --version 27.1.0
+cargo mutants --package polypus-observable --all-features           # the whole crate
+cargo mutants --package polypus-observable --all-features --list    # its mutants, without running them
+cargo mutants --package polypus-observable --all-features --file crates/polypus-observable/src/qubo.rs --re 'from_matrix'
+cargo mutants --package polypus-sim --all-features --shard 1/3 --sharding round-robin   # one CI job's shard
+```
+
+Kill a missed mutant with a test of the behaviour it changes, not by
+excluding it; a mutant that no test can observe (an equivalent one) is worth a
+line in the PR, not an exclusion.
 
 ## Lint policy
 
@@ -215,8 +383,17 @@ under the project license.
 
 Single source of truth: the workspace `Cargo.toml` version (SemVer). Release
 tags must match it exactly (`vX.Y.Z`), and every release updates
-[`CHANGELOG.md`](../CHANGELOG.md). The short checklist lives in
-[`docs/RELEASING.md`](RELEASING.md).
+[`CHANGELOG.md`](../CHANGELOG.md). Between releases `main` carries the next
+patch version with a `-dev` suffix (`0.8.1-dev` after 0.8.0).
+
+A pull request that breaks the public API of a crate published on crates.io
+also raises the workspace version to the next minor (`0.9.0-dev` while the
+version is `0.x`), with `cargo set-version --workspace` and the backend
+templates' lockfiles refreshed as in [`docs/RELEASING.md`](RELEASING.md#release-steps);
+the `semver` CI job (cargo-semver-checks against the last published version)
+fails otherwise.
+Mark the change **BREAKING** in `CHANGELOG.md`. The release checklist lives
+in [`docs/RELEASING.md`](RELEASING.md).
 
 ## AI-assisted development
 

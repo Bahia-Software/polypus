@@ -38,6 +38,8 @@ pub struct RunParams {
     /// backend's own unseeded default. The Python-facing layer resolves it to
     /// `Some` whenever a seed-consuming backend runs (user value or a fresh
     /// OS-entropy draw), so the effective seed can be reported in the manifest.
+    /// It is the run's base seed, the same on every call: the backend gives
+    /// each call its own stream derived from it ([`CallSeeds`](crate::CallSeeds)).
     pub seed: Option<u64>,
     /// Optimization effort for the backend's transpiler, travelling to
     /// [`Transpiler::transpile`](crate::Transpiler::transpile) as the tuning

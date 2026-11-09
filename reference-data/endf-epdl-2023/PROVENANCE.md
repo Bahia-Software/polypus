@@ -1,8 +1,12 @@
-# Provenance and attribution — embedded photon data (`ZA*.txt`)
+# Provenance and attribution — ENDF-6 photon data (`ZA*.txt`)
 
 The `ZA*.txt` files in this directory are **tabulated photon interaction
 cross-sections** in the **ENDF-6** format, taken from the **Evaluated Photon
 Data Library (EPDL)**, as distributed in **EPICS2023 / EPDL2023**.
+
+`polypus-physics` reads them at runtime from this directory (or from
+`POLYPUS_ENDF_DATA_DIR`); they are not embedded in or packaged with the
+crate. See [README.md](README.md).
 
 They are third-party scientific data files. They are **not** original source
 code of this project and are **not** covered by this repository's software

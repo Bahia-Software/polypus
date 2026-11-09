@@ -47,7 +47,7 @@ With `infrastructure="cunqa"`, three keyword arguments size the SLURM allocation
 | `cores_per_qpu` | `2` | CPU cores per QPU |
 | `walltime` | `"10:00:00"` | SLURM walltime of the QPUs, as `HH:MM:SS` |
 
-`walltime` accepts only `HH:MM:SS`: hours are one or more digits (so `"48:00:00"` is valid), minutes and seconds are two digits below 60, and the total must be above zero. SLURM's `D-HH:MM:SS` form is rejected. Anything else raises `ValueError` before any QPU is requested. The QPUs are released when the walltime runs out, so set it above the expected duration of a long optimisation. Training logs a warning after the first generation when, at that pace, the run would outlast the walltime (see [Allocation walltime](../backends.md#allocation-walltime)).
+`walltime` accepts only `HH:MM:SS`: hours are one or more digits (so `"48:00:00"` is valid), minutes and seconds are two digits below 60, and the total must be above zero. SLURM's `D-HH:MM:SS` form is rejected. Anything else raises `ValueError` before any QPU is requested. The QPUs are released when the walltime runs out, so set it above the expected duration of a long optimisation. Training logs a warning after the first generation when, at that pace, the run would outlast the walltime (see [Allocation walltime](../backends.md#allocation-walltime)); the final batch of `final_shots` is not counted.
 
 ```python
 result = polypus.run_quantum_circuit(
@@ -69,11 +69,11 @@ With `infrastructure="local"`, `backend="aer"` (the default) runs Qiskit Aer and
 - Aer runs all of those, but rejects gates outside its basis (such as `ch` or a declared `gate`) unless the circuit is transpiled first.
 - The native backend is a noiseless statevector simulator: it rejects a `noise_model` and a `sim_method` other than `"automatic"` with `ValueError`.
 
-`polypus.backend_compatibility` returns, per backend, the reasons it would reject a circuit. An empty list means the circuit runs. The check is structural: it runs nothing and does not check resources such as memory.
+`polypus.backend_compatibility` returns, per backend (`aer`, `polypus`, `cunqa`, `qmio`), the reasons it would reject a circuit. An empty list means the circuit runs. It runs and connects to nothing. By default it is structural; with `resources=True` it also checks the native backend's qubit ceiling and memory budget.
 
 ```python
 report = polypus.backend_compatibility(qc)
-# e.g. {"aer": [], "polypus": ["native backend could not parse OpenQASM 2.0: ... 'reset' is not supported ..."]}
+# e.g. {"aer": [], "polypus": ["native backend could not parse OpenQASM 2.0: ... 'reset' is not supported ..."], ...}
 backend = "polypus" if not report["polypus"] else "aer"
 result = polypus.run_quantum_circuit(
     qc, shots=1000, infrastructure="local", backend=backend
@@ -82,10 +82,15 @@ result = polypus.run_quantum_circuit(
 
 A circuit without measurements is read out on all its qubits by both backends.
 
+## Tracing a circuit run
+
+`run_quantum_circuit` takes the same keyword-only `trace` argument as `train`, a path (`str` or `os.PathLike`) of a new file for the run's call trace (contract C-12), and follows `POLYPUS_CALL_TRACE` and `POLYPUS_CALL_TRACE_MAX_MB` as `train` does, its file in the variable's directory being named after the run's effective id, `RunResult.id`; see [Tracing the calls of a run](training.md#tracing-the-calls-of-a-run). The header line has `"flow": "run_circuit"`, `null` as `method` and `dims`, the run's `id` and its effective `seed` (`null` on `"qmio"`). The run is one `batch` line, with `"op": "execute_replicas"`, `n` equal to 1 and the run's `shots`, written after one `wave` line per call to the backend. With `n_qpus=1` that is one `run_circuits` call with every shot. With `n_qpus > 1` the shots are split into one replica per QPU, run by `run_shots_distributed` calls, and each `wave` line lists in `replicas` the shots of each replica it ran; over all the waves they add up to `shots`.
+
 ## Errors
 
 All Polypus exceptions derive from `polypus.PolypusError`.
 
+- An invalid argument or configuration of `run_quantum_circuit`, `train`, `qml.train`, `qml.predict`, or a native model's `fit`, `predict` and `run` raises `polypus.ConfigurationError`, which is also a `ValueError`: an unknown `infrastructure`, a bad `walltime`, an optimizer setting such as `DE(population_size=3)`, an `options` dict on a backend that takes none. `train`, `qml.train` and `Model.fit` check all of them, the optimizer included, before creating the backend, so on CUNQA no allocation is requested for a run that cannot start. A value of the wrong type is a `TypeError`. Building a circuit or a native model (`polypus.Circuit`, `qml.Encoder`, `qml.Ansatz`, `qml.Readout`, `qml.Dataset`, `qml.load`) checks each step as it is written and raises a plain `ValueError`.
 - A Qiskit or Aer failure during a run raises `polypus.BackendError`, with the original exception as its `__cause__`.
 - A Qiskit failure while `train`, `qml.train` or `qml.predict` prepares or binds your circuits (for example an ansatz wider than the feature map) raises `polypus.EvaluationError` the same way.
 - An exception raised by your own `expectation_function` reaches you unchanged.
@@ -94,5 +99,27 @@ All Polypus exceptions derive from `polypus.PolypusError`.
 - Invalid circuit construction (an out-of-range qubit or classical bit, a non-finite angle) raises `ValueError`.
 
 Polypus is written not to panic. If a Rust panic does happen, it is a bug: it reaches Python as `pyo3_runtime.PanicException`, which derives from `BaseException`, so neither `except Exception` nor `except polypus.PolypusError` catches it. Please report it.
+
+## Troubleshooting
+
+### `import qiskit_aer` fails with "cannot allocate memory in static TLS block"
+
+```text
+ImportError: .../qiskit_aer.libs/libgomp-<hash>.so.1.0.0: cannot allocate memory in static TLS block
+```
+
+Aer bundles its own OpenMP runtime, `libgomp`, which needs room in glibc's static TLS reserve when Python loads it. If the libraries loaded before it have filled the reserve, the import fails, and so does every run on `backend="aer"`, the default. Polypus is not involved: `import qiskit_aer` alone fails the same way. Qiskit 2.6.0 is a known cause, for instance on the `python:3.10-slim` to `python:3.12-slim` images (Debian 13, glibc 2.41); Qiskit 2.6.1 fixes it ([Qiskit/qiskit#17213](https://github.com/Qiskit/qiskit/issues/17213)):
+
+```bash
+pip install --upgrade "qiskit>=2.6.1"
+```
+
+Otherwise, run on the native simulator, `backend="polypus"`, which does not load Aer, or enlarge the reserve before Python starts:
+
+```bash
+export GLIBC_TUNABLES=glibc.rtld.optional_static_tls=16384
+```
+
+The dynamic loader reads the variable when the process starts, so setting it in `os.environ` from Python has no effect. In a Dockerfile, set it with `ENV`.
 
 [Writing a backend](../backends.md) documents the backend contract in detail.

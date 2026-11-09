@@ -13,6 +13,10 @@
 //! 3. performs the count-weighted aggregation in Rust, in parallel over
 //!    candidates with the GIL released.
 //!
+//! Both the calls and each candidate's sum go in ascending bitstring order, never
+//! `HashMap` iteration order, which differs between maps and between processes
+//! and would move the last bit of a sum.
+//!
 //! An optional cross-generation memo (opt-in) skips re-evaluating bitstrings
 //! seen in earlier generations; it assumes the cost function is **pure**.
 
@@ -88,6 +92,9 @@ impl CostObservable for PyCallbackObservable {
         } else {
             missing.extend(unique.iter().copied());
         }
+        // Call the cost function in a fixed order, so a callback with side effects
+        // (logging, a seeded noise model) sees the same sequence on every run.
+        missing.sort_unstable();
 
         // 3) One GIL section: evaluate each missing key exactly once. A Python
         //    exception is boxed verbatim so the entry point re-raises its
@@ -123,14 +130,19 @@ impl CostObservable for PyCallbackObservable {
         }
 
         // 4) Count-weighted aggregation in Rust, parallel over candidates, GIL
-        //    released. Every key is present in `lookup` by construction.
+        //    released. Every key is present in `lookup` by construction. Summed in
+        //    ascending bitstring order so the result does not depend on `HashMap`
+        //    iteration order.
         let out = counts
             .par_iter()
             .map(|c| {
+                let mut outcomes: Vec<(&str, u64)> =
+                    c.iter().map(|(k, &n)| (k.as_str(), n)).collect();
+                outcomes.sort_unstable_by(|a, b| a.0.cmp(b.0));
                 let mut num = 0.0f64;
                 let mut den = 0u64;
-                for (k, &n) in c {
-                    num += lookup[k.as_str()] * n as f64;
+                for (k, n) in outcomes {
+                    num += lookup[k] * n as f64;
                     den += n;
                 }
                 if den == 0 {
@@ -148,6 +160,11 @@ impl CostObservable for PyCallbackObservable {
 mod tests {
     use super::*;
     use polypus_observable::ReducerLocality;
+    use pyo3::types::{IntoPyDict, PyDict};
+
+    fn counts(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
+        pairs.iter().map(|&(k, n)| (k.to_string(), n)).collect()
+    }
 
     #[test]
     fn reducer_is_local_because_it_holds_a_gil_bound_callback() {
@@ -237,6 +254,63 @@ mod tests {
                 calls.len().unwrap(),
                 0,
                 "the cost function must not be called"
+            );
+        });
+    }
+
+    #[test]
+    fn mean_does_not_depend_on_hashmap_iteration_order() {
+        // Not dyadic, so the sum depends on the order its terms are added in. Four
+        // shots make the division by the shot count exact, so that difference
+        // reaches the mean.
+        let ascending = ((0.1 * 2.0 + 0.2) + 0.7) / 4.0;
+        assert_ne!(ascending, ((0.2 + 0.7) + 0.1 * 2.0) / 4.0);
+        pyo3::Python::initialize();
+        let obs = Python::attach(|py| {
+            let values = [("001", 0.1), ("010", 0.2), ("100", 0.7)]
+                .into_py_dict(py)
+                .expect("a str -> float dict");
+            let cost_fn = values.getattr("__getitem__").expect("a dict lookup");
+            PyCallbackObservable::new(cost_fn.unbind(), false)
+        });
+        // Each map gets its own `RandomState`, hence its own iteration order.
+        let batch: Vec<_> = (0..128)
+            .map(|_| counts(&[("001", 2), ("010", 1), ("100", 1)]))
+            .collect();
+        for ev in obs.expectation_batch(&batch).expect("all keys valued") {
+            assert_eq!(ev, ascending, "summed in ascending bitstring order");
+        }
+    }
+
+    #[test]
+    fn cost_function_is_called_once_per_bitstring_in_ascending_order() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let namespace = PyDict::new(py);
+            py.run(
+                c"calls = []\ndef cost(bitstring):\n    calls.append(bitstring)\n    return 0.5\n",
+                Some(&namespace),
+                None,
+            )
+            .expect("the recorder compiles");
+            let item = |name: &str| {
+                namespace
+                    .get_item(name)
+                    .expect("a str key")
+                    .expect("defined by the recorder")
+            };
+            let obs = PyCallbackObservable::new(item("cost").unbind(), false);
+            // Eight keys, so `HashSet` order is ascending by chance only once in
+            // 8! = 40320 runs.
+            let batch = [
+                counts(&[("110", 1), ("011", 2), ("101", 1), ("000", 1)]),
+                counts(&[("100", 3), ("011", 4), ("001", 5), ("111", 1), ("010", 2)]),
+            ];
+            obs.expectation_batch(&batch).expect("a healthy batch");
+            let calls: Vec<String> = item("calls").extract().expect("a list of str");
+            assert_eq!(
+                calls,
+                ["000", "001", "010", "011", "100", "101", "110", "111"]
             );
         });
     }

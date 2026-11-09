@@ -23,8 +23,8 @@ serde_json = { workspace = true }
 [features]
 # Compile-time maximum log level. Enabling one statically strips the more
 # verbose `log::*!` macros across the whole dependency graph (the `log` crate's
-# `max_level_*` features are additive and process-global). Consumers pick one;
-# no default is set here so a binary can choose to compile out logging entirely.
+# `max_level_*` features are global to a build and mutually exclusive). Only the
+# final artifact (a binary, the wheel) should pick one, so no default is set.
 off-logs   = ["log/max_level_off",   "log/release_max_level_off"]
 error-logs = ["log/max_level_error", "log/release_max_level_error"]
 warn-logs  = ["log/max_level_warn",  "log/release_max_level_warn"]

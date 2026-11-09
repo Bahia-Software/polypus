@@ -65,8 +65,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use polypus_backend::{
-    register_backend, BackendBuildContext, BackendError, BoundCircuit, Counts, OptionValue,
-    QuantumBackend, RunParams,
+    register_backend, BackendBuildContext, BackendError, BoundCircuit, CallSeeds, Counts,
+    OptionValue, QuantumBackend, RunParams,
 };
 
 use protocol::{Circuit, Request, Response, PROTOCOL_VERSION};
@@ -180,7 +180,8 @@ impl From<BridgeError> for BackendError {
 enum FromWorker {
     Frame(Response),
     Ended(String),
-    /// The worker is alive but its stdout is not valid protocol (see [`FrameError`]).
+    /// The worker is alive but its stdout is not valid protocol (see [`FrameError`]),
+    /// or a frame's payload is not a message of the protocol.
     Corrupt(String),
 }
 
@@ -444,8 +445,10 @@ impl Worker {
                             break; // bridge dropped the receiver
                         }
                     }
+                    // The worker wrote a whole frame, so it is alive and waits for
+                    // the next request: the bridge must kill it, not wait for it.
                     Err(e) => {
-                        let _ = tx.send(FromWorker::Ended(format!("undecodable frame: {e}")));
+                        let _ = tx.send(FromWorker::Corrupt(format!("undecodable frame: {e}")));
                         break;
                     }
                 },
@@ -634,6 +637,9 @@ pub struct SubprocessBackend {
     /// no-op rather than a second SIGINT).
     cancel_sent: AtomicBool,
     recv_timeout: Duration,
+    /// The seed sent with each call: the run's on the first, then one derived
+    /// from it and the call's index (contract C-7).
+    seeds: CallSeeds,
 }
 
 impl SubprocessBackend {
@@ -684,6 +690,7 @@ impl SubprocessBackend {
             worker: Mutex::new(worker),
             pid,
             cancel_sent: AtomicBool::new(false),
+            seeds: CallSeeds::new(),
             recv_timeout: config.recv_timeout,
         })
     }
@@ -832,11 +839,13 @@ impl QuantumBackend for SubprocessBackend {
         // A fresh call clears any prior cancel latch, so a new cancel is delivered.
         self.cancel_sent.store(false, Ordering::SeqCst);
         let mut worker = self.worker.lock().unwrap_or_else(|p| p.into_inner());
+        // Under the lock, so the seeds follow the order of the requests.
+        let seed = self.seeds.next(params.seed);
         worker.send(&Request::Run {
             id: params.id.clone(),
             circuits,
             shots: params.shots,
-            seed: params.seed,
+            seed,
         })?;
         match worker.recv_timeout(self.recv_timeout) {
             Ok(Response::Result { counts, .. }) => Ok(counts),
@@ -924,6 +933,69 @@ mod tests {
             matches!(aborted, BackendError::Aborted(_)),
             "BridgeError::Aborted must map to BackendError::Aborted, got {aborted:?}"
         );
+    }
+
+    #[test]
+    fn bridge_error_maps_an_unsendable_circuit_to_unsupported_circuit() {
+        let unsupported: BackendError =
+            BridgeError::UnsupportedCircuit("cannot cross".to_string()).into();
+        assert!(
+            matches!(&unsupported, BackendError::UnsupportedCircuit(m) if m == "cannot cross"),
+            "{unsupported:?}"
+        );
+    }
+
+    /// The message of every bridge error names what failed.
+    #[test]
+    fn every_bridge_error_message_names_what_failed() {
+        let cases = [
+            (
+                BridgeError::Io("broken pipe".to_string()),
+                "subprocess bridge I/O error: broken pipe",
+            ),
+            (
+                BridgeError::Protocol("bad frame".to_string()),
+                "subprocess bridge protocol error: bad frame",
+            ),
+            (
+                BridgeError::Handshake("no ready".to_string()),
+                "subprocess worker handshake failed: no ready",
+            ),
+            (
+                BridgeError::WorkerDied {
+                    detail: "exited with code 1".to_string(),
+                },
+                "subprocess worker died mid-call: exited with code 1",
+            ),
+            (
+                BridgeError::Timeout { millis: 250 },
+                "no response within 250 ms (worker hung)",
+            ),
+            (
+                BridgeError::Aborted,
+                "the run was aborted by a cancellation signal",
+            ),
+            (
+                BridgeError::Worker("bad input".to_string()),
+                "subprocess worker error: bad input",
+            ),
+            (
+                BridgeError::UnsupportedCircuit("cannot cross".to_string()),
+                "cannot cross",
+            ),
+        ];
+        for (error, message) in cases {
+            assert_eq!(error.to_string(), message);
+        }
+    }
+
+    #[test]
+    fn an_openqasm2_circuit_is_sent_as_written_with_its_width() {
+        let qasm =
+            "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[3];\ncreg c[3];\nmeasure q -> c;\n";
+        let wire = to_wire_circuit(&BoundCircuit::Qasm2(qasm.to_string())).unwrap();
+        assert_eq!(wire.qasm, qasm);
+        assert_eq!(wire.n_qubits, 3);
     }
 
     #[test]
@@ -1132,6 +1204,29 @@ mod tests {
         assert!(read_frame(&mut empty, 64).unwrap().is_none());
         let mut truncated = io::Cursor::new(frame(5, b"he"));
         assert!(read_frame(&mut truncated, 64).unwrap().is_none());
+    }
+
+    /// A stream that yields its bytes, then fails with an error other than EOF.
+    struct FailingAfter(io::Cursor<Vec<u8>>);
+
+    impl io::Read for FailingAfter {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match io::Read::read(&mut self.0, buf)? {
+                0 => Err(io::Error::other("stream reset")),
+                n => Ok(n),
+            }
+        }
+    }
+
+    #[test]
+    fn read_frame_reports_a_read_error_that_is_not_eof() {
+        // In the header and in the payload.
+        for bytes in [Vec::new(), frame(5, b"he")] {
+            match read_frame(&mut FailingAfter(io::Cursor::new(bytes)), 64) {
+                Err(FrameError::Io(e)) => assert_eq!(e.to_string(), "stream reset"),
+                other => panic!("expected FrameError::Io, got {other:?}"),
+            }
+        }
     }
 
     #[test]

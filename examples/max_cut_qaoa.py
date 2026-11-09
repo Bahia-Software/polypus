@@ -12,6 +12,7 @@ import polypus
 from polypus_python.qaoa_utils import build_qaoa_circuit, expectation_value
 from qiskit import QuantumCircuit
 from qiskit.circuit import ParameterVector
+from qiskit.quantum_info import Statevector
 from qiskit_aer import AerSimulator
 from scipy.optimize import differential_evolution
 
@@ -35,13 +36,34 @@ def standard_mixer_layer(n_qubits):
     return layer_fn
 
 
+def node_bits(key):
+    """Node values of a counts key. Qiskit keys put qubit 0 rightmost, and
+    qubit i encodes node i, so node i is ``node_bits(key)[i]``."""
+    return key[::-1]
+
+
+def cut_edges(graph, key):
+    bits = node_bits(key)
+    return [(i, j) for i, j in graph.edges() if bits[i] != bits[j]]
+
+
 def bitstring_to_obj(bitstring):
-    bitstring = bitstring[::-1]
-    cut = 0
-    for i, j in graph.edges():
-        if bitstring[i] != bitstring[j]:
-            cut += 1
-    return cut
+    return len(cut_edges(graph, bitstring))
+
+
+def check_bit_order():
+    """Fail fast if the counts-key-to-node mapping is wrong: with only qubit 0
+    set, the one edge at node 0 must be cut. Statevector, not Aer: Aer's
+    OpenMP threads in this process would deadlock the forked scipy workers."""
+    probe = QuantumCircuit(3)
+    probe.x(0)
+    (key,) = Statevector(probe).sample_counts(1)
+    probe_graph = nx.Graph([(0, 1)])
+    probe_graph.add_node(2)
+    if cut_edges(probe_graph, key) != [(0, 1)] or (
+        compute_mean_energy(probe_graph, {key: 1}) != 1
+    ):
+        raise SystemExit(f"wrong qubit-to-node mapping for counts key {str(key)!r}")
 
 
 def maxcut_bruteforce(graph):
@@ -170,10 +192,10 @@ def qaoa_expectation(params):
     return -expectation_value(counts, bitstring_to_obj)
 
 
-def compute_mean_energy(counts):
+def compute_mean_energy(graph, counts):
     total_shots = sum(counts.values())
     return (
-        sum(bitstring_to_obj(bs[::-1]) * freq for bs, freq in counts.items())
+        sum(len(cut_edges(graph, bs)) * freq for bs, freq in counts.items())
         / total_shots
     )
 
@@ -249,7 +271,8 @@ def plot_results(
     axes[0].set_title("Original Graph")
 
     # 2. Best cut
-    color_map = ["red" if best_bitstring[i] == "0" else "blue" for i in range(n)]
+    bits = node_bits(best_bitstring)
+    color_map = ["red" if bits[i] == "0" else "blue" for i in range(n)]
     nx.draw(
         graph,
         pos,
@@ -259,11 +282,13 @@ def plot_results(
         node_size=800,
         font_color="white",
     )
-    cut_edges = [
-        (i, j) for i, j in graph.edges() if best_bitstring[i] != best_bitstring[j]
-    ]
     nx.draw_networkx_edges(
-        graph, pos, ax=axes[1], edgelist=cut_edges, width=4, edge_color="yellow"
+        graph,
+        pos,
+        ax=axes[1],
+        edgelist=cut_edges(graph, best_bitstring),
+        width=4,
+        edge_color="yellow",
     )
     axes[1].set_title(f"{method_label} Cut: {cut} - Time: {elapsed:.2f}s")
 
@@ -280,7 +305,7 @@ def plot_results(
         f"Runned {algorithm} with {population_size} individuals for {max_generations} "
         f"generations for a QAOA with {layers} layers"
     )
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.tight_layout(rect=(0, 0, 1, 0.95))
     os.makedirs("examples/plots_maxcut", exist_ok=True)
     plt.savefig(f"examples/plots_maxcut/maxcut_result_{experiment_id}.png")
     plt.close(fig)
@@ -294,7 +319,7 @@ def final_evaluation(
     counts = AerSimulator().run(qc_eval, shots=n_shots).result().get_counts()
     best_bitstring = max(counts, key=counts.get)
     cut = bitstring_to_obj(best_bitstring)
-    approximation_ratio = compute_mean_energy(counts) / best_solution
+    approximation_ratio = compute_mean_energy(graph, counts) / best_solution
     return counts, best_bitstring, cut, approximation_ratio
 
 
@@ -311,8 +336,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--method",
         type=str,
-        required=True,
-        help="Method to use (scipy, polypus_local, polypus_cunqa)",
+        default="polypus_local",
+        help="Method to use (scipy, polypus_local, polypus_cunqa, polypus_local_pso, "
+        "polypus_cunqa_pso, polypus_local_qng, polypus_cunqa_qng; "
+        "default: polypus_local)",
     )
     parser.add_argument(
         "--qubits", type=int, default=4, help="Number of qubits for the QAOA circuit"
@@ -347,6 +374,7 @@ if __name__ == "__main__":
     LAYERS_FACTOR = 2
     TOL = 0.00001
     print(f"Selected method: {method}")
+    check_bit_order()
 
     graph = nx.gnp_random_graph(n_qubits, 0.6, seed=7)
     BEST_SOLUTION = maxcut_bruteforce(graph)
@@ -418,7 +446,7 @@ if __name__ == "__main__":
         )
         best_bitstring = max(counts, key=counts.get)
         cut = bitstring_to_obj(best_bitstring)
-        approximation_ratio = compute_mean_energy(counts) / BEST_SOLUTION
+        approximation_ratio = compute_mean_energy(graph, counts) / BEST_SOLUTION
         print(f"Mean energy: {approximation_ratio * BEST_SOLUTION:.4f}")
         print(f"Approximation ratio: {approximation_ratio}")
 
@@ -604,7 +632,7 @@ if __name__ == "__main__":
         counts = AerSimulator().run(qc_eval, shots=N_SHOTS).result().get_counts()
         best_bitstring = max(counts, key=counts.get)
         cut = bitstring_to_obj(best_bitstring)
-        approximation_ratio = compute_mean_energy(counts) / BEST_SOLUTION
+        approximation_ratio = compute_mean_energy(graph, counts) / BEST_SOLUTION
 
         log_experiment_results(
             n_qubits,

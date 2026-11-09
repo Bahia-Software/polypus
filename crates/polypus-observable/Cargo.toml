@@ -16,9 +16,6 @@ name = "polypus_observable"
 # candidate population, which always pays off — so rayon is a required (not
 # feature-gated) dependency, unlike polypus-sim's opt-in gate kernels.
 rayon = { workspace = true }
-# Logging *facade* only (no sink); stays a no-op until the app layer installs a
-# logger. No dependency on polypus-logger.
-log   = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }

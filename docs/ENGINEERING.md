@@ -16,20 +16,21 @@ two and open an issue — do not silently pick a side.
 ## 1. Architecture at a glance
 
 Polypus is an open-source distributed quantum computing library: a Rust core
-with PyO3 Python bindings. The Cargo workspace has thirteen crates (the `fuzz/` crate is excluded):
+with PyO3 Python bindings. The Cargo workspace has fourteen crates (the `fuzz/` crate is excluded):
 
 | Crate | Role | PyO3? |
 |---|---|---|
 | `polypus-circuit` | Circuit IR + OpenQASM 2.0 and OpenQASM 3 import/export + QIR export | No |
 | `polypus-sim` | Statevector simulator (GIL-free; optional rayon via the `parallel` feature) | No |
-| `polypus-physics` | Particle physics: classical Monte Carlo transport + Hamiltonians as Pauli sums | No |
-| `polypus-optimizers` | Variational optimizers (DE, PSO, QNG, CMA-ES) behind evaluation oracles | No |
+| `polypus-physics` | Physics: classical Monte Carlo transport + quantum Hamiltonians as multi-qubit Pauli sums (fermion-to-qubit mappings, tapering, exact diagonalization) + molecular integrals and H₂ (`chemistry`); pure Rust | No |
+| `polypus-optimizers` | Variational optimizers (DE, PSO, QNG, CMA-ES, Adam, SPSA, Rotosolve) behind evaluation and gradient oracles, and `AlgorithmExternal`, the bridge that runs an `AskTell` optimizer (Optuna, Nevergrad, pycma through the Python bindings) | No |
 | `polypus-observable` | Cost observables (Qubo / Ising) reducing measurement counts to a cost; pure math | No |
+| `polypus-qml` | Quantum machine learning: datasets, layered variational models (encoders, ansatz, convolution, pooling), Pauli readout and losses; produces `polypus-circuit` circuits and turns counts into fitness, never executes them | No |
 | `polypus-backend` | The **pyo3-free backend contract** a third party implements: the `QuantumBackend` trait, `BoundCircuit`, `RunParams`, `BackendError`/`InfrastructureError`, the `Planner`, the transpiler seam, the memory budget and the runtime **backend registry** (`register_backend`, `BackendBuildContext`). Zero PyO3 in its dependency tree | No |
 | `polypus-backend-conformance` | Reusable conformance battery a third party runs against its `QuantumBackend` (error classification, shot conservation, batching/waves, concurrency, result validation); depends only on `polypus-backend` and `polypus-circuit` | No |
 | `polypus-subprocess-backend` | A pyo3-free `QuantumBackend` bridging to a provider's Python SDK running in its **own subprocess** over a versioned length-prefixed JSON protocol; registered as the built-in `"subprocess"` backend. The interpreter runs in the child, never embedded here | No |
 | `polypus-infrastructure` | The concrete execution backends (`local`/Aer, `cunqa`, `qmio`, `native`), the `Infrastructure` factory (which routes unknown names through the registry and registers the built-in `subprocess`/`qmio` backends), the Qiskit boundary (`QiskitCircuit`, `to_py_object`) and the construction-time `ExecutionConfig`; re-exports the `polypus-backend` contract | GIL only |
-| `polypus-orchestration` | Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, the `Flow` trait + **all** flows (`RunCircuitFlow`, `TrainFlow`) with the `OracleFactory` seam, `dispatch_optimizer` and the type-erased `OracleErrorSlot` | No |
+| `polypus-orchestration` | Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, the `Flow` trait + **all** flows (`RunCircuitFlow`, `TrainFlow`) with the `OracleFactory` seam, `dispatch_optimizer` and the type-erased `OracleErrorSlot`, and the `trace` module: the call trace's `CallTracer` and the decorators that record a run's batches, waves, iterations and QNG metric calls (contract C-12) | No |
 | `polypus-evaluation` | Candidate evaluation: the oracles (`VqcOracle`, `QmlOracle`) and the `OracleFactory` implementations that build them (`VqcOracleFactory`, `QmlOracleFactory`), plus `PyVarianceOracle`, `PyCallbackObservable`, the supervised QML objectives (`SupervisedObjective`: `PyLabelledCost`, `PySampleCost`; see `docs/adr/0002-qml-supervised-labels.md`), `CircuitSource` and `EvaluationError` | GIL only |
 | `polypus-logger` | `log::Log` sink shared by the workspace; installed only by the app layer | No |
 | `polypus` | The library + Python extension module; the FFI edge — `#[pyclass]`es, kwarg parsing, and error→`PyErr` conversion | **Yes** |
@@ -44,7 +45,7 @@ boundary stays out-of-process and explicit; see
 ## 2. Workspace boundaries
 
 - `polypus-circuit`, `polypus-sim`, `polypus-physics`, `polypus-optimizers`,
-  `polypus-observable`, `polypus-backend`, `polypus-backend-conformance`,
+  `polypus-observable`, `polypus-qml`, `polypus-backend`, `polypus-backend-conformance`,
   `polypus-subprocess-backend` and `polypus-logger` are **pure Rust: they must not depend on `pyo3` or Python**. Do
   not introduce `Py<...>`, `PyAny`, `Python`, the GIL, or Python types into them.
   `polypus-backend` is the strictest of these: it is the public backend contract, so
@@ -95,8 +96,10 @@ boundary stays out-of-process and explicit; see
   thread holds the GIL that every worker is blocked trying to acquire. This is
   why the entry points (`train`, `qml.train`, `run_quantum_circuit`) run
   `Scheduler::run_cancellable` inside `py.detach`: the Python-backed pieces
-  below it (the Aer and CUNQA backends, Python cost callbacks) attach on their
-  own, on whichever thread evaluates them. Each of those attaches is a *fresh*
+  below it (the Aer and CUNQA backends, Python cost callbacks, a
+  `polypus.External` optimizer's `ask()` and `tell()`, the training
+  `callback` of `train`, `qml.train` and `Model.fit`) attach on their own,
+  on whichever thread evaluates them. Each of those attaches is a *fresh*
   one (`detach` resets the thread's attachment), so each goes through
   `attach_or` and turns an unreachable interpreter into the typed
   `InterpreterUnavailable` error, never a panic or a hang (§9). The one attach
@@ -130,7 +133,10 @@ boundary stays out-of-process and explicit; see
     documented as **not** interruptible and is never used on a Python-facing
     path.
   The resulting `PyErr` — a `KeyboardInterrupt`, or an error raised by the user
-  `expectation_function` / variance callback — is recorded in the shared
+  `expectation_function` / variance callback / `polypus.External` optimizer's
+  `ask()` or `tell()` (which also call `py.check_signals()` before the user's
+  code, so a Ctrl+C during a batch stops the run before the library's next
+  call) — is recorded in the shared
   `OracleErrorSlot` and re-raised to Python by the entry point as the
   **original** exception. The interrupt travels type-erased through the pyo3-free
   layers, boxed in `BackendError::External` as a `DisplaySafePyErr` (§9), and
@@ -318,15 +324,29 @@ boundary stays out-of-process and explicit; see
   detected limit is read once per process (`OnceLock`), the variable on every
   call. The model is `16 · 2^n` bytes (`BYTES_PER_AMPLITUDE`), which is the native
   backend's real peak because shot sampling (`Statevector::sample`) needs only
-  `O(shots)` extra memory, not a `2^n` CDF. Its parsers and `resolve_budget` are
-  pure (they take text / values), so tests never touch `/proc` or the environment
-  — `set_var` in a multithreaded test binary is racy and `unsafe` is off-limits
-  (§5). Several processes sharing one cgroup (MPI ranks of a job step) each see
-  the whole limit and must set `POLYPUS_MEM_BUDGET` per process.
+  `O(shots)` extra memory, not a `2^n` CDF. The one run that holds two is the
+  adjoint gradient (#503: the state and the pulled-back observable,
+  `polypus_sim::ADJOINT_STATEVECTORS`): the native backend counts each as one
+  `(n + 1)`-qubit statevector, the same bytes, both to throttle and to refuse,
+  and its exact QML gradient falls back to the parameter shift (one
+  statevector, logged once per backend at `info`) when the budget holds one but
+  not two. The budget's parsers and `resolve_budget` are pure (they take text /
+  values), so the budget logic is tested without `/proc` or the environment.
+  Tests never *write* the environment — `set_var` in a multithreaded test
+  binary is racy and `unsafe` is off-limits (§5). The tests of the wrappers
+  over the active budget (`check_statevector_fits`,
+  `max_statevector_concurrency`, `wave_concurrency`) read it as the process
+  sees it, and assert only what holds for any budget, plus what any Linux host
+  guarantees: there they need `/proc/meminfo`, which a Linux test environment
+  must provide. Several processes sharing one cgroup (MPI ranks of a job step)
+  each see the whole limit and must set `POLYPUS_MEM_BUDGET` per process.
 - **Reproducibility:** the RNG is seedable (`rng.rs` in `polypus-sim` and in
   `polypus-optimizers`). Results must be deterministic given a seed. Don't
   introduce nondeterminism: iteration order over a `HashMap` affecting
   results, unseeded RNG, parallelism that changes reduction order, etc.
+  A floating-point reduction over a `HashMap`/`HashSet` therefore accumulates
+  in sorted-key order, never in iteration order (which differs per map and per
+  process): the cost reducers sum a counts map in ascending bitstring order.
 - **Angle expressions** (`polypus_circuit::expr`) are evaluated exactly as
   written: the same floating-point operations in source order, with no
   reassociation and no folding of constant subexpressions (only an expression
@@ -337,8 +357,9 @@ boundary stays out-of-process and explicit; see
   recursively, so their depth cannot overflow the stack; construction bounds
   their size and their nesting as written.
 - In numeric tests, compare with a tolerance (epsilon), not exact float
-  equality — **except** the QASM round-trip, which is byte-identical
-  (contract C-2).
+  equality — **except** where bit-identity is the property under test: the
+  QASM round-trip (contract C-2), parallel == sequential, and a reduction's
+  independence from iteration order.
 - Use `f64` and `num-complex::Complex64` consistently with the rest of the
   simulator.
 
@@ -386,8 +407,10 @@ boundary stays out-of-process and explicit; see
 - Every heavy or optional dependency goes behind a feature.
   `extension-module` controls linking of the PyO3 extension. Declare features
   additively and don't enable them implicitly.
-- The only default features are the compile-time log-level toggles
-  (`info-logs` et al.), which forward to `polypus-logger`.
+- No crate has default features. The compile-time log-level toggles
+  (`info-logs` et al., forwarded to `polypus-logger`) are global to a build and
+  mutually exclusive, so only the final artifact picks one: the wheel uses
+  `debug-logs` (`[tool.maturin] features` in `pyproject.toml`).
 
 ## 7. Interoperability notes (beyond contract C-2)
 
@@ -547,7 +570,9 @@ and CUNQA `run_circuits`, `LocalBackend::capabilities_for`, CUNQA's `raise_qpus`
 (it fails before anything is asked of SLURM), the noise-model clone in
 `Infrastructure::create_backend` (only when there is a noise model), the Qiskit
 parameter binding, `PyCallbackObservable`, the supervised objectives,
-`PyVarianceOracle` and the planner's between-wave guard (`SignalInterrupt`). The
+`PyVarianceOracle`, the External bridge (`PyAskTell`), the training callback
+(`PyTrainObserver`, which calls `py.check_signals()` before the user's code, as
+`PyAskTell` does) and the planner's between-wave guard (`SignalInterrupt`). The
 `attach_or` "unavailable" branch of each of these sites returns
 `polypus_infrastructure::InterpreterUnavailable` (in `attach.rs`), an error that
 holds nothing from Python and so can be formatted, logged or dropped anywhere.
@@ -556,7 +581,8 @@ It is boxed in `BackendError::External` (`From` impls exist for `BackendError`,
 never added as a variant: none of those enums is `#[non_exhaustive]`, and
 `BackendError` is the third-party backend contract. A site whose signature
 cannot fail (`VarianceOracle`) records it in the run's `OracleErrorSlot` and
-returns its finite sentinel, as it does for a callback error. The FFI edge
+returns its finite sentinel, as it does for a callback error; the training
+callback records it there too and stops the run. The FFI edge
 downcasts it after `DisplaySafePyErr` and raises `KeyboardInterrupt` ("the run
 was aborted: …"), the class `BackendError::Aborted` and a Ctrl+C get: the run is
 abandoned and its result could not reach Python anyway (contract C-1, failure

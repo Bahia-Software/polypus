@@ -24,6 +24,7 @@ class TestExceptionHierarchy:
             "NativeCircuitError",
             "InsufficientMemoryError",
             "EvaluationError",
+            "ConfigurationError",
         ):
             assert hasattr(polypus, name), f"polypus.{name} is not exported"
             assert issubclass(getattr(polypus, name), Exception)
@@ -38,6 +39,8 @@ class TestExceptionHierarchy:
         assert issubclass(polypus.NativeCircuitError, polypus.BackendError)
         assert issubclass(polypus.InsufficientMemoryError, polypus.BackendError)
         assert issubclass(polypus.EvaluationError, polypus.PolypusError)
+        assert issubclass(polypus.ConfigurationError, polypus.PolypusError)
+        assert issubclass(polypus.ConfigurationError, ValueError)
 
 
 class TestRustOriginatedFailuresAreTyped:

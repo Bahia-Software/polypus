@@ -97,6 +97,25 @@ def test_seam_failure_is_never_a_panic_exception(monkeypatch):
         pytest.fail("expected the mocked seam failure to raise")
 
 
+def test_seam_connect_failure_is_reraised_verbatim(monkeypatch):
+    # `connect_to_infrastructure` is a seam call too: its failure reaches the
+    # caller as raised, before anything runs.
+    import polypus
+    import polypus_python
+
+    error = RuntimeError("no local simulator")
+
+    def failing(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(polypus_python, "connect_to_infrastructure", failing)
+    with pytest.raises(RuntimeError) as info:
+        polypus.run_quantum_circuit(
+            _native_qc(), shots=10, infrastructure="local", backend="aer"
+        )
+    assert info.value is error
+
+
 # The exact kwargs the Rust local backend sends to `run_qcs` (C-1 table). Recorded
 # in a fresh child so `POLYPUS_MEM_BUDGET` can be set without mutating this
 # process's environment while Rust threads may read it.

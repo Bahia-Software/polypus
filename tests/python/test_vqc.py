@@ -322,3 +322,66 @@ class TestTrainInvalidConfig:
                 cores_per_qpu=_CORES_PER_QPU,
                 id="test_pso_bad_bounds",
             )
+
+
+class TestTrainFitnessHistory:
+    """``fitness_history`` is the run's convergence curve: the best fitness so
+    far after each generation or iteration run, never decreasing (C-5). Each
+    optimizer tracks its own best, so a gradient-free and a gradient optimizer
+    are both checked."""
+
+    @staticmethod
+    def _assert_history(result):
+        history = result.fitness_history
+        assert all(isinstance(f, float) for f in history)
+        assert len(history) == result.iterations_run
+        assert history[-1] == result.best_fitness
+        assert all(b >= a for a, b in zip(history, history[1:]))
+
+    def _train(self, method, circuit, cost):
+        import polypus
+
+        return polypus.train(
+            circuit,
+            method,
+            shots=_SHOTS,
+            n_qpus=_N_QPUS,
+            dimensions=_DIMENSIONS,
+            expectation_function=cost,
+            infrastructure="local",
+            nodes=_NODES,
+            cores_per_qpu=_CORES_PER_QPU,
+            id="test_history",
+            seed=3,
+        )
+
+    def test_de_reports_one_best_per_generation(
+        self, parametrized_circuit, simple_expectation_fn
+    ):
+        import polypus
+
+        result = self._train(
+            # A tight tolerance keeps all 4 generations running.
+            polypus.DE(generations=4, population_size=4, tolerance=1e-9),
+            parametrized_circuit,
+            simple_expectation_fn,
+        )
+        assert result.iterations_run == 4
+        self._assert_history(result)
+
+    def test_adam_reports_its_best_not_its_iterate(
+        self, parametrized_circuit, simple_expectation_fn
+    ):
+        # Adam's iterate may move downhill between iterations; the curve is the
+        # best so far.
+        import polypus
+
+        result = self._train(
+            polypus.Adam(
+                max_iters=6, learning_rate=0.3, bounds=(0.0, math.pi), patience=10_000
+            ),
+            parametrized_circuit,
+            simple_expectation_fn,
+        )
+        assert result.iterations_run == 6
+        self._assert_history(result)

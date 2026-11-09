@@ -1,0 +1,10 @@
+# The Rust toolchain that CI builds, lints, tests and releases with, and that
+# rustup selects in this checkout. Pinned so that a new Rust release cannot
+# turn unchanged code red under `-D warnings`; bump it in a PR of its own.
+# The minimum supported version is `rust-version` in Cargo.toml, which the
+# MSRV job checks; it and the nightly jobs (fuzz, Miri) override this file
+# with RUSTUP_TOOLCHAIN (.github/workflows/ci.yml).
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

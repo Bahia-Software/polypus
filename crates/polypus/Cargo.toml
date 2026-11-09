@@ -11,7 +11,7 @@ description = "Rust-core quantum variational optimization framework with a Pytho
 # PyPI is the `polypus-quantum` distribution (which imports as `polypus`), so a
 # reader arriving from either side can find the other — see the Homepage/README.
 homepage = "https://github.com/Bahia-Software/polypus"
-documentation = "https://bahia-software.github.io/polypus/"
+documentation = "https://bahia-software.github.io/polypus/rust/polypus/"
 keywords = ["quantum", "simulator", "qaoa", "optimization", "pyo3"]
 categories = ["science", "simulation"]
 
@@ -26,9 +26,12 @@ extension-module = ["pyo3/extension-module"]
 # stack. The backend itself (ZeroMQ wire protocol, pickle serialisation) lives in
 # `polypus-infrastructure`; this just forwards the feature to it.
 qmio = ["polypus-infrastructure/qmio"]
-default = ["info-logs"]
+default = []
 # Compile-time max log level, forwarded to the shared `polypus-logger` crate
-# (which in turn toggles the `log` crate's global `max_level_*` features).
+# (which in turn toggles the `log` crate's global `max_level_*` features). None
+# is on by default: the features are global to a build and mutually exclusive,
+# so only the final artifact picks one. The wheel uses `debug-logs` (see
+# `[tool.maturin] features` in pyproject.toml).
 off-logs   = ["polypus-logger/off-logs"]
 error-logs = ["polypus-logger/error-logs"]
 warn-logs  = ["polypus-logger/warn-logs"]
@@ -41,6 +44,12 @@ polypus-circuit = { workspace = true }
 polypus-sim = { workspace = true, features = ["parallel"] }
 polypus-optimizers = { workspace = true }
 polypus-observable = { workspace = true }
+# `polypus.qml`'s native API (Model and its pieces, Dataset, TrainedModel) wraps
+# its types; `serde` gives TrainedModel its save format.
+polypus-qml = { workspace = true, features = ["serde"] }
+# TrainedModel.save / qml.load. `float_roundtrip` reads every saved `f64` back
+# bit for bit, so a loaded model predicts exactly as the saved one.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 polypus-infrastructure = { workspace = true }
 polypus-orchestration = { workspace = true }
 polypus-evaluation = { workspace = true }

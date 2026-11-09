@@ -14,6 +14,15 @@ os.environ.setdefault("POLYPUS_NO_AUTOCALIBRATE", "1")
 import pytest  # noqa: E402
 from qiskit.circuit import ParameterVector, QuantumCircuit  # noqa: E402
 
+# POLYPUS_ALLOWED_SKIPS: a skip not on the list fails the run (CI sets it).
+from skip_guard import (  # noqa: E402, F401
+    pytest_collectreport,
+    pytest_runtest_logreport,
+    pytest_sessionfinish,
+    pytest_sessionstart,
+    pytest_terminal_summary,
+)
+
 
 def pytest_configure(config):
     config.addinivalue_line(

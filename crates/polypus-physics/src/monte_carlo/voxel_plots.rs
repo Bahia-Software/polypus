@@ -85,12 +85,14 @@ pub fn plot_relative_pdd(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ScratchDir;
 
     #[cfg(feature = "plotters")]
     #[test]
     fn plot_relative_pdd_produces_a_png() {
         let pdd = vec![0.98, 1.0, 0.97, 0.93, 0.85, 0.78, 0.69, 0.61, 0.52, 0.41];
-        let path = std::env::temp_dir().join("pdd_test.png");
+        let scratch = ScratchDir::new("pdd-png");
+        let path = scratch.path().join("pdd_test.png");
         plot_relative_pdd(&pdd, 0.01, "Test PDD", &path).unwrap();
         assert!(path.exists());
         assert!(std::fs::metadata(&path).unwrap().len() > 0);

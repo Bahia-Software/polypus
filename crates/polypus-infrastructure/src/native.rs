@@ -15,36 +15,17 @@ use crate::{
     InfrastructureError, MemBudget, QuantumBackend, RunParams,
 };
 use polypus_backend::mem_budget::{active_budget, check_fits};
-use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
-use polypus_sim::{sample_projected, Simulator, StatevectorSimulator, MAX_CLBITS};
+use polypus_circuit::{ConcreteCircuit, GateInstruction, ParameterizedCircuit};
+use polypus_sim::{sample_projected, SimError, Simulator, StatevectorSimulator, MAX_CLBITS};
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// SplitMix64 increment (the golden-ratio gamma).
-const SPLITMIX64_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
-
-/// SplitMix64 output finaliser: a bijective 64-bit mixer.
-fn splitmix64_mix(mut z: u64) -> u64 {
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Seed for the circuit at global position `index` of a backend seeded with
-/// `base_seed`: output `index` of a SplitMix64 stream whose state starts at the
-/// mixed base seed.
-///
-/// A plain `base_seed + index` made neighbouring base seeds share streams shifted
-/// by one circuit (circuit `k` of seed `s` was circuit `k-1` of seed `s+1`,
-/// issue #348). Mixing the base seed first puts distinct base seeds on unrelated
-/// stream positions, so repetitions run with seeds `0, 1, 2, ...` are
-/// independent. The map is still a pure function of `(base_seed, index)`, which
-/// keeps contract C-7 (same seed and batch reproduce bit-for-bit).
+/// `base_seed` ([`polypus_backend::stream_seed`], contract C-7).
 fn circuit_seed(base_seed: u64, index: u64) -> u64 {
-    let state = splitmix64_mix(base_seed);
-    splitmix64_mix(state.wrapping_add(index.wrapping_add(1).wrapping_mul(SPLITMIX64_GAMMA)))
+    polypus_backend::stream_seed(base_seed, index)
 }
 
 /// Local, noiseless statevector backend backed by `polypus-sim`.
@@ -70,6 +51,10 @@ pub struct NativeStatevectorBackend {
     transpiler: Box<dyn Transpiler>,
     base_seed: u64,
     counter: AtomicU64,
+    /// Whether this backend has logged that an adjoint gradient fell back to
+    /// the parameter shift ([`adjoint_fits`](Self::adjoint_fits)): it says so
+    /// once, not on every gradient of a long fit.
+    shift_fallback_logged: AtomicBool,
 }
 
 impl NativeStatevectorBackend {
@@ -90,6 +75,7 @@ impl NativeStatevectorBackend {
             transpiler,
             base_seed: seed,
             counter: AtomicU64::new(0),
+            shift_fallback_logged: AtomicBool::new(false),
         }
     }
 
@@ -102,9 +88,30 @@ impl NativeStatevectorBackend {
     /// unlike execution, it writes no log record for a rejected circuit.
     ///
     /// Structural only: the qubit ceiling and the memory budget, which depend on
-    /// the host, are not checked.
+    /// the host, are not checked; [`check_resources`](Self::check_resources)
+    /// does.
     pub fn check_circuit(circuit: &BoundCircuit) -> Result<(), BackendError> {
         native_source(circuit).map(|_| ())
+    }
+
+    /// Check, without allocating anything, that this backend can hold
+    /// `circuit`'s statevector, with the error a run fails with: a circuit wider
+    /// than the qubit ceiling ([`polypus_sim::MAX_QUBITS`], every backend's) is
+    /// [`BackendError::NativeCircuit`], one whose statevector does not fit in
+    /// the memory budget (issue #215, read from `POLYPUS_MEM_BUDGET` or the host
+    /// at each call) is [`BackendError::InsufficientMemory`]. A circuit
+    /// [`check_circuit`](Self::check_circuit) rejects fails with that error
+    /// instead. GIL-free, and silent like `check_circuit`.
+    pub fn check_resources(circuit: &BoundCircuit) -> Result<(), BackendError> {
+        let num_qubits = native_source(circuit)?.circuit.num_qubits();
+        let max = polypus_sim::MAX_QUBITS;
+        if num_qubits > max {
+            return Err(simulation_failed(&SimError::TooManyQubits {
+                requested: num_qubits,
+                max,
+            }));
+        }
+        check_fits(num_qubits, active_budget()).map_err(BackendError::from)
     }
 
     /// Override the injected [`StatevectorSimulator::fusion`] flag (`true` by
@@ -185,7 +192,7 @@ impl NativeStatevectorBackend {
             .run_and_sample(&source.circuit, shots as usize, seed)
             .map_err(|e| {
                 log::error!("native statevector simulation failed: {e}");
-                BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
+                simulation_failed(&e)
             })?;
         Ok(format_counts(&source.circuit, source.declared_clbits, raw))
     }
@@ -309,7 +316,288 @@ impl NativeStatevectorBackend {
             self.simulator.parallel_threshold
         }
     }
+
+    /// Run a batch of bound circuits and return the **exact** basis-state
+    /// probabilities of each (`|amplitude|²`), one map per circuit in submission
+    /// order, keyed like [`run_circuits`](QuantumBackend::run_circuits)'s counts
+    /// (contract C-3).
+    ///
+    /// The exact counterpart of `run_circuits`, deliberately an **inherent**
+    /// method and not part of [`QuantumBackend`]: "exact" has no meaning for a
+    /// noisy simulator or real hardware, only for this noiseless statevector
+    /// backend. It is what the native QML exact mode runs.
+    ///
+    /// - **No sampling.** `config.shots` is ignored and no seed is drawn: the
+    ///   result is a pure function of the circuits, bit for bit, and the
+    ///   backend's sampling stream is left untouched. States of probability
+    ///   exactly zero are omitted, as an unobserved bitstring is from counts;
+    ///   the values sum to 1 up to rounding.
+    /// - **Full-register read-out only.** A circuit with no measurement is read
+    ///   on every qubit, and one that ends in `measure_all` on every classical
+    ///   bit, at the width `run_circuits` keys its counts. A circuit that
+    ///   measures individual qubits is [`BackendError::UnsupportedCircuit`]:
+    ///   its distribution would have to be marginalised over the unmeasured
+    ///   qubits.
+    /// - **Bounded memory.** The same statevector budget as `run_circuits`: a
+    ///   widest circuit that cannot fit even alone is refused
+    ///   ([`BackendError::InsufficientMemory`]) before anything runs, and the
+    ///   batch runs in windows of at most as many circuits as fit at once. Each
+    ///   result map holds up to `2^n` entries, so the output, unlike counts,
+    ///   grows with the width of the circuits rather than with the shots.
+    pub fn run_circuits_exact(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &RunParams,
+    ) -> Result<Vec<HashMap<String, f64>>, BackendError> {
+        let widest = representative_qubits(qcs);
+        self.check_memory(widest)?;
+        let cap = max_statevector_concurrency(widest, rayon::current_num_threads());
+        self.run_exact_with_cap(qcs, config, cap)
+    }
+
+    /// [`run_circuits_exact`](Self::run_circuits_exact) holding at most `cap`
+    /// statevectors at once: the windowing of
+    /// [`run_batch_with_cap`](Self::run_batch_with_cap) without the seeds. A
+    /// pure resource bound, so the result is the same for every `cap`.
+    fn run_exact_with_cap(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &RunParams,
+        cap: usize,
+    ) -> Result<Vec<HashMap<String, f64>>, BackendError> {
+        let opts = TranspileOptions {
+            level: config.opt_level,
+        };
+        let threads = rayon::current_num_threads();
+        let cap = cap.max(1);
+        // Same fast path as the sampled batch: when every thread's statevector
+        // fits, rayon already bounds the circuits in flight.
+        let window = if cap >= threads {
+            qcs.len().max(1)
+        } else {
+            cap
+        };
+        let mut out = Vec::with_capacity(qcs.len());
+        for chunk in qcs.chunks(window) {
+            let pt = self.gate_parallel_threshold(chunk.len(), threads);
+            let block: Vec<HashMap<String, f64>> = chunk
+                .par_iter()
+                .map(|qc| self.simulate_one_exact(qc, &opts, pt))
+                .collect::<Result<_, _>>()?;
+            out.extend(block);
+        }
+        Ok(out)
+    }
+
+    /// Exact probabilities of one bound circuit, keyed as its counts would be.
+    fn simulate_one_exact(
+        &self,
+        circuit: &BoundCircuit,
+        opts: &TranspileOptions,
+        parallel_threshold: usize,
+    ) -> Result<HashMap<String, f64>, BackendError> {
+        let source = self.concrete_circuit(circuit, opts)?;
+        let concrete = source.circuit.as_ref();
+        if concrete
+            .gates()
+            .iter()
+            .any(|gate| matches!(gate, GateInstruction::Measure { .. }))
+        {
+            return Err(BackendError::UnsupportedCircuit(
+                "exact probabilities need a full-register read-out (measure_all, or no \
+                 measurement); this circuit measures individual qubits"
+                    .to_string(),
+            ));
+        }
+        let simulator = StatevectorSimulator {
+            max_qubits: self.simulator.max_qubits,
+            parallel_threshold,
+            fusion: self.simulator.fusion,
+        };
+        let sv = simulator.run(concrete).map_err(|e| {
+            log::error!("native statevector simulation failed: {e}");
+            BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
+        })?;
+        let width = counts_width(concrete, source.declared_clbits);
+        Ok(sv
+            .probabilities()
+            .into_iter()
+            .enumerate()
+            .filter(|&(_, p)| p != 0.0)
+            .map(|(state, p)| (bitstring(state, width), p))
+            .collect())
+    }
+
+    /// Whether an adjoint gradient of `num_qubits`-qubit circuits fits in the
+    /// memory budget (issue #503): `Ok(true)` when the two statevectors one run
+    /// holds ([`polypus_sim::ADJOINT_STATEVECTORS`]) fit, `Ok(false)` when one
+    /// fits but not two — the caller then takes the parameter shift, which needs
+    /// one, and this logs that at `info` level the first time it happens on
+    /// this backend (never silently, and not again on every gradient of a long
+    /// fit) — and
+    /// [`BackendError::InsufficientMemory`] when not even one fits, the error
+    /// [`run_circuits_exact`](Self::run_circuits_exact) refuses the same circuits
+    /// with. So the adjoint never refuses a width the exact path runs.
+    ///
+    /// A width above the qubit ceiling is `Ok(true)`, left to the simulator's
+    /// ceiling error as `check_memory` leaves it; a budget with no known limit
+    /// never refuses, as there.
+    pub fn adjoint_fits(&self, num_qubits: usize) -> Result<bool, BackendError> {
+        self.adjoint_fits_against(num_qubits, active_budget())
+    }
+
+    /// [`adjoint_fits`](Self::adjoint_fits) against an explicit `budget`, so the
+    /// decision is testable without touching the process environment.
+    fn adjoint_fits_against(
+        &self,
+        num_qubits: usize,
+        budget: MemBudget,
+    ) -> Result<bool, BackendError> {
+        self.check_memory_against(num_qubits, budget)?;
+        if num_qubits > self.simulator.max_qubits
+            || check_fits(adjoint_width(num_qubits), budget).is_ok()
+        {
+            return Ok(true);
+        }
+        if !self.shift_fallback_logged.swap(true, Ordering::Relaxed) {
+            log::info!(
+                "the exact gradient of a {num_qubits}-qubit circuit falls back to the parameter-shift \
+                 rule: the adjoint gradient needs {} statevectors at once and the memory budget \
+                 holds one",
+                polypus_sim::ADJOINT_STATEVECTORS
+            );
+        }
+        Ok(false)
+    }
+
+    /// Run adjoint differentiations: for each task, the derivatives of
+    /// `⟨ψ|O|ψ⟩` (`O|b⟩ = weight(b)|b⟩`, `|ψ⟩` the final state of its circuit)
+    /// with respect to the angle of each gate at a position of its `wrt`, one
+    /// row per task in submission order. See
+    /// [`StatevectorSimulator::adjoint_gradient`] for what is differentiated.
+    ///
+    /// The exact path's counterpart for gradients, an **inherent** method like
+    /// [`run_circuits_exact`](Self::run_circuits_exact) and not part of
+    /// [`QuantumBackend`]. Differences from it:
+    ///
+    /// - **As written.** The circuits are neither transpiled nor fused: `wrt`
+    ///   holds positions in them. The injected transpiler does not run.
+    /// - **Two statevectors per task.** The budget is counted at
+    ///   [`ADJOINT_STATEVECTORS`](polypus_sim::ADJOINT_STATEVECTORS) per task in
+    ///   flight: a widest task whose two statevectors cannot fit is refused
+    ///   before anything runs ([`BackendError::InsufficientMemory`], for the
+    ///   `(n + 1)`-qubit statevector that takes the memory of two `n`-qubit
+    ///   ones; check [`adjoint_fits`](Self::adjoint_fits) first), and the batch
+    ///   runs in windows of as many tasks as fit at once, the exact path's
+    ///   windowing and gate-parallel threshold. A pure resource bound: the
+    ///   result is the same for every window size.
+    /// - **Cancellable.** `should_cancel` is polled inside every run, on the
+    ///   simulator's throttled cadence; `true` abandons the batch with
+    ///   [`BackendError::Aborted`]. It must be cheap and callable from any
+    ///   thread.
+    pub fn run_adjoint<W>(
+        &self,
+        tasks: &[AdjointTask<'_, W>],
+        should_cancel: Option<&(dyn Fn() -> bool + Sync)>,
+    ) -> Result<Vec<Vec<f64>>, BackendError>
+    where
+        W: Fn(usize) -> f64 + Sync,
+    {
+        let widest = tasks
+            .iter()
+            .map(|task| task.circuit.num_qubits())
+            .max()
+            .unwrap_or(0);
+        if widest <= self.simulator.max_qubits {
+            check_fits(adjoint_width(widest), active_budget()).map_err(|e| {
+                log::error!("native backend refused an adjoint gradient: {e}");
+                BackendError::from(e)
+            })?;
+        }
+        let cap = max_statevector_concurrency(adjoint_width(widest), rayon::current_num_threads());
+        self.run_adjoint_with_cap(tasks, should_cancel, cap)
+    }
+
+    /// [`run_adjoint`](Self::run_adjoint) holding at most `cap` tasks (`2 · cap`
+    /// statevectors) at once: the windowing of
+    /// [`run_exact_with_cap`](Self::run_exact_with_cap).
+    fn run_adjoint_with_cap<W>(
+        &self,
+        tasks: &[AdjointTask<'_, W>],
+        should_cancel: Option<&(dyn Fn() -> bool + Sync)>,
+        cap: usize,
+    ) -> Result<Vec<Vec<f64>>, BackendError>
+    where
+        W: Fn(usize) -> f64 + Sync,
+    {
+        let threads = rayon::current_num_threads();
+        let cap = cap.max(1);
+        let window = if cap >= threads {
+            tasks.len().max(1)
+        } else {
+            cap
+        };
+        let mut out = Vec::with_capacity(tasks.len());
+        for chunk in tasks.chunks(window) {
+            let simulator = StatevectorSimulator {
+                max_qubits: self.simulator.max_qubits,
+                parallel_threshold: self.gate_parallel_threshold(chunk.len(), threads),
+                fusion: self.simulator.fusion,
+            };
+            let block: Vec<Vec<f64>> = chunk
+                .par_iter()
+                .map(|task| {
+                    let mut hook = || should_cancel.is_some_and(|cancel| cancel());
+                    let hook: Option<&mut dyn FnMut() -> bool> = match should_cancel {
+                        Some(_) => Some(&mut hook),
+                        None => None,
+                    };
+                    simulator
+                        .adjoint_gradient(task.circuit, task.wrt, &task.weight, hook)
+                        .map(|gradient| gradient.derivatives)
+                        .map_err(|e| match e {
+                            SimError::Cancelled => BackendError::Aborted(
+                                "the adjoint gradient was cancelled".to_string(),
+                            ),
+                            e => {
+                                log::error!("native adjoint gradient failed: {e}");
+                                BackendError::NativeCircuit(format!(
+                                    "native adjoint gradient failed: {e}"
+                                ))
+                            }
+                        })
+                })
+                .collect::<Result<_, _>>()?;
+            out.extend(block);
+        }
+        Ok(out)
+    }
 }
+
+/// One adjoint differentiation for
+/// [`NativeStatevectorBackend::run_adjoint`]: a circuit, the positions of the
+/// rotations to differentiate, and the diagonal observable as a weight per
+/// basis state (qubit `q` is bit `q`).
+#[derive(Debug, Clone)]
+pub struct AdjointTask<'a, W> {
+    /// The circuit, simulated exactly as written.
+    pub circuit: &'a ConcreteCircuit,
+    /// Positions in `circuit.gates()` of the gates to differentiate.
+    pub wrt: &'a [usize],
+    /// `O|b⟩ = weight(b)|b⟩`; pure and callable from any thread.
+    pub weight: W,
+}
+
+/// The width whose single statevector takes the memory of an adjoint run's two
+/// `num_qubits`-qubit ones: `2 · 16 · 2^n = 16 · 2^(n+1)` bytes. Saturates, as
+/// the budget arithmetic does for absurd widths.
+fn adjoint_width(num_qubits: usize) -> usize {
+    num_qubits.saturating_add(1)
+}
+
+// `adjoint_width` doubles the memory of one statevector by adding a qubit: it is
+// only right while an adjoint run holds exactly two.
+const _: () = assert!(polypus_sim::ADJOINT_STATEVECTORS == 2);
 
 /// What the native backend runs for one [`BoundCircuit`]: the circuit, and the
 /// classical width its OpenQASM program declares (the sum of its `creg`s),
@@ -318,6 +606,11 @@ impl NativeStatevectorBackend {
 struct NativeSource<'a> {
     circuit: Cow<'a, ConcreteCircuit>,
     declared_clbits: Option<usize>,
+}
+
+/// The error a simulation failure `e` reaches the caller as.
+fn simulation_failed(e: &SimError) -> BackendError {
+    BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
 }
 
 /// The [`ConcreteCircuit`] a [`BoundCircuit`] stands for, obtained without
@@ -526,7 +819,7 @@ impl QuantumBackend for NativeStatevectorBackend {
         self.check_memory(concrete.num_qubits())?;
         let sv = self.simulator.run(concrete).map_err(|e| {
             log::error!("native statevector simulation failed: {e}");
-            BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
+            simulation_failed(&e)
         })?;
         // Reserve a contiguous seed block, one seed per batch, from the same
         // scheme `run_circuits` uses so a given base seed reproduces identical
@@ -958,6 +1251,34 @@ mod tests {
         );
     }
 
+    /// `check_resources` reports the ceiling error a run fails with, and lets a
+    /// circuit within the ceiling and the budget through.
+    #[test]
+    fn check_resources_reports_the_ceiling_error_of_a_run() {
+        let backend = NativeStatevectorBackend::new(0);
+        let too_wide = BoundCircuit::Native(
+            ParameterizedCircuit::new(polypus_sim::MAX_QUBITS + 1)
+                .measure_all()
+                .assign_parameters(&[])
+                .unwrap(),
+        );
+        let checked = NativeStatevectorBackend::check_resources(&too_wide).unwrap_err();
+        let run = backend
+            .run_circuits(
+                &[too_wide],
+                &RunParams {
+                    id: "ceiling".to_string(),
+                    shots: 8,
+                    seed: Some(1),
+                    opt_level: OptLevel::default(),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(&checked, BackendError::NativeCircuit(_)));
+        assert_eq!(checked.to_string(), run.to_string());
+        NativeStatevectorBackend::check_resources(&BoundCircuit::Native(bell())).unwrap();
+    }
+
     /// Issue #147: a high-qubit batch that cannot fit in the memory budget is
     /// reported with the memory cap `run_circuits` enforces internally, so the
     /// planner can split it into memory-safe waves. A 40-qubit statevector is
@@ -1071,6 +1392,23 @@ mod tests {
         );
     }
 
+    /// Contract C-7 (#411): every call of a run gets its own stream. Two calls of
+    /// one backend with the same batch sample differently, and a fresh backend
+    /// with the same seed replays the sequence.
+    #[test]
+    fn consecutive_calls_get_their_own_streams() {
+        let cfg = config_with(OptLevel::default());
+        let batch = vec![BoundCircuit::Native(uniform3())];
+        let run = |backend: &NativeStatevectorBackend| {
+            backend.run_circuits(&batch, &cfg.run_params()).unwrap()
+        };
+        let a = NativeStatevectorBackend::new(2024);
+        let (first, second) = (run(&a), run(&a));
+        assert_ne!(first, second);
+        let b = NativeStatevectorBackend::new(2024);
+        assert_eq!((run(&b), run(&b)), (first, second));
+    }
+
     /// Issue #348: neighbouring base seeds must not share sampling streams
     /// shifted by one circuit. With the former `base_seed + index` scheme,
     /// circuit `k` of seed `s` replayed circuit `k-1` of seed `s+1`.
@@ -1104,7 +1442,6 @@ mod tests {
     /// count for a fixed seed (C-7), so it must be deliberate.
     #[test]
     fn circuit_seed_is_pinned() {
-        assert_eq!(splitmix64_mix(0), 0);
         // SplitMix64 seeded with state 0: first output (reference value).
         assert_eq!(circuit_seed(0, 0), 0xE220_A839_7B1D_CDAF);
         let seeds: std::collections::HashSet<u64> = (0..1000).map(|k| circuit_seed(7, k)).collect();
@@ -1717,5 +2054,342 @@ mod tests {
              native {native_saved_ms:.2} ms, qasm {qasm_saved_ms:.2} ms",
             SUBMISSIONS_PER_RUN as u64
         );
+    }
+
+    // ── Exact probabilities (run_circuits_exact) ──────────────────────────────
+
+    fn exact(qcs: &[BoundCircuit]) -> Vec<HashMap<String, f64>> {
+        NativeStatevectorBackend::new(0)
+            .run_circuits_exact(qcs, &config_with(OptLevel::default()).run_params())
+            .unwrap()
+    }
+
+    #[test]
+    fn exact_bell_probabilities() {
+        let probs = exact(&[BoundCircuit::Native(bell())]);
+        assert_eq!(probs.len(), 1);
+        assert_eq!(probs[0].len(), 2, "{:?}", probs[0]);
+        assert!((probs[0]["00"] - 0.5).abs() < 1e-12);
+        assert!((probs[0]["11"] - 0.5).abs() < 1e-12);
+    }
+
+    /// A circuit whose eight outcomes all have different, non-trivial weights.
+    fn skewed3() -> ConcreteCircuit {
+        ParameterizedCircuit::new(3)
+            .ry(0, 0.3)
+            .ry(1, 1.1)
+            .cx(0, 2)
+            .ry(2, 2.2)
+            .rz(1, 0.7)
+            .h(1)
+            .measure_all()
+            .assign_parameters(&[])
+            .unwrap()
+    }
+
+    #[test]
+    fn exact_probabilities_sum_to_one_and_match_sampled_frequencies() {
+        let circuit = BoundCircuit::Native(skewed3());
+        let probs = exact(std::slice::from_ref(&circuit)).remove(0);
+        assert!((probs.values().sum::<f64>() - 1.0).abs() < 1e-12);
+        let shots = 400_000;
+        let backend = NativeStatevectorBackend::new(11);
+        let counts = backend
+            .simulate_one(
+                &circuit,
+                shots,
+                5,
+                &TranspileOptions::default(),
+                backend.simulator.parallel_threshold,
+            )
+            .unwrap();
+        // Same keys as the counts (C-3), and frequencies within a few standard
+        // deviations (σ ≤ 1/(2·√shots) ≈ 8e-4).
+        for (key, &count) in &counts {
+            let p = probs[key];
+            assert!((count as f64 / shots as f64 - p).abs() < 5e-3, "{key}: {p}");
+        }
+        assert!(probs.keys().all(|key| key.len() == 3));
+    }
+
+    #[test]
+    fn exact_results_are_deterministic_and_leave_the_seed_stream_alone() {
+        let batch = vec![
+            BoundCircuit::Native(skewed3()),
+            BoundCircuit::Native(bell()),
+        ];
+        let params = config_with(OptLevel::default()).run_params();
+        let backend = NativeStatevectorBackend::new(3);
+        let first = backend.run_circuits_exact(&batch, &params).unwrap();
+        let again = NativeStatevectorBackend::new(99)
+            .run_circuits_exact(&batch, &params)
+            .unwrap();
+        assert_eq!(first, again);
+        // Sampling after an exact run gives what it gives on a fresh backend.
+        let sampled = backend.run_circuits(&batch, &params).unwrap();
+        let fresh = NativeStatevectorBackend::new(3)
+            .run_circuits(&batch, &params)
+            .unwrap();
+        assert_eq!(sampled, fresh);
+    }
+
+    #[test]
+    fn exact_windows_do_not_change_the_result() {
+        let batch: Vec<BoundCircuit> = (0..5)
+            .map(|i| {
+                BoundCircuit::Native(
+                    ParameterizedCircuit::new(3)
+                        .ry(0, 0.2 * i as f64)
+                        .cx(0, 1)
+                        .ry(2, 0.5)
+                        .measure_all()
+                        .assign_parameters(&[])
+                        .unwrap(),
+                )
+            })
+            .collect();
+        let backend = NativeStatevectorBackend::new(0);
+        let params = config_with(OptLevel::default()).run_params();
+        let unbounded = backend
+            .run_exact_with_cap(&batch, &params, usize::MAX)
+            .unwrap();
+        for cap in [1, 2, 3] {
+            assert_eq!(
+                backend.run_exact_with_cap(&batch, &params, cap).unwrap(),
+                unbounded,
+                "cap {cap}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_measurement_free_circuit_is_read_on_every_qubit() {
+        let circuit = ParameterizedCircuit::new(3)
+            .x(2)
+            .assign_parameters(&[])
+            .unwrap();
+        let probs = exact(&[BoundCircuit::Native(circuit)]);
+        assert_eq!(probs[0], HashMap::from([("100".to_string(), 1.0)]));
+    }
+
+    #[test]
+    fn exact_qasm2_matches_native() {
+        let qasm = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[2];\n\
+                    h q[0];\ncx q[0],q[1];\nmeasure q -> c;\n";
+        assert_eq!(
+            exact(&[BoundCircuit::Qasm2(qasm.to_string())]),
+            exact(&[BoundCircuit::Native(bell())])
+        );
+    }
+
+    #[test]
+    fn exact_rejects_a_partial_read_out() {
+        let circuit = ParameterizedCircuit::new(2)
+            .h(0)
+            .cx(0, 1)
+            .measure(0, 0)
+            .assign_parameters(&[])
+            .unwrap();
+        let err = NativeStatevectorBackend::new(0)
+            .run_circuits_exact(
+                &[BoundCircuit::Native(circuit)],
+                &config_with(OptLevel::default()).run_params(),
+            )
+            .unwrap_err();
+        match err {
+            BackendError::UnsupportedCircuit(message) => {
+                assert!(message.contains("measure_all"), "{message}")
+            }
+            other => panic!("expected UnsupportedCircuit, got {other:?}"),
+        }
+    }
+
+    // ── Adjoint gradients (issue #503) ──────────────────────────────────────
+
+    /// `Z₀` and a circuit whose rotations at positions 1 and 3 are
+    /// differentiated, on `n` qubits.
+    fn adjoint_circuit(n: usize, angle: f64) -> ConcreteCircuit {
+        let mut circuit = ParameterizedCircuit::new(n).h(0).ry(0, angle).cx(0, 1);
+        circuit = circuit.rz(1, 0.3 * angle).rx(0, -angle).measure_all();
+        circuit.assign_parameters(&[]).unwrap()
+    }
+
+    fn z0(b: usize) -> f64 {
+        if b & 1 == 0 {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+
+    /// A capture logger for the fallback's `info` record. `log::set_logger` is
+    /// global to this test binary, so it is installed once and the test looks
+    /// for its own message only; no other test here asserts on logs.
+    struct Capture(std::sync::Mutex<Vec<(log::Level, String)>>);
+
+    impl log::Log for Capture {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            self.0
+                .lock()
+                .expect("the capture lock is never poisoned")
+                .push((record.level(), record.args().to_string()));
+        }
+
+        fn flush(&self) {}
+    }
+
+    static CAPTURE: Capture = Capture(std::sync::Mutex::new(Vec::new()));
+
+    fn captured_fallbacks(num_qubits: usize) -> usize {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            if log::set_logger(&CAPTURE).is_ok() {
+                log::set_max_level(log::LevelFilter::Info);
+            }
+        });
+        let needle = format!("gradient of a {num_qubits}-qubit circuit falls back");
+        CAPTURE
+            .0
+            .lock()
+            .expect("the capture lock is never poisoned")
+            .iter()
+            .filter(|(level, message)| *level == log::Level::Info && message.contains(&needle))
+            .count()
+    }
+
+    /// The adjoint holds two statevectors (M2): with a known budget that holds
+    /// exactly two `n`-qubit statevectors it runs; one byte less and it falls
+    /// back to the parameter shift — logged at `info`, never silently, once per
+    /// backend rather than on every gradient of a long fit — as long as one
+    /// statevector fits; with less than one, the error is the exact path's own
+    /// refusal. Pure: the budgets are explicit.
+    #[test]
+    fn the_adjoint_needs_two_statevectors_and_falls_back_to_the_shift_with_one() {
+        use polypus_backend::BudgetSource;
+        let backend = NativeStatevectorBackend::new(0);
+        let n = 16; // one statevector = 1 MiB
+        let one = 16u64 << n;
+        let budget = |bytes| MemBudget {
+            bytes,
+            source: BudgetSource::Explicit,
+        };
+        captured_fallbacks(n);
+        assert!(backend.adjoint_fits_against(n, budget(2 * one)).unwrap());
+        assert_eq!(captured_fallbacks(n), 0, "no fallback, no record");
+        assert!(!backend
+            .adjoint_fits_against(n, budget(2 * one - 1))
+            .unwrap());
+        assert!(!backend.adjoint_fits_against(n, budget(one)).unwrap());
+        assert_eq!(
+            captured_fallbacks(n),
+            1,
+            "two fallbacks of one backend are logged once, at info"
+        );
+        let fresh = NativeStatevectorBackend::new(0);
+        assert!(!fresh.adjoint_fits_against(n, budget(one)).unwrap());
+        assert_eq!(captured_fallbacks(n), 2, "another backend logs its own");
+        let refused = backend
+            .adjoint_fits_against(n, budget(one - 1))
+            .unwrap_err();
+        assert!(
+            matches!(&refused, BackendError::InsufficientMemory(e)
+                if e.num_qubits == n && e.required_bytes == one),
+            "not even one statevector: the exact path's own error, got {refused:?}"
+        );
+        assert_eq!(
+            refused.to_string(),
+            backend
+                .check_memory_against(n, budget(one - 1))
+                .unwrap_err()
+                .to_string()
+        );
+        // No known limit never refuses; above the ceiling is the simulator's.
+        let fallback = MemBudget {
+            bytes: 1,
+            source: BudgetSource::Fallback,
+        };
+        assert!(backend.adjoint_fits_against(30, fallback).unwrap());
+        assert!(backend
+            .adjoint_fits_against(polypus_sim::MAX_QUBITS + 1, budget(1))
+            .unwrap());
+    }
+
+    /// Each row is the simulator's own adjoint gradient of its task, and the
+    /// window size (how many tasks are in flight) changes nothing.
+    #[test]
+    fn adjoint_rows_are_the_simulators_and_windows_do_not_change_them() {
+        let circuits: Vec<ConcreteCircuit> = (0..5)
+            .map(|i| adjoint_circuit(3, 0.4 + 0.3 * i as f64))
+            .collect();
+        let wrt = [1usize, 3, 4];
+        let tasks: Vec<AdjointTask<'_, _>> = circuits
+            .iter()
+            .map(|circuit| AdjointTask {
+                circuit,
+                wrt: &wrt,
+                weight: z0,
+            })
+            .collect();
+        let backend = NativeStatevectorBackend::new(0);
+        let unbounded = backend
+            .run_adjoint_with_cap(&tasks, None, usize::MAX)
+            .unwrap();
+        for (row, circuit) in unbounded.iter().zip(&circuits) {
+            let direct = StatevectorSimulator::new()
+                .adjoint_gradient(circuit, &wrt, z0, None)
+                .unwrap();
+            assert_eq!(*row, direct.derivatives);
+        }
+        for cap in [1, 2, 3] {
+            assert_eq!(
+                backend.run_adjoint_with_cap(&tasks, None, cap).unwrap(),
+                unbounded,
+                "cap {cap}"
+            );
+        }
+        assert_eq!(backend.run_adjoint(&tasks, None).unwrap(), unbounded);
+        assert!(backend
+            .run_adjoint::<fn(usize) -> f64>(&[], None)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A cancellation is `Aborted` (Ctrl+C at the edge); any other simulator
+    /// error is the native backend's typed one, never a panic.
+    #[test]
+    fn adjoint_errors_are_typed() {
+        // A long circuit, so the throttled hook comes due mid-run.
+        let mut long = ParameterizedCircuit::new(12).ry(0, 0.2);
+        for i in 0..40_000 {
+            long = long.rx(i % 12, 0.001).barrier();
+        }
+        let long = long.assign_parameters(&[]).unwrap();
+        let backend = NativeStatevectorBackend::new(0);
+        let stop = || true;
+        let task = [AdjointTask {
+            circuit: &long,
+            wrt: &[0],
+            weight: z0,
+        }];
+        assert!(matches!(
+            backend.run_adjoint(&task, Some(&stop)),
+            Err(BackendError::Aborted(_))
+        ));
+        let bad = adjoint_circuit(2, 0.1);
+        let not_a_rotation = [AdjointTask {
+            circuit: &bad,
+            wrt: &[0],
+            weight: z0,
+        }];
+        match backend.run_adjoint(&not_a_rotation, None) {
+            Err(BackendError::NativeCircuit(message)) => {
+                assert!(message.contains("not a Pauli rotation"), "{message}")
+            }
+            other => panic!("expected NativeCircuit, got {other:?}"),
+        }
     }
 }

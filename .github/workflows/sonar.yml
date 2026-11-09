@@ -1,0 +1,188 @@
+name: SonarQube Cloud
+
+# Code-quality dashboard (sonar-project.properties): Rust and Python coverage,
+# the clippy report, then the SonarQube Cloud scan. On pull requests the scan
+# job fails when the quality gate fails; pushes to main only report.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: sonar-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('push-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Same test passes as the `test (Rust)` job in ci.yml, instrumented with
+  # cargo-llvm-cov and merged into one LCOV report. The Rust code that only
+  # the Python suite reaches is measured by the `python` job.
+  rust:
+    name: Rust coverage + clippy report
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # PyO3 links libpython; the PyO3-touching crates' tests start an
+      # embedded interpreter (see the `test (Rust)` job in ci.yml).
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - name: Install Rust (rust-toolchain.toml) + llvm-tools
+        run: |
+          rustup toolchain install --no-self-update
+          rustup component add llvm-tools-preview
+      # llvm-as, so the QIR tests that assemble their output run too.
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends llvm
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      - name: Test with coverage
+        run: |
+          cargo llvm-cov --no-report --locked --workspace
+          cargo llvm-cov --no-report --locked --all-features \
+            -p polypus-circuit -p polypus-sim -p polypus-physics \
+            -p polypus-optimizers -p polypus-observable -p polypus-backend \
+            -p polypus-backend-conformance -p polypus-subprocess-backend
+          cargo llvm-cov --no-report --locked -p polypus-logger
+          cargo llvm-cov --no-report --locked -p polypus-infrastructure --features qmio
+          cargo llvm-cov --no-report --locked -p polypus --features qmio
+          cargo llvm-cov report --lcov --output-path lcov.info
+      # Line coverage per crate in the job summary, readable without SonarQube
+      # Cloud (and without its token). Report only: no threshold.
+      - name: Coverage per crate (job summary)
+        run: >-
+          python .github/scripts/coverage_summary.py lcov.info
+          --title "Rust line coverage per crate (the cargo test passes)"
+          >> "$GITHUB_STEP_SUMMARY"
+      # Imported as external issues; lint failures are ci.yml's job, so no
+      # -D warnings here.
+      - name: Clippy report (JSON)
+        run: cargo clippy --locked --workspace --all-targets --message-format=json > clippy.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sonar-rust
+          path: |
+            lcov.info
+            clippy.json
+          retention-days: 14
+
+  # The pytest suite against the installed wheel, as in the 3.13 leg of
+  # `python-tests` (ci.yml). Coverage maps site-packages back to python/
+  # ([tool.coverage] in pyproject.toml). The wheel is built with
+  # cargo-llvm-cov's instrumentation, so the same run also measures the Rust
+  # it reaches (lcov-python.info).
+  python:
+    name: Python coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Install Rust (rust-toolchain.toml) + llvm-tools
+        run: |
+          rustup toolchain install --no-self-update
+          rustup component add llvm-tools-preview
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends llvm
+      # A key of its own: the instrumented build cannot reuse the plain one.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: llvm-cov
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip maturin pytest coverage==7.16.2
+          pip install -r requirements-dev.txt
+      # PyTorch, so that the tests of polypus.torch run here and
+      # polypus/torch.py is covered instead of skipped. The CPU wheel at the
+      # pin of ci.yml (tests/python/test_torch_import.py checks it).
+      - name: Install PyTorch (CPU)
+        run: pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
+      # One step, so that show-env's variables (instrumentation flags, where
+      # the profiles go) reach the build, the tests and the report. The build
+      # goes to cargo-llvm-cov's target directory, where `report` looks.
+      # sys.monitoring also traces the Python callbacks the extension runs from
+      # threads it starts itself, which settrace-based tracing misses. The
+      # instrumented extension simulates up to ten times slower, so the
+      # deadlines of the Ctrl+C tests (test_interrupt.py) stretch to match.
+      - name: Build, install and test the instrumented wheel
+        env:
+          COVERAGE_CORE: sysmon
+          POLYPUS_TEST_TIME_SCALE: "10"
+        run: |
+          source <(cargo llvm-cov show-env --sh)
+          export CARGO_TARGET_DIR="$CARGO_LLVM_COV_TARGET_DIR"
+          maturin build --release --out dist
+          pip install dist/polypus_quantum-*.whl
+          python -m coverage run -m pytest tests/python -rs
+          python -m coverage combine
+          python -m coverage xml -o coverage.xml
+          cargo llvm-cov report --release --lcov --output-path lcov-python.info
+      # The Rust the pytest suite reaches (the bindings above all), per crate.
+      - name: Coverage per crate (job summary)
+        run: >-
+          python .github/scripts/coverage_summary.py lcov-python.info
+          --title "Rust line coverage per crate (reached by the pytest suite)"
+          >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sonar-python
+          path: |
+            coverage.xml
+            lcov-python.info
+          retention-days: 14
+
+  scan:
+    name: SonarQube Cloud scan
+    needs: [rust, python]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Pull requests from forks get no secrets, and the token is missing until
+    # the project is imported in SonarQube Cloud: the reports are still built
+    # (and kept as artifacts), only the upload is skipped. On pull requests the
+    # scan waits for the quality gate and fails with it, so this job is the
+    # check to require; one without the token passes without a gate.
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      # Full history: blame data for new-code detection.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      # The Rust analyzer needs cargo on PATH.
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: sonar-*
+          merge-multiple: true
+      # Sonar reads an LCOV hit count as a 32-bit integer and drops a line whose
+      # count is larger ("Found N problems in LCOV report"): the simulator's
+      # innermost kernel lines run more than 2^31 times in the Python suite.
+      # Clamping keeps them covered; the artifacts keep the raw counts.
+      - name: Clamp LCOV hit counts to 32 bits
+        run: |
+          for report in lcov.info lcov-python.info; do
+            awk -F, -v OFS=, '/^DA:/ && $2 > 2147483647 { $2 = 2147483647 } 1' "$report" > "$report.tmp"
+            mv "$report.tmp" "$report"
+          done
+      - uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
+        if: env.SONAR_TOKEN != ''
+        with:
+          args: -Dsonar.qualitygate.wait=${{ github.event_name == 'pull_request' }}

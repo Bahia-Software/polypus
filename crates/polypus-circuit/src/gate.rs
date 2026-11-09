@@ -610,6 +610,180 @@ impl GateInstruction {
         })
     }
 
+    /// A copy of this instruction with every qubit `q` it refers to replaced
+    /// by `map(q)`: unitary operands, a measurement target and barrier
+    /// operands. Angles and classical bits are kept. A barrier over all qubits
+    /// (`Barrier([])`) and [`MeasureAll`](GateInstruction::MeasureAll) name no
+    /// qubit and are kept as they are. Used to compose a circuit onto chosen
+    /// qubits of another
+    /// ([`ParameterizedCircuit::try_compose`](crate::ParameterizedCircuit::try_compose)).
+    ///
+    /// Exhaustive over the vocabulary, for the same reason as [`Self::params`].
+    pub(crate) fn map_qubits(&self, map: impl Fn(usize) -> usize) -> GateInstruction {
+        use GateInstruction as G;
+        match self {
+            G::H(q) => G::H(map(*q)),
+            G::X(q) => G::X(map(*q)),
+            G::Y(q) => G::Y(map(*q)),
+            G::Z(q) => G::Z(map(*q)),
+            G::S(q) => G::S(map(*q)),
+            G::T(q) => G::T(map(*q)),
+            G::Sdg(q) => G::Sdg(map(*q)),
+            G::Tdg(q) => G::Tdg(map(*q)),
+            G::Id(q) => G::Id(map(*q)),
+            G::Sx(q) => G::Sx(map(*q)),
+            G::Sxdg(q) => G::Sxdg(map(*q)),
+            G::Rx { qubit, theta } => G::Rx {
+                qubit: map(*qubit),
+                theta: *theta,
+            },
+            G::Ry { qubit, theta } => G::Ry {
+                qubit: map(*qubit),
+                theta: *theta,
+            },
+            G::Rz { qubit, theta } => G::Rz {
+                qubit: map(*qubit),
+                theta: *theta,
+            },
+            G::U {
+                qubit,
+                theta,
+                phi,
+                lam,
+            } => G::U {
+                qubit: map(*qubit),
+                theta: *theta,
+                phi: *phi,
+                lam: *lam,
+            },
+            G::UGate {
+                qubit,
+                theta,
+                phi,
+                lam,
+            } => G::UGate {
+                qubit: map(*qubit),
+                theta: *theta,
+                phi: *phi,
+                lam: *lam,
+            },
+            G::U0 { qubit, gamma } => G::U0 {
+                qubit: map(*qubit),
+                gamma: *gamma,
+            },
+            G::P { qubit, lam } => G::P {
+                qubit: map(*qubit),
+                lam: *lam,
+            },
+            G::U1 { qubit, lam } => G::U1 {
+                qubit: map(*qubit),
+                lam: *lam,
+            },
+            G::U2 { qubit, phi, lam } => G::U2 {
+                qubit: map(*qubit),
+                phi: *phi,
+                lam: *lam,
+            },
+            G::Cx(a, b) => G::Cx(map(*a), map(*b)),
+            G::Cz(a, b) => G::Cz(map(*a), map(*b)),
+            G::Swap(a, b) => G::Swap(map(*a), map(*b)),
+            G::Cy(a, b) => G::Cy(map(*a), map(*b)),
+            G::Ch(a, b) => G::Ch(map(*a), map(*b)),
+            G::Csx(a, b) => G::Csx(map(*a), map(*b)),
+            G::Rzz { q0, q1, theta } => G::Rzz {
+                q0: map(*q0),
+                q1: map(*q1),
+                theta: *theta,
+            },
+            G::Rxx { q0, q1, theta } => G::Rxx {
+                q0: map(*q0),
+                q1: map(*q1),
+                theta: *theta,
+            },
+            G::Cp { q0, q1, theta } => G::Cp {
+                q0: map(*q0),
+                q1: map(*q1),
+                theta: *theta,
+            },
+            G::Cu1 { q0, q1, theta } => G::Cu1 {
+                q0: map(*q0),
+                q1: map(*q1),
+                theta: *theta,
+            },
+            G::Crx {
+                control,
+                target,
+                theta,
+            } => G::Crx {
+                control: map(*control),
+                target: map(*target),
+                theta: *theta,
+            },
+            G::Cry {
+                control,
+                target,
+                theta,
+            } => G::Cry {
+                control: map(*control),
+                target: map(*target),
+                theta: *theta,
+            },
+            G::Crz {
+                control,
+                target,
+                theta,
+            } => G::Crz {
+                control: map(*control),
+                target: map(*target),
+                theta: *theta,
+            },
+            G::Cu3 {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+            } => G::Cu3 {
+                control: map(*control),
+                target: map(*target),
+                theta: *theta,
+                phi: *phi,
+                lam: *lam,
+            },
+            G::Cu {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+                gamma,
+            } => G::Cu {
+                control: map(*control),
+                target: map(*target),
+                theta: *theta,
+                phi: *phi,
+                lam: *lam,
+                gamma: *gamma,
+            },
+            G::Ccx(a, b, c) => G::Ccx(map(*a), map(*b), map(*c)),
+            G::Cswap(a, b, c) => G::Cswap(map(*a), map(*b), map(*c)),
+            G::Rccx(a, b, c) => G::Rccx(map(*a), map(*b), map(*c)),
+            G::Rc3x(a, b, c, d) => G::Rc3x(map(*a), map(*b), map(*c), map(*d)),
+            G::C3x(a, b, c, d) => G::C3x(map(*a), map(*b), map(*c), map(*d)),
+            G::C3sqrtx(a, b, c, d) => G::C3sqrtx(map(*a), map(*b), map(*c), map(*d)),
+            G::C4x(a, b, c, d, e) => G::C4x(map(*a), map(*b), map(*c), map(*d), map(*e)),
+            G::Custom(call) => {
+                G::Custom(call.with_qubits(call.qubits().iter().map(|&q| map(q)).collect()))
+            }
+            G::Barrier(qubits) => G::Barrier(qubits.iter().map(|&q| map(q)).collect()),
+            G::Measure { qubit, cbit } => G::Measure {
+                qubit: map(*qubit),
+                cbit: *cbit,
+            },
+            G::MeasureAll => G::MeasureAll,
+        }
+    }
+
     /// The exact decomposition of a composite `qelib1.inc` gate — `ccx`,
     /// `cswap`, `rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x` — into simpler
     /// instructions: the gate's own definition in `qelib1.inc` (with `u1`/`u2`

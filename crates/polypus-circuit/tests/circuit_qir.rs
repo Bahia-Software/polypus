@@ -2,12 +2,26 @@
 //!
 //! These assert on the structure of the emitted LLVM IR (entry point, gate
 //! intrinsics, gate decompositions, measurement recording and module flags).
-//! The optional `qir_base_profile_module_is_valid_llvm` test additionally
-//! parses the output with `llvm-as` when it is available on the host.
+//! `qir_base_profile_module_is_valid_llvm` and the bitcode test additionally
+//! run `llvm-as` on the output. Without it on PATH they skip, unless
+//! `POLYPUS_REQUIRE_LLVM_AS=1`: CI installs LLVM and sets it, so there they fail.
 
 use polypus_circuit::{
     CircuitError, ConcreteCircuit, GateInstruction, GateParam, Param, ParameterizedCircuit,
 };
+
+/// Set to `1` where `llvm-as` must be present (CI).
+const REQUIRE_LLVM_AS: &str = "POLYPUS_REQUIRE_LLVM_AS";
+
+/// Report that `test` skips because `llvm-as` is not on PATH; the caller then
+/// returns. Under `POLYPUS_REQUIRE_LLVM_AS=1` the test fails here instead.
+fn skip_without_llvm_as(test: &str) {
+    assert!(
+        std::env::var_os(REQUIRE_LLVM_AS).is_none_or(|v| v != "1"),
+        "{test}: llvm-as not found on PATH, and {REQUIRE_LLVM_AS}=1 requires it"
+    );
+    eprintln!("skipping {test}: llvm-as not found on PATH");
+}
 
 /// Collect just the `call void @...` instruction lines (without the leading
 /// indentation), in order — handy for asserting on exact gate sequences.
@@ -367,7 +381,7 @@ fn qir_bitcode_is_emitted_when_assembler_is_available() {
             assert!(bitcode.starts_with(&[0x42, 0x43, 0xC0, 0xDE]));
         }
         Err(CircuitError::QirAssemblyToolNotFound { .. }) => {
-            eprintln!("skipping: llvm-as not found on PATH");
+            skip_without_llvm_as("qir_bitcode_is_emitted_when_assembler_is_available");
         }
         Err(other) => panic!("unexpected QIR bitcode export error: {other}"),
     }
@@ -402,8 +416,8 @@ fn measure_all_with_uneven_register_records_per_qubit() {
 }
 
 /// When `llvm-as` is on PATH, prove the emitted module is well-formed LLVM IR
-/// by assembling it to bitcode. Skipped (passes) when the tool is absent so
-/// the suite stays dependency-free in CI without LLVM.
+/// by assembling it to bitcode. Skipped (passes) when the tool is absent, so
+/// the suite needs no LLVM, except under `POLYPUS_REQUIRE_LLVM_AS=1`.
 #[test]
 fn qir_base_profile_module_is_valid_llvm() {
     use std::io::Write;
@@ -411,7 +425,7 @@ fn qir_base_profile_module_is_valid_llvm() {
 
     let probe = Command::new("llvm-as").arg("--version").output();
     if probe.is_err() {
-        eprintln!("skipping: llvm-as not found on PATH");
+        skip_without_llvm_as("qir_base_profile_module_is_valid_llvm");
         return;
     }
 
@@ -445,6 +459,45 @@ fn qir_base_profile_module_is_valid_llvm() {
         "llvm-as rejected the emitted QIR:\n{}\n--- IR ---\n{ir}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// The two tests that need `llvm-as`, run in a child process whose PATH holds
+/// no `llvm-as`, skip (pass) — and fail under `POLYPUS_REQUIRE_LLVM_AS=1`.
+#[test]
+fn a_missing_llvm_as_fails_the_tests_that_need_it_only_where_required() {
+    use std::process::Command;
+
+    let exe = std::env::current_exe().expect("path of this test binary");
+    let no_llvm_as = std::env::temp_dir().join("polypus-no-llvm-as-here");
+    for test in [
+        "qir_bitcode_is_emitted_when_assembler_is_available",
+        "qir_base_profile_module_is_valid_llvm",
+    ] {
+        for required in [false, true] {
+            let mut child = Command::new(&exe);
+            child
+                .args([test, "--exact", "--nocapture"])
+                .env("PATH", &no_llvm_as);
+            if required {
+                child.env(REQUIRE_LLVM_AS, "1");
+            } else {
+                child.env_remove(REQUIRE_LLVM_AS);
+            }
+            let out = child.output().expect("run this test binary");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                out.status.success(),
+                !required,
+                "{test} (required: {required}):\n{stderr}"
+            );
+            let reason = if required {
+                format!("{REQUIRE_LLVM_AS}=1 requires it")
+            } else {
+                format!("skipping {test}")
+            };
+            assert!(stderr.contains(&reason), "{test}:\n{stderr}");
+        }
+    }
 }
 
 /// The QIR module of `body` (the lines of `@main` before `ret`) with these

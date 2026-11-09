@@ -28,7 +28,6 @@ vector; here we pin the *batching shape*: bounded windows, not one giant batch a
 not per-candidate.
 """
 
-import os
 import threading
 
 import pytest
@@ -42,19 +41,21 @@ _POPULATION = 200
 
 
 class _BatchProbe:
-    """Records the circuits carried by each backend call."""
+    """Records each backend call's circuit count and reported parallelism."""
 
     def __init__(self):
         self._lock = threading.Lock()
         self.calls = 0
         self.total_circuits = 0
         self.max_circuits_in_a_call = 0
+        self.parallelism = set()
 
-    def record(self, n):
+    def record(self, n, parallelism):
         with self._lock:
             self.calls += 1
             self.total_circuits += n
             self.max_circuits_in_a_call = max(self.max_circuits_in_a_call, n)
+            self.parallelism.add(parallelism)
 
 
 def _probing_seam(probe):
@@ -63,30 +64,34 @@ def _probing_seam(probe):
     Returns one counts dict per submitted circuit, conserving ``shots`` and using
     a bitstring of the circuit's own classical width (contract C-3), so the Rust
     side and the user ``expectation_function`` see a well-formed payload.
+
+    ``max_parallel_experiments`` is ``max(1, min(available_parallelism(), memory
+    budget / statevector size))``. With ``POLYPUS_MEM_BUDGET`` unset the budget
+    never binds for this test's 2-qubit circuits, so it carries Rust's own
+    ``available_parallelism()``.
     """
 
     def run_qcs(_infrastructure, **kwargs):
         qcs = kwargs["qcs"]
         shots = kwargs["shots"]
-        probe.record(len(qcs))
+        probe.record(len(qcs), kwargs["max_parallel_experiments"])
         return [{"0" * (qc.num_clbits or qc.num_qubits): shots} for qc in qcs]
 
     return run_qcs
 
 
-def _candidate_window():
+def _candidate_window(parallelism):
     """The oracle's in-flight window, in candidates.
 
     Mirrors ``candidate_window_size`` in ``crates/polypus-evaluation/src/qml_oracle.rs``
-    (``CONCURRENCY_MULTIPLIER × available_parallelism()``). Uses the CPU-affinity
-    count on Linux — what Rust's ``std::thread::available_parallelism`` reports —
-    falling back to the CPU count elsewhere, so the expected window is derived from
-    the runner, never hardcoded.
+    (``CONCURRENCY_MULTIPLIER × available_parallelism()``; ``LocalBackend`` reports
+    an unbounded ``max_concurrency`` and one training row keeps the memory bound
+    above that, so neither applies here). ``parallelism`` must be
+    the value Rust computed, as read off the seam, not one derived in Python: on
+    Linux ``available_parallelism()`` also honours the cgroup CPU quota, so
+    ``os.sched_getaffinity`` overstates it in a ``--cpus`` container or on a
+    quota-limited host.
     """
-    try:
-        parallelism = len(os.sched_getaffinity(0))
-    except AttributeError:  # sched_getaffinity is Linux-only
-        parallelism = os.cpu_count() or 1
     _concurrency_multiplier = 2
     return parallelism * _concurrency_multiplier
 
@@ -105,6 +110,9 @@ def test_qml_train_bounds_the_population_into_windows(monkeypatch):
 
     probe = _BatchProbe()
     monkeypatch.setattr(polypus_python, "run_qcs", _probing_seam(probe))
+    # A tiny ambient memory budget would cap `max_parallel_experiments` below the
+    # parallelism and split each window into several waves.
+    monkeypatch.delenv("POLYPUS_MEM_BUDGET", raising=False)
 
     result = polypus.qml.train(
         feature_map,
@@ -126,14 +134,22 @@ def test_qml_train_bounds_the_population_into_windows(monkeypatch):
     assert len(result.best_params) == len(ansatz.parameters)
     assert probe.calls >= 1, "the training run never reached the backend"
 
+    # The window is derived only from the parallelism Rust reported, which must not
+    # vary between calls.
+    assert len(probe.parallelism) == 1, (
+        f"the backend reported a varying parallelism {sorted(probe.parallelism)}"
+    )
+    (parallelism,) = probe.parallelism
+
     # One training row means one circuit per candidate, so a window of candidates
     # reaches the backend as that many circuits. The largest call is one full window
     # (or the whole population, on a machine whose window already covers it) — never
     # the eager whole-population batch this fix replaced.
-    expected_max = min(_candidate_window(), _POPULATION)
+    expected_max = min(_candidate_window(parallelism), _POPULATION)
     assert probe.max_circuits_in_a_call == expected_max, (
         f"the largest backend call carried {probe.max_circuits_in_a_call} circuits; "
-        f"the oracle must bound each call to one window of {expected_max}"
+        f"the oracle must bound each call to one window of {expected_max} "
+        f"(Rust reports a parallelism of {parallelism})"
     )
     # …and that is genuinely batched, not the pre-#85 one-circuit-per-call dispatch.
     assert probe.max_circuits_in_a_call > 1, (
@@ -149,7 +165,7 @@ def test_qml_train_bounds_the_population_into_windows(monkeypatch):
     # Each evaluation is ceil(population / window) backend calls — however many CPUs
     # the runner has (a bare `calls < _POPULATION` is false on one CPU, where the
     # window is 2 and an evaluation is 100 calls of 2).
-    window = _candidate_window()
+    window = _candidate_window(parallelism)
     evaluations = probe.total_circuits // _POPULATION
     calls_per_evaluation = -(-_POPULATION // window)
     assert probe.calls == evaluations * calls_per_evaluation, (

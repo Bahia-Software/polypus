@@ -193,10 +193,16 @@ impl QuboObservable {
 
     /// Count-weighted mean of `f` over one candidate's counts. Empty counts (or
     /// counts summing to zero) yield `0.0`.
+    ///
+    /// Summed in ascending bitstring order so the result does not depend on
+    /// `HashMap` iteration order.
     fn expectation_one(&self, counts: &HashMap<String, u64>) -> Result<f64, ObservableError> {
+        let mut outcomes: Vec<(&str, u64)> =
+            counts.iter().map(|(key, &n)| (key.as_str(), n)).collect();
+        outcomes.sort_unstable_by(|a, b| a.0.cmp(b.0));
         let mut num = 0.0f64;
         let mut den = 0u64;
-        for (key, &n) in counts {
+        for (key, n) in outcomes {
             num += self.eval_bits(key)? * n as f64;
             den += n;
         }
@@ -282,6 +288,24 @@ mod tests {
     }
 
     #[test]
+    fn mean_does_not_depend_on_hashmap_iteration_order() {
+        // "001" -> 0.1, "010" -> 0.2, "100" -> 0.7: not dyadic, so the sum depends
+        // on the order its terms are added in. Four shots make the division by the
+        // shot count exact, so that difference reaches the mean.
+        let obs =
+            QuboObservable::new(3, vec![(0, 0.1), (1, 0.2), (2, 0.7)], vec![], 0.0, 1.0).unwrap();
+        let ascending = ((0.1 * 2.0 + 0.2) + 0.7) / 4.0;
+        assert_ne!(ascending, ((0.2 + 0.7) + 0.1 * 2.0) / 4.0);
+        // Each map gets its own `RandomState`, hence its own iteration order.
+        let batch: Vec<_> = (0..128)
+            .map(|_| counts(&[("001", 2), ("010", 1), ("100", 1)]))
+            .collect();
+        for ev in obs.expectation_batch(&batch).unwrap() {
+            assert_eq!(ev, ascending, "summed in ascending bitstring order");
+        }
+    }
+
+    #[test]
     fn empty_and_zero_counts_are_zero() {
         let obs = QuboObservable::new(2, vec![(0, 5.0)], vec![], 1.0, 1.0).unwrap();
         assert_eq!(obs.expectation_batch(&[HashMap::new()]).unwrap(), vec![0.0]);
@@ -331,6 +355,58 @@ mod tests {
             m.expectation_batch(&batch).unwrap(),
             s.expectation_batch(&batch).unwrap()
         );
+    }
+
+    #[test]
+    fn from_matrix_adds_both_triangles_of_an_off_diagonal_pair() {
+        // Q = [[0, 1], [2, 0]]: x0·x1 appears as Q_01 and as Q_10, so its weight
+        // is 1 + 2 = 3, and only the lower entry tells a sum from a difference.
+        let m = QuboObservable::from_matrix(&[vec![0.0, 1.0], vec![2.0, 0.0]], 1.0).unwrap();
+        let ev = m
+            .expectation_batch(&[
+                counts(&[("11", 1)]),
+                counts(&[("01", 1)]),
+                counts(&[("10", 1)]),
+            ])
+            .unwrap();
+        assert_eq!(ev, vec![3.0, 0.0, 0.0]);
+        // A lower triangle alone is a quadratic term too.
+        let lower = QuboObservable::from_matrix(&[vec![0.0, 0.0], vec![2.5, 0.0]], 1.0).unwrap();
+        assert_eq!(
+            lower.expectation_batch(&[counts(&[("11", 1)])]).unwrap(),
+            vec![2.5]
+        );
+    }
+
+    #[test]
+    fn scale_multiplies_every_value() {
+        // f = 1 + 2·x0 + 4·x0·x1, scale = 2 (not ±1, where multiplying and
+        // dividing by the scale agree).
+        let obs = QuboObservable::new(2, vec![(0, 2.0)], vec![(0, 1, 4.0)], 1.0, 2.0).unwrap();
+        let ev = obs
+            .expectation_batch(&[
+                counts(&[("00", 1)]),
+                counts(&[("01", 1)]),
+                counts(&[("11", 1)]),
+            ])
+            .unwrap();
+        assert_eq!(ev, vec![2.0, 6.0, 14.0]);
+        // The matrix form takes the same scale.
+        let m = QuboObservable::from_matrix(&[vec![3.0]], 0.5).unwrap();
+        assert_eq!(
+            m.expectation_batch(&[counts(&[("1", 1)])]).unwrap(),
+            vec![1.5]
+        );
+    }
+
+    #[test]
+    fn num_vars_is_the_declared_width() {
+        for n in [2, 3, 70] {
+            let obs = QuboObservable::new(n, vec![], vec![], 0.0, 1.0).unwrap();
+            assert_eq!(obs.num_vars(), n);
+        }
+        let m = QuboObservable::from_matrix(&vec![vec![0.0; 4]; 4], 1.0).unwrap();
+        assert_eq!(m.num_vars(), 4);
     }
 
     #[test]

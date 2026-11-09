@@ -3,9 +3,13 @@
 use crate::error::OptimizerError;
 use crate::linalg::symmetric_eigen;
 use crate::objective::EvaluationOracle;
+use crate::observer::{IterationObserver, IterationReport};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
-use crate::util::{check_oracle_len, recent_improvement, stagnated};
+use crate::util::{
+    check_initial_point, check_oracle_len, check_patience, recent_improvement, stagnated,
+    wrap_angle,
+};
 use ndarray::{Array1, Array2};
 use rand::{Rng, RngExt};
 use std::cmp::Ordering;
@@ -37,7 +41,8 @@ use std::fmt;
 /// unwrapped in ℝ^d, so the covariance adapts across the `0`/`2π` seam, and
 /// each candidate is wrapped into `[0, 2π)` only when it is handed to the
 /// oracle (`f(x) = f(x mod 2π)`). The initial mean is drawn uniformly from
-/// `[0, 2π)` and the returned `best_params` is the wrapped candidate the
+/// `[0, 2π)`, or is [`initial_point`](AlgorithmCmaEsArgs::initial_point)
+/// wrapped into it, and the returned `best_params` is the wrapped candidate the
 /// oracle scored.
 ///
 /// The largest coordinate standard deviation, `σ·max_i √C_ii`, is capped at
@@ -113,6 +118,7 @@ use std::fmt;
 ///         patience: 30,
 ///         restarts: 0,
 ///         seed: Some(7),
+///         initial_point: None,
 ///     })
 ///     .expect("valid arguments optimize successfully");
 ///
@@ -145,6 +151,9 @@ pub struct AlgorithmCmaEs;
 /// - `population_size >= 2` when given: μ = ⌊λ/2⌋ must be at least 1.
 /// - `restarts` small enough that the largest population, `λ₀·2^restarts`,
 ///   fits in a `u32` like `population_size`.
+/// - `patience >= 1`: the stagnation rule compares a run's best fitness with
+///   `patience` generations earlier.
+/// - `initial_point`, when given, holds `dimensions` finite values.
 pub struct AlgorithmCmaEsArgs {
     /// Oracle that maps parameter vectors to fitness values (higher is better).
     pub oracle: Box<dyn EvaluationOracle>,
@@ -181,6 +190,14 @@ pub struct AlgorithmCmaEsArgs {
     /// Optional RNG seed. `None` (the default) uses [`rand::rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
+    /// Optional mean of the first run, one value per dimension, all finite,
+    /// wrapped into `[0, 2π)` so a far angle keeps its precision. The
+    /// uniform mean is still drawn and then replaced, so the rest of the run
+    /// draws what it would without a point, and every IPOP restart draws a
+    /// fresh mean as usual. `sigma0` is not adjusted: to refine around a good
+    /// point rather than explore from it, pass a smaller `sigma0` too.
+    /// `None` draws the first mean uniformly from `[0, 2π)`.
+    pub initial_point: Option<Vec<f64>>,
 }
 
 impl AlgorithmCmaEs {
@@ -217,9 +234,30 @@ impl AlgorithmCmaEs {
         4 + (3.0 * d.ln()).floor() as u32
     }
 
+    /// Check the preconditions of [`AlgorithmCmaEsArgs`] that
+    /// [`optimize`](Optimizer::optimize) checks before any RNG draw or oracle
+    /// call, in the same order, without running anything: the configuration
+    /// listed on [`AlgorithmCmaEsArgs`], then `initial_point` (`dimensions`
+    /// finite values). `train` and `qml.train` call it before any backend
+    /// exists.
+    pub fn check_preconditions(
+        dimensions: u32,
+        population_size: Option<u32>,
+        generations: u32,
+        sigma0: f64,
+        restarts: u32,
+        patience: u32,
+        initial_point: Option<&[f64]>,
+    ) -> Result<(), OptimizerError> {
+        validate(dimensions, population_size, generations, sigma0, restarts)?;
+        check_patience(patience, "generations")?;
+        check_initial_point(initial_point, dimensions as usize, None)
+    }
+
     fn run_with_rng<R: Rng>(
         args: AlgorithmCmaEsArgs,
         rng: &mut R,
+        observer: &mut dyn IterationObserver,
     ) -> Result<OptimizationOutcome, OptimizerError> {
         let AlgorithmCmaEsArgs {
             oracle,
@@ -231,10 +269,13 @@ impl AlgorithmCmaEs {
             patience,
             restarts,
             seed: _,
+            mut initial_point,
         } = args;
 
         let schedule = validate(dimensions, population_size, generations, sigma0, restarts)?;
+        check_patience(patience, "generations")?;
         let n = dimensions as usize;
+        check_initial_point(initial_point.as_deref(), n, None)?;
         let budget = generations as usize;
         let patience = patience as usize;
 
@@ -248,7 +289,14 @@ impl AlgorithmCmaEs {
             // `validate` keeps every population this loop can reach within u32.
             let lambda = schedule.population(run) as usize;
             let strategy = Strategy::new(n, lambda);
-            let mean: Array1<f64> = (0..n).map(|_| rng.random_range(0.0..TAU)).collect();
+            let drawn: Array1<f64> = (0..n).map(|_| rng.random_range(0.0..TAU)).collect();
+            // The first run starts at the caller's point, if any, wrapped like
+            // every candidate so a huge angle keeps its precision; the mean is
+            // drawn anyway so the RNG stream does not depend on it, and every
+            // restart draws a fresh one.
+            let mean = initial_point
+                .take()
+                .map_or(drawn, |point| point.into_iter().map(wrap_angle).collect());
             let mut dist = Distribution::new(mean, sigma0);
             let mut run_best = Incumbent::new();
             let mut run_history: Vec<f64> = Vec::new();
@@ -277,6 +325,17 @@ impl AlgorithmCmaEs {
                     best.fitness,
                     recent_improvement(&run_history, patience),
                 );
+
+                // A stop asked for here wins over the run's own stops and
+                // restarts below, so the run then reports `converged = false`.
+                let report = IterationReport {
+                    iteration: fitness_history.len(),
+                    best_fitness: best.fitness,
+                    best_params: &best.params,
+                };
+                if observer.observe(&report).is_break() {
+                    break 'runs;
+                }
 
                 let stop = dist.degeneration(sigma0).or_else(|| {
                     stagnated(&run_history, tolerance, patience).then_some(StopReason::Stagnation)
@@ -312,8 +371,12 @@ impl AlgorithmCmaEs {
 impl Optimizer for AlgorithmCmaEs {
     type Args = AlgorithmCmaEsArgs;
 
-    fn optimize(&self, args: Self::Args) -> Result<OptimizationOutcome, OptimizerError> {
-        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng))
+    fn optimize_observed(
+        &self,
+        args: Self::Args,
+        observer: &mut dyn IterationObserver,
+    ) -> Result<OptimizationOutcome, OptimizerError> {
+        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng, observer))
     }
 }
 
@@ -876,17 +939,6 @@ fn ranking(fitness: &[f64]) -> Vec<usize> {
     order
 }
 
-/// `x mod 2π` in `[0, 2π)`. `rem_euclid` alone can return 2π itself for a
-/// tiny negative `x` (the exact result rounds up); that is the same angle as 0.
-fn wrap_angle(x: f64) -> f64 {
-    let wrapped = x.rem_euclid(TAU);
-    if wrapped >= TAU {
-        0.0
-    } else {
-        wrapped
-    }
-}
-
 /// A standard normal draw by the Box–Muller transform (the crate has no
 /// `rand_distr`). `1 − u` lies in `(0, 1]`, so the logarithm is finite.
 fn standard_normal<R: Rng>(rng: &mut R) -> f64 {
@@ -1038,23 +1090,6 @@ mod tests {
         assert_eq!((best.fitness, best.params.clone()), (0.5, vec![4.0]));
         best.offer(0.25, &[6.0]);
         assert_eq!(best.params, vec![4.0]);
-    }
-
-    #[test]
-    fn wrap_angle_stays_in_the_half_open_circle() {
-        assert_eq!(wrap_angle(0.0), 0.0);
-        assert_eq!(wrap_angle(-0.0), 0.0);
-        assert_eq!(wrap_angle(TAU), 0.0);
-        assert_eq!(wrap_angle(-TAU), 0.0);
-        assert_eq!(wrap_angle(1.0 + TAU), (1.0 + TAU).rem_euclid(TAU));
-        // rem_euclid rounds this up to 2π exactly; the wrap folds it to 0.
-        assert_eq!((-1e-20f64).rem_euclid(TAU), TAU);
-        assert_eq!(wrap_angle(-1e-20), 0.0);
-        for x in [-1e9, -7.5, -1e-300, 3.0, 6.283_185_307_179_585, 1e12] {
-            let w = wrap_angle(x);
-            assert!((0.0..TAU).contains(&w), "{x} -> {w}");
-        }
-        assert!(wrap_angle(f64::NAN).is_nan());
     }
 
     #[test]
@@ -1240,6 +1275,260 @@ mod tests {
         d.sigma = 1e-13;
         d.cov[[1, 1]] = 1e10;
         assert_eq!(d.degeneration(0.5), None);
+    }
+
+    /// What one [`Distribution::update`] changes, as plain numbers.
+    #[derive(Debug, Clone)]
+    struct State {
+        mean: Vec<f64>,
+        sigma: f64,
+        path_sigma: Vec<f64>,
+        path_c: Vec<f64>,
+        cov: Vec<Vec<f64>>,
+    }
+
+    impl State {
+        fn of(d: &Distribution) -> Self {
+            Self {
+                mean: d.mean.to_vec(),
+                sigma: d.sigma,
+                path_sigma: d.path_sigma.to_vec(),
+                path_c: d.path_c.to_vec(),
+                cov: d.cov.outer_iter().map(|row| row.to_vec()).collect(),
+            }
+        }
+
+        fn assert_close(&self, want: &Self) {
+            let close = |got: f64, want: f64| (got - want).abs() <= 1e-12 * want.abs().max(1.0);
+            let all = |got: &[f64], want: &[f64]| got.iter().zip(want).all(|(&g, &w)| close(g, w));
+            assert!(all(&self.mean, &want.mean), "mean {self:?}\nwant {want:?}");
+            assert!(
+                close(self.sigma, want.sigma),
+                "sigma {self:?}\nwant {want:?}"
+            );
+            assert!(
+                all(&self.path_sigma, &want.path_sigma),
+                "p_σ {self:?}\nwant {want:?}"
+            );
+            assert!(
+                all(&self.path_c, &want.path_c),
+                "p_c {self:?}\nwant {want:?}"
+            );
+            for (got, want_row) in self.cov.iter().zip(&want.cov) {
+                assert!(all(got, want_row), "C {self:?}\nwant {want:?}");
+            }
+        }
+    }
+
+    /// One generation of the tutorial (Fig. 6, eqs. 41–47), written out
+    /// coordinate by coordinate from `d`: the state `update` must reach, and
+    /// whether h_σ held. It assumes the σ cap does not bind (and checks it).
+    fn reference_update(
+        s: &Strategy,
+        d: &Distribution,
+        steps: &[Array1<f64>],
+        order: &[usize],
+    ) -> (State, bool) {
+        let n = d.mean.len();
+        let nf = n as f64;
+        let selected: Vec<(f64, &Array1<f64>)> = s
+            .weights
+            .iter()
+            .zip(order)
+            .map(|(&w, &k)| (w, &steps[k]))
+            .collect();
+        let mut s0 = State::of(d);
+        let yw: Vec<f64> = (0..n)
+            .map(|i| selected.iter().map(|(w, y)| w * y[i]).sum())
+            .collect();
+        for (m, y) in s0.mean.iter_mut().zip(&yw) {
+            *m += d.sigma * y;
+        }
+        let whitened: Vec<f64> = (0..n)
+            .map(|i| (0..n).map(|j| d.inv_sqrt[[i, j]] * yw[j]).sum())
+            .collect();
+        let ps_rate = (s.cs * (2.0 - s.cs) * s.mueff).sqrt();
+        for (p, z) in s0.path_sigma.iter_mut().zip(&whitened) {
+            *p = (1.0 - s.cs) * *p + ps_rate * z;
+        }
+        let norm = s0.path_sigma.iter().map(|p| p * p).sum::<f64>().sqrt();
+        let start_up = 1.0 - (1.0 - s.cs).powf(2.0 * (d.generation as f64 + 1.0));
+        let h_sigma = norm / start_up.sqrt() < (1.4 + 2.0 / (nf + 1.0)) * s.chi_n;
+        let pc_rate = if h_sigma {
+            (s.cc * (2.0 - s.cc) * s.mueff).sqrt()
+        } else {
+            0.0
+        };
+        for (p, y) in s0.path_c.iter_mut().zip(&yw) {
+            *p = (1.0 - s.cc) * *p + pc_rate * y;
+        }
+        let delta = if h_sigma { 0.0 } else { s.cc * (2.0 - s.cc) };
+        let decay = 1.0 + s.c1 * delta - s.c1 - s.cmu;
+        for i in 0..n {
+            for j in 0..n {
+                let rank_mu: f64 = selected.iter().map(|(w, y)| w * y[i] * y[j]).sum();
+                s0.cov[i][j] =
+                    decay * s0.cov[i][j] + s.c1 * s0.path_c[i] * s0.path_c[j] + s.cmu * rank_mu;
+            }
+        }
+        s0.sigma *= ((s.cs / s.ds) * (norm / s.chi_n - 1.0)).exp();
+        let widest = (0..n).map(|i| s0.cov[i][i]).fold(0.0_f64, f64::max).sqrt();
+        assert!(s0.sigma * widest < d.max_spread, "the cap binds");
+        (s0, h_sigma)
+    }
+
+    /// A two-parameter distribution in the middle of a run: generation 2, paths
+    /// and a covariance away from their initial values, so every term of the
+    /// update contributes. `inv_sqrt` need not be `C^(-1/2)` for the update's
+    /// arithmetic; a non-diagonal one mixes the coordinates.
+    fn mid_run(path_sigma: [f64; 2]) -> Distribution {
+        let mut d = Distribution::new(Array1::from(vec![1.0, 2.0]), 0.3);
+        d.generation = 2;
+        d.decomposed_at = 2;
+        d.path_sigma = Array1::from(path_sigma.to_vec());
+        d.path_c = Array1::from(vec![0.1, -0.2]);
+        d.cov = Array2::from_shape_vec((2, 2), vec![1.2, 0.3, 0.3, 0.8]).unwrap();
+        d.inv_sqrt = Array2::from_shape_vec((2, 2), vec![0.9, -0.1, -0.1, 1.1]).unwrap();
+        d
+    }
+
+    #[test]
+    fn update_follows_the_tutorial_equations() {
+        let s = Strategy::new(2, 6);
+        let steps: Vec<Array1<f64>> = [
+            [0.4, -0.1],
+            [-0.3, 0.2],
+            [0.1, 0.5],
+            [0.6, 0.3],
+            [-0.2, -0.4],
+            [0.05, 0.15],
+        ]
+        .iter()
+        .map(|y| Array1::from(y.to_vec()))
+        .collect();
+        let order = [3, 0, 5, 1, 4, 2];
+        let mut d = mid_run([0.05, -0.02]);
+        let (want, h_sigma) = reference_update(&s, &d, &steps, &order);
+        assert!(h_sigma, "a short p_σ keeps the rank-one path running");
+        d.update(&s, &steps, &order);
+        State::of(&d).assert_close(&want);
+        assert_eq!(d.generation, 3);
+    }
+
+    #[test]
+    fn h_sigma_switches_exactly_at_its_threshold() {
+        // With zero steps only the paths' decay and h_σ move the covariance:
+        // h_σ = 0 adds c₁·c_c(2 − c_c)·C back. ‖p_σ‖ after the update is
+        // (1 − c_σ)·‖p_σ‖ before, so the threshold can be approached from
+        // either side, and hit.
+        let s = Strategy::new(2, 6);
+        let steps = vec![Array1::<f64>::zeros(2); 6];
+        let order = [0, 1, 2, 3, 4, 5];
+        // The same expressions `update` evaluates, at generation 2 in 2-D.
+        let threshold = (1.4 + 2.0 / (2.0 + 1.0)) * s.chi_n;
+        let start_up = 1.0 - (1.0 - s.cs).powf(2.0 * (2.0 + 1.0));
+        let after = |p: [f64; 2]| {
+            let ps = Array1::from(p.to_vec()) * (1.0 - s.cs);
+            ps.dot(&ps).sqrt() / start_up.sqrt()
+        };
+        let on_threshold = threshold * start_up.sqrt() / (1.0 - s.cs);
+        for (factor, h_sigma) in [(1.0 - 1e-9, true), (1.0 + 1e-9, false)] {
+            let mut d = mid_run([on_threshold * factor, 0.0]);
+            let (want, h) = reference_update(&s, &d, &steps, &order);
+            assert_eq!(h, h_sigma, "factor {factor}");
+            d.update(&s, &steps, &order);
+            State::of(&d).assert_close(&want);
+        }
+        // At the threshold itself h_σ is 0: `<`, not `≤`. Search the floats
+        // around it for a p_σ that lands on it exactly.
+        let hit = (0..64u64)
+            .flat_map(|k| (0..256u64).map(move |j| (k, j)))
+            .map(|(k, j)| {
+                let a = f64::from_bits(on_threshold.to_bits() - 32 + k);
+                [a, j as f64 * 1e-10 * a]
+            })
+            .find(|&p| after(p) == threshold)
+            .expect("some p_σ lands exactly on the threshold");
+        let mut d = mid_run(hit);
+        let (want, h) = reference_update(&s, &d, &steps, &order);
+        assert!(!h);
+        d.update(&s, &steps, &order);
+        State::of(&d).assert_close(&want);
+    }
+
+    #[test]
+    fn the_eigensystem_is_refreshed_every_eigen_gap_generations() {
+        let s = Strategy {
+            eigen_gap: 3,
+            ..Strategy::new(2, 6)
+        };
+        let steps = vec![Array1::from(vec![0.2, -0.1]); 6];
+        let order = [0, 1, 2, 3, 4, 5];
+        let mut d = mid_run([0.0, 0.0]);
+        d.generation = 3;
+        d.decomposed_at = 2;
+        let inv_sqrt = d.inv_sqrt.clone();
+        // Generation 4: two since the last decomposition, fewer than three.
+        d.update(&s, &steps, &order);
+        assert_eq!((d.generation, d.decomposed_at), (4, 2));
+        assert_eq!(d.inv_sqrt, inv_sqrt, "no decomposition yet");
+        // Generation 5: three since the last one.
+        d.update(&s, &steps, &order);
+        assert_eq!((d.generation, d.decomposed_at), (5, 5));
+        assert_ne!(d.inv_sqrt, inv_sqrt);
+    }
+
+    #[test]
+    fn decomposition_rejects_a_covariance_that_is_not_positive_definite() {
+        for cov in [vec![0.0; 4], vec![1.0, 0.0, 0.0, -1e-3]] {
+            let mut dist = Distribution::new(Array1::zeros(2), 1.0);
+            dist.cov = Array2::from_shape_vec((2, 2), cov).unwrap();
+            dist.decompose();
+            assert_eq!(dist.ill_conditioned, Some(f64::INFINITY), "{:?}", dist.cov);
+            assert_eq!(dist.scales, Array1::<f64>::ones(2), "kept");
+            assert_eq!(dist.inv_sqrt, Array2::<f64>::eye(2), "kept");
+        }
+    }
+
+    #[test]
+    fn decomposition_accepts_a_condition_number_of_exactly_max_condition() {
+        let mut dist = Distribution::new(Array1::zeros(2), 1.0);
+        dist.cov = Array2::from_diag(&Array1::from(vec![MAX_CONDITION, 1.0]));
+        dist.decompose();
+        assert_eq!(dist.ill_conditioned, None);
+        assert_eq!(dist.scales, Array1::from(vec![1e7, 1.0]));
+    }
+
+    #[test]
+    fn degeneration_bounds_are_strict_and_scale_with_sigma0() {
+        // The identity covariance makes the spread σ itself.
+        let at = |sigma: f64, sigma0: f64| {
+            let mut d = Distribution::new(Array1::zeros(2), sigma0);
+            d.sigma = sigma;
+            d.degeneration(sigma0)
+        };
+        assert_eq!(at(TOL_X * 0.5, 0.5), None, "TolX is a strict bound");
+        assert!(matches!(
+            at(TOL_X * 0.5 * 0.99, 0.5),
+            Some(StopReason::Collapsed(_))
+        ));
+        assert_eq!(at(TOL_X_UP * 0.5, 0.5), None, "TolXUp is a strict bound");
+        assert!(matches!(
+            at(TOL_X_UP * 0.5 * 1.01, 0.5),
+            Some(StopReason::Diverged(_))
+        ));
+        // Both are relative to σ₀: 1e-12 is collapsed for σ₀ = 2, not for
+        // σ₀ = 0.5 (between TolX·σ₀ and TolX/σ₀).
+        assert_eq!(at(1e-12, 0.5), None);
+        assert!(matches!(at(1e-12, 2.0), Some(StopReason::Collapsed(_))));
+    }
+
+    #[test]
+    fn the_largest_population_that_fits_in_u32_is_valid() {
+        // IPOP doubling is checked against u32::MAX itself, which is reachable.
+        assert!(validate(1, Some(u32::MAX), 1, 1.0, 0).is_ok());
+        assert!(validate(1, Some(u32::MAX / 2 + 1), 1, 1.0, 1).is_err());
+        assert!(validate(1, Some(u32::MAX / 2), 1, 1.0, 1).is_ok());
     }
 
     #[test]

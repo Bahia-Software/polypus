@@ -6,18 +6,24 @@
 //! variational optimizers), and it is depended on by `polypus-evaluation` and the
 //! `polypus` edge.
 //!
-//! Two responsibilities live here:
+//! Three responsibilities live here:
 //!
 //! - **[`dispatch_optimizer`]** turns a chosen [`Method`] plus an
 //!   [`EvaluationOracle`](polypus_optimizers::EvaluationOracle) into an
 //!   optimization outcome. An oracle failure is recorded — **type-erased** — in an
 //!   [`OracleErrorSlot`] and surfaced ahead of the optimizer's own config error.
+//!   [`dispatch_optimizer_observed`] also shows a [`TrainObserver`] every
+//!   iteration, which can stop the run.
 //! - **[`Resources`] + [`Scheduler`] + [`Flow`]** bind a backend to its planner
 //!   (validating the pairing in [`Resources::new`]) and run a flow over them.
 //!   **Every flow lives here** — [`RunCircuitFlow`] and training ([`TrainFlow`])
 //!   alike; a training flow's `pyo3`-touching oracle is built by an
 //!   [`OracleFactory`] implemented in `polypus-evaluation`, so the *order* stays
 //!   with the scheduler while its domain detail does not.
+//! - **[`trace`]** is the call trace (contract C-12): a
+//!   [`CallTracer`](trace::CallTracer) writes a run's planner batches, backend
+//!   waves, optimizer iterations and QNG metric calls as JSON Lines (schema v1),
+//!   within a size cap, and closes the trace with the run's status.
 //!
 //! The crate is deliberately **Python-free**: the GIL is released by the caller
 //! (`polypus`, via `py.detach`) and a real oracle failure reaches here as a
@@ -27,15 +33,20 @@
 //! `PyErr`.
 
 pub mod dispatch;
+mod final_batch;
 pub mod flow;
+pub mod progress;
 pub mod scheduler;
 #[cfg(test)]
 mod test_log;
+pub mod trace;
 mod walltime;
 
 pub use dispatch::{
-    dispatch_optimizer, BoxedError, CmaesConfig, DeConfig, Method, OracleError, OracleErrorSlot,
-    PsoConfig, QngConfig,
+    dispatch_optimizer, dispatch_optimizer_observed, AdamConfig, BoxedError, CmaesConfig, DeConfig,
+    ExternalConfig, Method, OracleError, OracleErrorSlot, Oracles, PsoConfig, QngConfig,
+    RotosolveConfig, SpsaConfig,
 };
-pub use flow::{Flow, OracleFactory, RunCircuitFlow, TrainFlow};
+pub use flow::{FinalEvaluation, Flow, OracleFactory, RunCircuitFlow, TrainFlow, TrainOutcome};
+pub use progress::{TrainObserver, TrainProgress};
 pub use scheduler::{Resources, Scheduler};

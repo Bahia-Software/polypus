@@ -21,15 +21,15 @@
 //! raise it above the ceiling fixed at *compile time*. That ceiling is the
 //! `log` crate's `max_level_*` / `release_max_level_*` features, which this crate
 //! re-exports as the mutually exclusive Cargo features `off-logs`, `error-logs`,
-//! `warn-logs`, `info-logs`, `debug-logs`, `trace-logs`. A dependent forwards one
-//! of them; the `polypus` crate defaults to `info-logs`.
+//! `warn-logs`, `info-logs`, `debug-logs`, `trace-logs`. With none of them, every
+//! level is compiled in. Only the final artifact should pick one: the `polypus`
+//! crate enables none by default, and its Python wheel uses `debug-logs`.
 //!
-//! The practical consequence: under the default `info-logs`, every `debug!` and
-//! `trace!` record — including the optimizers' per-generation progress — is
-//! **compiled out**, so asking for a runtime level of `debug`/`trace` captures
-//! nothing. To see that output you must **rebuild** with
-//! `--no-default-features --features debug-logs` (or `trace-logs`); raising the
-//! runtime level alone is not enough.
+//! The practical consequence: under `info-logs`, every `debug!` and `trace!`
+//! record — including the optimizers' per-generation progress — is **compiled
+//! out**, so asking for a runtime level of `debug`/`trace` captures nothing.
+//! Raising the runtime level alone is not enough; the artifact has to be
+//! rebuilt with a higher ceiling.
 //!
 //! These features map directly to `log`'s `max_level_*` / `release_max_level_*`
 //! flags, and `log` treats them as strictly mutually exclusive: enabling more
@@ -37,12 +37,8 @@
 //! (`compile_error!("multiple max_level_* features set")`), not a "most
 //! verbose wins" resolution. Cargo feature unification does not help here —
 //! it only makes the conflict easier to trigger by accident, since any two
-//! dependents requesting different levels in the same build will hit it. A
-//! dependent that wants a level other than the default it inherited **must**
-//! first disable defaults. For `polypus` (default `info-logs`), that means
-//! `--no-default-features --features debug-logs`, **not**
-//! `--features debug-logs` alone — the latter leaves `info-logs` active
-//! alongside `debug-logs` and fails to compile.
+//! dependents requesting different levels in the same build will hit it.
+//! This is why no library crate of the workspace enables one by default.
 //!
 //! # Example
 //!

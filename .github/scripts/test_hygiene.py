@@ -748,6 +748,38 @@ def test_version_mismatch(repo):
     )
 
 
+@pytest.mark.parametrize("cff_version", ["1.2.2", "1.1.9", "0.9.0"])
+def test_dev_version_accepts_an_earlier_release_in_citation(repo, cff_version):
+    repo.write("Cargo.toml", CARGO.replace('"1.2.3"', '"1.2.3-dev"'))
+    repo.write("CITATION.cff", CFF.replace("1.2.3", cff_version))
+    repo.commit()
+    res = repo.run()
+    assert res.code == 0, res.all
+    assert res.violations() == []
+
+
+@pytest.mark.parametrize("cff_version", ["1.2.3", "1.2.4", "1.2.3-dev", "1.2.2-dev"])
+def test_dev_version_refuses_citation_not_an_earlier_release(repo, cff_version):
+    repo.write("Cargo.toml", CARGO.replace('"1.2.3"', '"1.2.3-dev"'))
+    repo.write("CITATION.cff", CFF.replace("1.2.3", cff_version))
+    repo.commit()
+    res = repo.run()
+    assert res.code == 1
+    assert res.violations("version-mismatch") == [
+        ("CITATION.cff", 1, "version-mismatch")
+    ]
+    assert "earlier release" in res.out
+
+
+def test_other_prerelease_must_match_citation(repo):
+    repo.write("Cargo.toml", CARGO.replace('"1.2.3"', '"1.2.3-rc.1"'))
+    repo.write("CITATION.cff", CFF.replace("1.2.3", "1.2.2"))
+    repo.commit()
+    assert repo.run().violations("version-mismatch") == [
+        ("CITATION.cff", 1, "version-mismatch")
+    ]
+
+
 @pytest.mark.parametrize(
     "cargo, cff",
     [

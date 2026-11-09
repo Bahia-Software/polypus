@@ -99,12 +99,14 @@ pub fn plot_compound(
 mod tests {
     use super::super::mass_attenuation_coefficients::{mu_m_for_compound, mu_m_for_element};
     use super::*;
+    use crate::test_support::ScratchDir;
 
     #[cfg(feature = "plotters")]
     #[test]
     fn plot_element_produces_a_png() {
         let (_z, _a, points) = mu_m_for_element("H", 501).unwrap();
-        let path = std::env::temp_dir().join("H_mu_m_test.png");
+        let scratch = ScratchDir::new("element-png");
+        let path = scratch.path().join("H_mu_m_test.png");
         plot_element("H", &points, &path).unwrap();
         assert!(path.exists());
         assert!(std::fs::metadata(&path).unwrap().len() > 0);
@@ -114,7 +116,8 @@ mod tests {
     #[test]
     fn plot_compound_produces_a_png() {
         let result = mu_m_for_compound("H2O", 501, 5000).unwrap();
-        let path = std::env::temp_dir().join("H2O_mu_m_test.png");
+        let scratch = ScratchDir::new("compound-png");
+        let path = scratch.path().join("H2O_mu_m_test.png");
         plot_compound("H2O", &result, &path).unwrap();
         assert!(path.exists());
         assert!(std::fs::metadata(&path).unwrap().len() > 0);

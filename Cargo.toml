@@ -11,6 +11,8 @@
 #                              from circuits and Python via EvaluationOracle/VarianceOracle
 #   - crates/polypus-observable : pure-Rust, GIL-free cost observables (QUBO/Ising and other
 #                              diagonal costs) mapping measurement counts to expectation values
+#   - crates/polypus-qml     : pure-Rust quantum machine learning (datasets, layered models,
+#                              Pauli readout, losses); produces polypus-circuit circuits (no PyO3)
 #   - crates/polypus-backend : the pyo3-free QuantumBackend contract a third party implements,
 #                              plus the runtime backend registry (register_backend) — no PyO3
 #   - crates/polypus-backend-conformance : a reusable conformance battery a backend author runs
@@ -30,7 +32,7 @@
 #   - crates/polypus         : the Polypus Python extension module and PyO3 edge (bindings,
 #                              typed exception hierarchy, workspace re-exports)
 [workspace]
-members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-observable", "crates/polypus-backend", "crates/polypus-backend-conformance", "crates/polypus-subprocess-backend", "crates/polypus-infrastructure", "crates/polypus-orchestration", "crates/polypus-evaluation", "crates/polypus-logger"]
+members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-observable", "crates/polypus-qml", "crates/polypus-backend", "crates/polypus-backend-conformance", "crates/polypus-subprocess-backend", "crates/polypus-infrastructure", "crates/polypus-orchestration", "crates/polypus-evaluation", "crates/polypus-logger"]
 # The `fuzz/` crate is a cargo-fuzz target: it needs a nightly toolchain and
 # `cargo-fuzz`, and is built on its own — never by `cargo build/test --workspace`.
 exclude = ["fuzz"]
@@ -41,7 +43,7 @@ resolver = "3"
 
 # Shared package metadata, inherited by member crates via `<key>.workspace = true`.
 [workspace.package]
-version = "0.7.2"
+version = "0.9.0-dev"
 edition = "2021"
 # MSRV, guarded by the `msrv` CI job. Currently set by the dependency tree
 # (the qmio feature pulls `saa`, which uses edition 2024 → Cargo 1.85); the
@@ -58,23 +60,26 @@ license = "EUPL-1.2"
 repository = "https://github.com/Bahia-Software/polypus"
 
 [workspace.dependencies]
-polypus-circuit    = { path = "crates/polypus-circuit", version = "0.7.2" }
-polypus-backend    = { path = "crates/polypus-backend", version = "0.7.2" }
-polypus-backend-conformance = { path = "crates/polypus-backend-conformance", version = "0.7.2" }
-polypus-physics    = { path = "crates/polypus-physics", version = "0.7.2" }
-polypus-sim        = { path = "crates/polypus-sim", version = "0.7.2" }
-polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.7.2" }
-polypus-observable = { path = "crates/polypus-observable", version = "0.7.2" }
-polypus-subprocess-backend = { path = "crates/polypus-subprocess-backend", version = "0.7.2" }
-polypus-infrastructure = { path = "crates/polypus-infrastructure", version = "0.7.2" }
-polypus-orchestration = { path = "crates/polypus-orchestration", version = "0.7.2" }
-polypus-evaluation = { path = "crates/polypus-evaluation", version = "0.7.2" }
-polypus-logger     = { path = "crates/polypus-logger", version = "0.7.2" }
+polypus-circuit    = { path = "crates/polypus-circuit", version = "0.9.0-dev" }
+polypus-backend    = { path = "crates/polypus-backend", version = "0.9.0-dev" }
+polypus-backend-conformance = { path = "crates/polypus-backend-conformance", version = "0.9.0-dev" }
+polypus-physics    = { path = "crates/polypus-physics", version = "0.9.0-dev" }
+polypus-sim        = { path = "crates/polypus-sim", version = "0.9.0-dev" }
+polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.9.0-dev" }
+polypus-observable = { path = "crates/polypus-observable", version = "0.9.0-dev" }
+polypus-qml        = { path = "crates/polypus-qml", version = "0.9.0-dev" }
+polypus-subprocess-backend = { path = "crates/polypus-subprocess-backend", version = "0.9.0-dev" }
+polypus-infrastructure = { path = "crates/polypus-infrastructure", version = "0.9.0-dev" }
+polypus-orchestration = { path = "crates/polypus-orchestration", version = "0.9.0-dev" }
+polypus-evaluation = { path = "crates/polypus-evaluation", version = "0.9.0-dev" }
+polypus-logger     = { path = "crates/polypus-logger", version = "0.9.0-dev" }
 
 # Shared external dependencies pinned once for the whole workspace.
+# Each requirement is a tested floor: the `rust-minimal-versions` CI job builds
+# with every direct dependency at its minimum, so raise one when that job fails.
 # `log` is the logging facade every crate emits through; the concrete sink lives
 # in `polypus-logger`, which additionally enables its `std` feature.
-log                = "0.4"
+log                = "0.4.8"
 # UUID v4 run-id suffix (bindings layer), built from bytes `polypus-infrastructure`
 # draws fallibly: no `v4` feature, so `Uuid::new_v4` (panics if `getrandom` fails,
 # #264) is absent by default; `zeromq` (`qmio`) re-enables it, clippy.toml forbids it.
@@ -87,8 +92,8 @@ rand               = "0.10"
 # pyo3-free; `nix` wraps the POSIX process controls the bridge needs (the
 # `PR_SET_PDEATHSIG` orphan guard and `kill` for out-of-band cancellation) in
 # audited safe functions, so the bridge carries no hand-written FFI `unsafe`.
-serde              = { version = "1", features = ["derive"] }
-serde_json         = "1"
+serde              = { version = "1.0.209", features = ["derive"] }
+serde_json         = "1.0.127"
 nix                = { version = "0.31", features = ["signal", "process"] }
 # PyO3 for the crates that touch Python (`polypus`, `polypus-infrastructure`,
 # `polypus-evaluation`): one pyo3 in the graph. rust-numpy releases are pinned
@@ -101,8 +106,16 @@ numpy              = "0.29"
 rayon              = "1"
 # Complex amplitudes of the statevector; pyo3's `num-complex` feature converts
 # the same type, so both must stay on one major.
-num-complex        = "0.4"
+num-complex        = "0.4.6"
 ndarray            = "0.17"
+# `erf` for the Boys function F0 of the STO-3G integrals in `polypus-physics`
+# (`chemistry::sto3g`); pure Rust port of musl's libm, no dependencies.
+libm               = "0.2.16"
+# Property tests (dev-dependency only, #409): the OpenQASM round trip of
+# `polypus-circuit` and parallel == sequential in `polypus-sim`. 1.11: 1.12
+# needs Rust 1.88, above the MSRV. Without default features: no `fork`/`timeout`
+# (no tempfile, no rusty-fork), and nothing beyond what `std` needs.
+proptest           = { version = "1.11", default-features = false, features = ["std"] }
 
 # Release profile posture — set explicitly rather than left to Cargo's defaults.
 #

@@ -74,9 +74,9 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "log"
-version = "0.4.34"
+version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "memchr"
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-backend"
-version = "0.7.2"
+version = "0.9.0-dev"
 dependencies = [
  "log",
  "polypus-circuit",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-backend-conformance"
-version = "0.7.2"
+version = "0.9.0-dev"
 dependencies = [
  "polypus-backend",
  "polypus-circuit",
@@ -115,19 +115,18 @@ dependencies = [
 
 [[package]]
 name = "polypus-circuit"
-version = "0.7.2"
+version = "0.9.0-dev"
 
 [[package]]
 name = "polypus-observable"
-version = "0.7.2"
+version = "0.9.0-dev"
 dependencies = [
- "log",
  "rayon",
 ]
 
 [[package]]
 name = "polypus-subprocess-backend"
-version = "0.7.2"
+version = "0.9.0-dev"
 dependencies = [
  "log",
  "nix",

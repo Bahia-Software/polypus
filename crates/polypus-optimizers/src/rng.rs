@@ -37,8 +37,8 @@ impl OptRng {
 /// Build the run RNG from an optional seed and hand it to `run`.
 ///
 /// Centralises the identical `seed → OptRng::from_seed → run` dispatch that
-/// every optimizer's `optimize` implementation performs (DE, PSO, QNG and
-/// CMA-ES),
+/// every optimizer's `optimize` implementation performs (DE, PSO, QNG, CMA-ES,
+/// Adam, SPSA and Rotosolve),
 /// keeping the seed-to-RNG wiring in one place next to [`OptRng`]. The closure
 /// receives the freshly built generator by mutable reference and returns the
 /// optimization outcome, which is passed straight through.
@@ -103,11 +103,11 @@ mod tests {
     }
 
     /// Pins the absolute seeded output of every sampling method the optimizers
-    /// draw from in `src/` (DE, PSO, QNG, CMA-ES). The determinism tests above only
-    /// compare one run against another, so a `rand` bump that changed the
-    /// `StdRng` stream or a sampling algorithm would pass them silently; this
-    /// one fails instead. Values captured with rand 0.9.4; `f64`s are compared
-    /// by bits, with no tolerance.
+    /// draw from in `src/` (DE, PSO, QNG, CMA-ES, Adam, SPSA, Rotosolve). The
+    /// determinism tests above only compare one run against another, so a
+    /// `rand` bump that changed the `StdRng` stream or a sampling algorithm
+    /// would pass them silently; this one fails instead. Values captured with
+    /// rand 0.9.4; `f64`s are compared by bits, with no tolerance.
     #[test]
     fn seeded_stream_is_pinned() {
         use rand::seq::IndexedRandom;
@@ -138,8 +138,8 @@ mod tests {
             ]
         );
 
-        // DE/PSO/QNG/CMA-ES: `random_range` over an `f64` interval for
-        // initialisation.
+        // DE/PSO/QNG/CMA-ES/Adam/SPSA/Rotosolve: `random_range` over an `f64`
+        // interval for initialisation.
         let ranged: [u64; 3] = with_seeded_rng(Some(42), |rng| {
             std::array::from_fn(|_| rng.random_range(-1.5..2.5f64).to_bits())
         });
@@ -166,6 +166,18 @@ mod tests {
             [
                 true, true, true, true, true, true, false, false, true, true, false, true, true,
                 true, true, true
+            ]
+        );
+
+        // SPSA: `random_bool(0.5)` for each ±1 component of a perturbation.
+        let signs: [bool; 16] = with_seeded_rng(Some(42), |rng| {
+            std::array::from_fn(|_| rng.random_bool(0.5))
+        });
+        assert_eq!(
+            signs,
+            [
+                false, false, false, true, true, true, false, false, true, true, false, false,
+                true, true, false, true
             ]
         );
 

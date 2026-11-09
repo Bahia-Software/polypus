@@ -1,5 +1,8 @@
 [build-system]
-requires = ["maturin>=1.8,<2.0"]
+# 1.9.2 is the first maturin that writes `license` as a PEP 639
+# License-Expression (1.8.0 and 1.8.1 cannot parse `license-files`). CI builds
+# with this floor (python-floors job).
+requires = ["maturin>=1.9.2,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -51,6 +54,22 @@ dependencies = [
 ]
 dynamic = ["version"]
 
+# The libraries the adapters of `polypus.ask_tell` wrap, none of them a
+# dependency: `pip install "polypus-quantum[optuna]"` installs Polypus with
+# one. Each floor is the version CI tests the adapters with (the pins of the
+# "Install Optuna, Nevergrad and pycma" step of .github/workflows/ci.yml,
+# which tests/python/test_ask_tell_adapters.py checks), and each upper bound
+# the next major; raise a floor together with its pin.
+[project.optional-dependencies]
+optuna = ["optuna>=5.0.0,<6"]
+nevergrad = ["nevergrad>=1.0.12,<2"]
+cma = ["cma>=4.5.0,<5"]
+# PyTorch, for `polypus.torch`. Its floor is the CPU torch CI tests the layer
+# with (the "Install PyTorch (CPU)" steps of .github/workflows/ci.yml,
+# examples.yml and sonar.yml, which tests/python/test_torch_import.py checks);
+# the upper bound is the next major. Raise the floor together with the pins.
+torch = ["torch>=2.14.1,<3"]
+
 [project.urls]
 Homepage = "https://github.com/Bahia-Software/polypus"
 Repository = "https://github.com/Bahia-Software/polypus"
@@ -61,7 +80,10 @@ Issues = "https://github.com/Bahia-Software/polypus/issues"
 "Rust crate (crates.io)" = "https://crates.io/crates/polypus"
 
 [tool.maturin]
-features = ["extension-module"]
+# `debug-logs` sets the compile-time log ceiling of the wheel (the crate has no
+# default level): `init_logger(level="debug")` then shows optimizer progress,
+# and `trace!` stays compiled out. The runtime level filters below it.
+features = ["extension-module", "debug-logs"]
 # The repo is a Cargo workspace; the PyO3 extension crate lives here.
 manifest-path = "crates/polypus/Cargo.toml"
 # Keep the import name `polypus` even though the distribution is `polypus-quantum`
@@ -119,3 +141,15 @@ markers = [
     "integration: tests that execute real quantum circuits (require AerSimulator)",
     "vqc: tests that train variational quantum circuits (slow)",
 ]
+
+# Coverage of the Python packages the wheel ships (sonar.yml). Tests run
+# against the installed wheel, so `coverage combine` maps site-packages back
+# to python/ and the XML report carries repo-relative paths.
+[tool.coverage.run]
+source_pkgs = ["polypus", "polypus_python"]
+parallel = true
+relative_files = true
+
+[tool.coverage.paths]
+polypus = ["python/polypus", "*/site-packages/polypus"]
+polypus_python = ["python/polypus_python", "*/site-packages/polypus_python"]

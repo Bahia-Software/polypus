@@ -21,7 +21,7 @@ pub struct Statevector {
 
 /// Resolve a gate angle, surfacing the two failure modes the simulator must not
 /// silently propagate into the statevector.
-fn angle(p: &GateParam) -> Result<f64, SimError> {
+pub(crate) fn angle(p: &GateParam) -> Result<f64, SimError> {
     match p {
         GateParam::Fixed(v) if v.is_finite() => Ok(*v),
         GateParam::Fixed(_) => Err(SimError::NonFiniteAmplitude),
@@ -379,8 +379,26 @@ impl Statevector {
     }
 
     /// Whether the next gate should use the parallel kernels.
-    fn use_parallel(&self) -> bool {
+    pub(crate) fn use_parallel(&self) -> bool {
         cfg!(feature = "parallel") && self.n >= self.parallel_threshold
+    }
+
+    /// Reject an out-of-range or repeated qubit operand before it reaches a
+    /// kernel. The kernels' own `assert!`s would only panic; `apply` is a
+    /// public entry point, so the typed error lives here rather than only in
+    /// the simulator's whole-circuit pre-pass.
+    fn check_operands(&self, gate: &GateInstruction) -> Result<(), SimError> {
+        let one = std::slice::from_ref(gate);
+        if let Some(qubit) = polypus_circuit::qubit_index_violation(one, self.n) {
+            return Err(SimError::QubitIndexOutOfRange {
+                qubit,
+                num_qubits: self.n,
+            });
+        }
+        if let Some(qubit) = polypus_circuit::repeated_qubit_violation(one) {
+            return Err(SimError::RepeatedQubit { qubit });
+        }
+        Ok(())
     }
 
     /// Apply one circuit instruction in place.
@@ -397,20 +415,7 @@ impl Statevector {
     /// angle is still a free parameter or an expression of them, or
     /// [`SimError::NonFiniteAmplitude`] if an angle is `NaN`/infinity.
     pub fn apply(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
-        // Reject an out-of-range or repeated qubit operand before it reaches a
-        // kernel. The kernels' own `assert!`s would only panic; `apply` is a
-        // public entry point, so the typed error lives here rather than only in
-        // the simulator's whole-circuit pre-pass.
-        let one = std::slice::from_ref(gate);
-        if let Some(qubit) = polypus_circuit::qubit_index_violation(one, self.n) {
-            return Err(SimError::QubitIndexOutOfRange {
-                qubit,
-                num_qubits: self.n,
-            });
-        }
-        if let Some(qubit) = polypus_circuit::repeated_qubit_violation(one) {
-            return Err(SimError::RepeatedQubit { qubit });
-        }
+        self.check_operands(gate)?;
         let par = self.use_parallel();
         let n = self.n;
         match gate {
@@ -620,6 +625,212 @@ impl Statevector {
         Ok(())
     }
 
+    /// Apply the inverse `U†` of one circuit instruction in place: the step
+    /// back that adjoint differentiation takes through the circuit
+    /// ([`StatevectorSimulator::adjoint_gradient`](crate::StatevectorSimulator::adjoint_gradient)).
+    ///
+    /// Each inverse is another instruction of the vocabulary wherever there is
+    /// one — a gate that is its own inverse, `S`↔`Sdg`, `T`↔`Tdg`, `Sx`↔`Sxdg`,
+    /// a rotation by `−θ`, `U(θ, φ, λ)† = U(−θ, −λ, −φ)` (the controlled `u`
+    /// forms likewise, `Cu`'s phase `γ` negated, and `U2(φ, λ)` as
+    /// `U(−π/2, −λ, −φ)`) — applied through [`apply`](Self::apply), so the
+    /// kernels and the errors are exactly its. The vocabulary has no `csxdg`,
+    /// so `Csx` applies `Sx†` on the controlled kernel; `Rccx`, `Rc3x` and
+    /// `C3sqrtx` (whose inverses are not in the vocabulary) and the calls of
+    /// declared gates are undone part by part, inverting their lowering or
+    /// expansion in reverse order. `Barrier`, `Measure` and `MeasureAll` are
+    /// no-ops here as in `apply`; a gate the simulator does not know is
+    /// [`SimError::UnsupportedInstruction`]. Composing the vocabulary with no
+    /// new gate keeps `polypus-circuit` unchanged.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`apply`](Self::apply) on the same instruction.
+    pub(crate) fn apply_inverse(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
+        use GateInstruction as G;
+        // An unresolved angle passes through unchanged, so `apply` rejects it
+        // with exactly the error the forward gate got.
+        let neg = |p: &GateParam| match p {
+            GateParam::Fixed(v) => GateParam::Fixed(-v),
+            other => *other,
+        };
+        match gate {
+            G::H(_)
+            | G::X(_)
+            | G::Y(_)
+            | G::Z(_)
+            | G::Id(_)
+            | G::Cx(..)
+            | G::Cz(..)
+            | G::Swap(..)
+            | G::Cy(..)
+            | G::Ch(..)
+            | G::Ccx(..)
+            | G::Cswap(..)
+            | G::C3x(..)
+            | G::C4x(..)
+            | G::U0 { .. }
+            | G::Barrier(_)
+            | G::Measure { .. }
+            | G::MeasureAll => self.apply(gate),
+            G::S(q) => self.apply(&G::Sdg(*q)),
+            G::Sdg(q) => self.apply(&G::S(*q)),
+            G::T(q) => self.apply(&G::Tdg(*q)),
+            G::Tdg(q) => self.apply(&G::T(*q)),
+            G::Sx(q) => self.apply(&G::Sxdg(*q)),
+            G::Sxdg(q) => self.apply(&G::Sx(*q)),
+            G::Rx { qubit, theta } => self.apply(&G::Rx {
+                qubit: *qubit,
+                theta: neg(theta),
+            }),
+            G::Ry { qubit, theta } => self.apply(&G::Ry {
+                qubit: *qubit,
+                theta: neg(theta),
+            }),
+            G::Rz { qubit, theta } => self.apply(&G::Rz {
+                qubit: *qubit,
+                theta: neg(theta),
+            }),
+            G::Rzz { q0, q1, theta } => self.apply(&G::Rzz {
+                q0: *q0,
+                q1: *q1,
+                theta: neg(theta),
+            }),
+            G::Rxx { q0, q1, theta } => self.apply(&G::Rxx {
+                q0: *q0,
+                q1: *q1,
+                theta: neg(theta),
+            }),
+            G::Cp { q0, q1, theta } => self.apply(&G::Cp {
+                q0: *q0,
+                q1: *q1,
+                theta: neg(theta),
+            }),
+            G::Cu1 { q0, q1, theta } => self.apply(&G::Cu1 {
+                q0: *q0,
+                q1: *q1,
+                theta: neg(theta),
+            }),
+            G::Crx {
+                control,
+                target,
+                theta,
+            } => self.apply(&G::Crx {
+                control: *control,
+                target: *target,
+                theta: neg(theta),
+            }),
+            G::Cry {
+                control,
+                target,
+                theta,
+            } => self.apply(&G::Cry {
+                control: *control,
+                target: *target,
+                theta: neg(theta),
+            }),
+            G::Crz {
+                control,
+                target,
+                theta,
+            } => self.apply(&G::Crz {
+                control: *control,
+                target: *target,
+                theta: neg(theta),
+            }),
+            G::P { qubit, lam } => self.apply(&G::P {
+                qubit: *qubit,
+                lam: neg(lam),
+            }),
+            G::U1 { qubit, lam } => self.apply(&G::U1 {
+                qubit: *qubit,
+                lam: neg(lam),
+            }),
+            G::U {
+                qubit,
+                theta,
+                phi,
+                lam,
+            }
+            | G::UGate {
+                qubit,
+                theta,
+                phi,
+                lam,
+            } => self.apply(&G::U {
+                qubit: *qubit,
+                theta: neg(theta),
+                phi: neg(lam),
+                lam: neg(phi),
+            }),
+            G::U2 { qubit, phi, lam } => self.apply(&G::U {
+                qubit: *qubit,
+                theta: GateParam::Fixed(-std::f64::consts::FRAC_PI_2),
+                phi: neg(lam),
+                lam: neg(phi),
+            }),
+            G::Cu3 {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+            } => self.apply(&G::Cu3 {
+                control: *control,
+                target: *target,
+                theta: neg(theta),
+                phi: neg(lam),
+                lam: neg(phi),
+            }),
+            G::Cu {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+                gamma,
+            } => self.apply(&G::Cu {
+                control: *control,
+                target: *target,
+                theta: neg(theta),
+                phi: neg(lam),
+                lam: neg(phi),
+                gamma: neg(gamma),
+            }),
+            G::Csx(c, t) => {
+                self.check_operands(gate)?;
+                let par = self.use_parallel();
+                kernels::apply_controlled_1q(&mut self.data, self.n, *c, *t, &gates::sxdg(), par);
+                Ok(())
+            }
+            G::Rccx(..) | G::Rc3x(..) | G::C3sqrtx(..) => {
+                self.check_operands(gate)?;
+                for part in gate.lowering().into_iter().flatten().rev() {
+                    self.apply_inverse(&part)?;
+                }
+                Ok(())
+            }
+            // As in `apply`: the call's own angles first, then its expansion,
+            // here undone from the last instruction to the first.
+            G::Custom(call) => {
+                for p in call.params() {
+                    angle(p)?;
+                }
+                let expanded = call.expand(&[]).map_err(|_| SimError::NonFiniteAmplitude)?;
+                for g in expanded.iter().rev() {
+                    self.apply_inverse(g)?;
+                }
+                Ok(())
+            }
+            // `GateInstruction` is `#[non_exhaustive]`; the vocabulary test of
+            // the adjoint (`apply_inverse_undoes_every_instruction_kind`) flags
+            // a gate missing here.
+            other => Err(SimError::UnsupportedInstruction {
+                instruction: format!("{other:?}"),
+            }),
+        }
+    }
+
     /// Apply a run of consecutive diagonal operators in roughly one main-memory
     /// traversal of the amplitude buffer, instead of one per operator.
     ///
@@ -728,6 +939,155 @@ mod tests {
         let borrowed = sv.amplitudes().to_vec();
         let owned = sv.into_amplitudes();
         assert_eq!(owned, borrowed);
+    }
+
+    /// One instruction of every kind (`GateInstruction::KINDS`), on 5 qubits,
+    /// with fixed angles: the vocabulary list of `every_instruction_is_supported`
+    /// in `tests/gate_matrices.rs`, including a call of a declared gate.
+    fn one_of_every_kind() -> Vec<GateInstruction> {
+        let declared = polypus_circuit::ParameterizedCircuit::from_qasm2(
+            "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n\
+             gate g(t) a,b,c { rz(t) a; cx a,b; sx b; rccx a,b,c; }\nqreg q[3];\ng(0.3) q[1],q[0],q[2];\n",
+        )
+        .expect("a valid declared gate")
+        .gates()[0]
+            .clone();
+        polypus_circuit::ParameterizedCircuit::new(5)
+            .h(0)
+            .x(1)
+            .y(2)
+            .z(0)
+            .s(1)
+            .t(2)
+            .sdg(0)
+            .tdg(1)
+            .id(2)
+            .rx(0, 0.25)
+            .ry(1, 0.5)
+            .rz(2, -1.5)
+            .u(0, 0.1, 0.2, 0.3)
+            .cx(0, 1)
+            .cz(1, 2)
+            .swap(0, 2)
+            .rzz(0, 2, 0.4)
+            .rxx(1, 2, 2.0)
+            .cp(0, 1, 0.75)
+            .sx(1)
+            .sxdg(2)
+            .cy(2, 0)
+            .ch(1, 2)
+            .csx(0, 2)
+            .ccx(2, 0, 1)
+            .cswap(1, 2, 0)
+            .crx(1, 0, 0.6)
+            .cry(2, 1, -0.6)
+            .crz(0, 2, 1.1)
+            .cu1(2, 1, 0.8)
+            .cu3(1, 0, 0.2, -0.4, 0.9)
+            .cu(0, 2, 0.3, 0.1, -0.1, 0.9)
+            .u0(3, 0.7)
+            .rccx(4, 0, 2)
+            .rc3x(3, 1, 4, 0)
+            .c3x(2, 4, 0, 3)
+            .c3sqrtx(4, 3, 1, 2)
+            .c4x(1, 4, 0, 3, 2)
+            .p(4, 0.2)
+            .u1(3, 0.45)
+            .u2(2, -0.2, 0.6)
+            .push(GateInstruction::UGate {
+                qubit: 1,
+                theta: GateParam::Fixed(0.1),
+                phi: GateParam::Fixed(0.2),
+                lam: GateParam::Fixed(-0.7),
+            })
+            .push(declared)
+            .barrier()
+            .measure(0, 0)
+            .measure_all()
+            .assign_parameters(&[])
+            .expect("every angle is fixed")
+            .gates()
+            .to_vec()
+    }
+
+    /// A 5-qubit state with every amplitude distinct and non-zero, so a gate
+    /// that is not undone exactly cannot hide in a zero or a symmetry.
+    fn generic_state() -> Statevector {
+        let mut sv = Statevector::new(5).expect("5 qubits is well below MAX_QUBITS");
+        for (b, amp) in sv.data.iter_mut().enumerate() {
+            *amp = C64::new(1.0 + b as f64, 0.5 - 0.3 * b as f64);
+        }
+        sv.normalize();
+        sv
+    }
+
+    /// `apply_inverse` is the inverse of `apply` for every instruction kind:
+    /// one after the other they leave a generic state where it was. The list
+    /// must cover every kind, so a gate added to `polypus-circuit` fails here
+    /// until the adjoint can step back through it (the wildcard arm of
+    /// `apply_inverse` would otherwise make it `UnsupportedInstruction` only
+    /// at run time).
+    #[test]
+    fn apply_inverse_undoes_every_instruction_kind() {
+        let mut seen = [false; GateInstruction::KINDS];
+        for gate in one_of_every_kind() {
+            seen[gate.kind_index()] = true;
+            let start = generic_state();
+            let mut sv = start.clone();
+            sv.apply(&gate).expect("a valid instruction");
+            sv.apply_inverse(&gate).expect("a valid instruction");
+            for (b, (a, s)) in sv.data.iter().zip(&start.data).enumerate() {
+                assert!((a - s).norm() < 1e-12, "{gate:?}: amplitude {b} {a} != {s}");
+            }
+            // And the other way round: U·U† is the identity too.
+            let mut sv = start.clone();
+            sv.apply_inverse(&gate).expect("a valid instruction");
+            sv.apply(&gate).expect("a valid instruction");
+            for (b, (a, s)) in sv.data.iter().zip(&start.data).enumerate() {
+                assert!((a - s).norm() < 1e-12, "{gate:?}: amplitude {b} {a} != {s}");
+            }
+        }
+        let missing: Vec<usize> = (0..GateInstruction::KINDS).filter(|&k| !seen[k]).collect();
+        assert!(
+            missing.is_empty(),
+            "instruction kinds not exercised: {missing:?}"
+        );
+    }
+
+    /// The inverse of a gate with an unresolved angle fails exactly as the gate
+    /// itself does, and an operand outside the register is the typed error.
+    #[test]
+    fn apply_inverse_fails_like_apply() {
+        let mut sv = Statevector::new(2).expect("2 qubits is well below MAX_QUBITS");
+        let unbound = GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Param(3),
+        };
+        assert_eq!(sv.apply_inverse(&unbound), sv.apply(&unbound));
+        assert_eq!(
+            sv.apply_inverse(&unbound),
+            Err(SimError::UnboundParameter { index: 3 })
+        );
+        let nan = GateInstruction::U2 {
+            qubit: 1,
+            phi: GateParam::Fixed(f64::NAN),
+            lam: GateParam::Fixed(0.0),
+        };
+        assert_eq!(sv.apply_inverse(&nan), Err(SimError::NonFiniteAmplitude));
+        assert_eq!(
+            sv.apply_inverse(&GateInstruction::Csx(0, 4)),
+            Err(SimError::QubitIndexOutOfRange {
+                qubit: 4,
+                num_qubits: 2
+            })
+        );
+        assert_eq!(
+            sv.apply_inverse(&GateInstruction::Rccx(0, 1, 7)),
+            Err(SimError::QubitIndexOutOfRange {
+                qubit: 7,
+                num_qubits: 2
+            })
+        );
     }
 
     /// The classifier must accept exactly the nine instructions `apply`

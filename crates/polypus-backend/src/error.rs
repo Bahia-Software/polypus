@@ -288,6 +288,27 @@ mod tests {
     }
 
     #[test]
+    fn infrastructure_error_display_carries_the_variant_context() {
+        assert_eq!(
+            InfrastructureError::Backend(BackendError::Cunqa("boom".to_string())).to_string(),
+            "CUNQA backend error: boom"
+        );
+        assert_eq!(
+            InfrastructureError::Observable(ObservableError::Invalid("bad".to_string()))
+                .to_string(),
+            "expectation evaluation failed: invalid observable: bad"
+        );
+        assert_eq!(
+            InfrastructureError::Cancelled.to_string(),
+            "the run was cancelled"
+        );
+        assert_eq!(
+            InfrastructureError::IncompatiblePlanner("needs shots".to_string()).to_string(),
+            "planner is incompatible with the backend: needs shots"
+        );
+    }
+
+    #[test]
     fn backend_error_converts_into_infrastructure_error() {
         let infra: InfrastructureError = BackendError::Cunqa("x".to_string()).into();
         assert!(matches!(infra, InfrastructureError::Backend(_)));

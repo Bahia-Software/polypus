@@ -178,7 +178,7 @@ fi
 info "Checking maturin..."
 if ! python -m maturin --version &>/dev/null; then
     warn "maturin not found — installing..."
-    pip install "maturin>=1.8,<2.0" || error "Failed to install maturin."
+    pip install "maturin>=1.9.2,<2.0" || error "Failed to install maturin."
 fi
 success "maturin $(python -m maturin --version)"
 
@@ -195,9 +195,9 @@ fi
 # pure-Python `polypus_python` helpers (both live under `python/`, the maturin
 # python-source), so one build+install provides both import names. This builds
 # a regular wheel; for an editable dev install see docs/CONTRIBUTING.md.
-MATURIN_FLAGS="--features extension-module"
+MATURIN_FLAGS="--features extension-module,debug-logs"
 # Opt-in CESGA QMIO QPU backend (pure-Rust ZeroMQ; no system libzmq needed).
-[[ $WITH_QMIO == 1 ]] && MATURIN_FLAGS="--features extension-module,qmio"
+[[ $WITH_QMIO == 1 ]] && MATURIN_FLAGS="--features extension-module,debug-logs,qmio"
 [[ "$BUILD_MODE" == "release" ]] && MATURIN_FLAGS="--release $MATURIN_FLAGS"
 info "Building polypus wheel (maturin build ${BUILD_MODE}$([[ $WITH_QMIO == 1 ]] && echo ', qmio'))..."
 python -m maturin build $MATURIN_FLAGS --out dist \

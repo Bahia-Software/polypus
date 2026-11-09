@@ -14,6 +14,7 @@
 # depending on its configuration); pyright/Pylance resolve them by reading
 # Qiskit's source.
 
+from os import PathLike
 from typing import (
     Any,
     Callable,
@@ -21,6 +22,7 @@ from typing import (
     Literal,
     Optional,
     Sequence,
+    SupportsIndex,
     TypedDict,
     Union,
     final,
@@ -31,8 +33,13 @@ import numpy.typing as npt
 from qiskit import QuantumCircuit
 from qiskit_aer.noise import NoiseModel
 
+from . import ask_tell as ask_tell
 from . import circuits as circuits
 from . import qml as qml
+from . import shor as shor
+
+# What `External` runs (bindings/external.rs), typed in `polypus.ask_tell`.
+from .ask_tell import AskTell as _AskTell
 
 __all__ = [
     "__version__",
@@ -43,10 +50,15 @@ __all__ = [
     "NativeCircuitError",
     "InsufficientMemoryError",
     "EvaluationError",
+    "ConfigurationError",
     "DE",
     "PSO",
     "QNG",
     "CMAES",
+    "Adam",
+    "SPSA",
+    "Rotosolve",
+    "External",
     "Circuit",
     "Param",
     "ParamExpr",
@@ -64,6 +76,7 @@ __all__ = [
     "euler",
     "RunResult",
     "TrainResult",
+    "TrainProgress",
     "Qubo",
     "Ising",
     "CachedCost",
@@ -77,6 +90,8 @@ __all__ = [
     "backend_compatibility",
     "qml",
     "circuits",
+    "ask_tell",
+    "shor",
 ]
 
 __version__: str
@@ -87,13 +102,23 @@ _FloatVector = Union[Sequence[float], npt.NDArray[np.floating[Any]]]
 # One measurement-counts map (contract C-3): bitstring -> shots, keys sorted.
 _Counts = dict[str, int]
 # The optimizer configurations `train` / `qml.train` accept as `method`.
-_Method = Union[DE, PSO, QNG, CMAES]
+_Method = Union[DE, PSO, QNG, CMAES, Adam, SPSA, Rotosolve, External]
 # `DE.strategy`: how trial vectors are built (bindings/de.rs). Any other name
 # raises `ValueError`.
 _DeStrategy = Literal["rand1bin", "shade", "lshade"]
+# `Adam.rule`: how the gradient becomes a step (bindings/adam.rs). Any other
+# name raises `ValueError`.
+_AdamRule = Literal["adam", "momentum"]
+# `options` of a registry-backed backend: each value a `str` or a list/tuple of
+# `str` (docs/adr/0005-registry-option-values.md).
+_Options = dict[str, Union[str, list[str], tuple[str, ...]]]
 # `train`'s `expectation_function`: a `bitstring -> float` callable, the same
 # memoised, or a native GIL-free observable.
 _CostFunction = Union[Callable[[str], float], CachedCost, Qubo, Ising]
+# The `callback` of `train`, `qml.train` and `qml.Model.fit`: called once per
+# iteration; `True` (or a true NumPy `bool_`) stops the run, `None` or `False`
+# lets it go on, and any other return value raises `TypeError`.
+_TrainCallback = Callable[[TrainProgress], Union[bool, np.bool_, None]]
 
 class _CalibrationOutcome(TypedDict):
     threshold: int
@@ -106,6 +131,8 @@ class _CalibrationOutcome(TypedDict):
 class _CompatibilityReport(TypedDict):
     aer: list[str]
     polypus: list[str]
+    cunqa: list[str]
+    qmio: list[str]
 
 # ── Exceptions ──────────────────────────────────────────────────────────────
 
@@ -116,6 +143,7 @@ class QmioError(BackendError): ...
 class NativeCircuitError(BackendError): ...
 class InsufficientMemoryError(BackendError): ...
 class EvaluationError(PolypusError): ...
+class ConfigurationError(PolypusError, ValueError): ...
 
 # ── Optimizers ──────────────────────────────────────────────────────────────
 
@@ -127,6 +155,10 @@ class DE:
     patience: int
     seed: Optional[int]
     strategy: _DeStrategy
+    # DE/rand/1/bin's F in (0, 2] and CR in [0, 1]; None means 0.8 and 0.7.
+    # "shade" and "lshade" adapt both and raise ValueError for a value.
+    mutation_factor: Optional[float]
+    crossover_rate: Optional[float]
     def __new__(
         cls,
         generations: int = 100,
@@ -135,6 +167,8 @@ class DE:
         patience: int = 20,
         seed: Optional[int] = None,
         strategy: _DeStrategy = "rand1bin",
+        mutation_factor: Optional[float] = None,
+        crossover_rate: Optional[float] = None,
     ) -> DE: ...
 
 @final
@@ -204,6 +238,83 @@ class CMAES:
         restarts: int = 0,
         seed: Optional[int] = None,
     ) -> CMAES: ...
+
+@final
+class Adam:
+    max_iters: int
+    learning_rate: float
+    beta1: float
+    beta2: float
+    epsilon: float
+    bounds: tuple[float, float]
+    tolerance: float
+    patience: int
+    finite_difference_step: float
+    rule: _AdamRule
+    seed: Optional[int]
+    def __new__(
+        cls,
+        max_iters: int = 100,
+        learning_rate: float = 0.1,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        epsilon: float = 1e-8,
+        # Default `(-pi, pi)` (bindings/adam.rs).
+        bounds: tuple[float, float] = ...,
+        tolerance: float = 0.01,
+        patience: int = 20,
+        finite_difference_step: float = 0.2,
+        rule: _AdamRule = "adam",
+        seed: Optional[int] = None,
+    ) -> Adam: ...
+
+@final
+class SPSA:
+    max_iters: int
+    resamplings: int
+    perturbation: float
+    target_step: float
+    alpha: float
+    gamma: float
+    stability_constant: float
+    eval_interval: int
+    seed: Optional[int]
+    def __new__(
+        cls,
+        max_iters: int = 300,
+        resamplings: int = 1,
+        perturbation: float = 0.1,
+        target_step: float = 0.63,
+        alpha: float = 0.602,
+        gamma: float = 0.101,
+        eval_interval: int = 20,
+        seed: Optional[int] = None,
+        stability_constant: float = 0.0,
+    ) -> SPSA: ...
+
+@final
+class Rotosolve:
+    sweeps: int
+    reevaluate_every: int
+    tolerance: float
+    patience: int
+    seed: Optional[int]
+    def __new__(
+        cls,
+        sweeps: int = 10,
+        reevaluate_every: int = 5,
+        tolerance: float = 0.01,
+        patience: int = 2,
+        seed: Optional[int] = None,
+    ) -> Rotosolve: ...
+
+@final
+class External:
+    optimizer: _AskTell
+    max_evaluations: int
+    def __new__(
+        cls, optimizer: _AskTell, max_evaluations: SupportsIndex
+    ) -> External: ...
 
 # ── Native circuits ─────────────────────────────────────────────────────────
 
@@ -334,6 +445,9 @@ class Circuit:
     def barrier(self, qubits: Optional[Sequence[int]] = None) -> Circuit: ...
     def measure(self, qubit: int, cbit: int) -> Circuit: ...
     def measure_all(self) -> Circuit: ...
+    def compose(
+        self, other: Circuit, qubits: Optional[Sequence[int]] = None
+    ) -> Circuit: ...
     def to_qasm2(self, params: Optional[_FloatVector] = None) -> str: ...
     def to_qasm3(self, params: Optional[_FloatVector] = None) -> str: ...
     def to_qir(self, params: Optional[_FloatVector] = None) -> str: ...
@@ -380,9 +494,26 @@ class TrainResult:
     @property
     def fitness_history(self) -> list[float]: ...
     @property
+    def final_params(self) -> Optional[list[float]]: ...
+    @property
+    def final_fitness(self) -> Optional[float]: ...
+    @property
     def seed(self) -> int: ...
     @property
     def id(self) -> str: ...
+
+# What a training `callback` receives once per iteration; read-only, and
+# `best_params` is a new list on every access.
+@final
+class TrainProgress:
+    @property
+    def iteration(self) -> int: ...
+    @property
+    def best_fitness(self) -> float: ...
+    @property
+    def best_params(self) -> list[float]: ...
+    @property
+    def evaluations(self) -> int: ...
 
 # ── Native cost observables ─────────────────────────────────────────────────
 
@@ -449,8 +580,13 @@ def train(
     backend: str = "aer",
     seed: Optional[int] = None,
     fusion: Optional[bool] = None,
-    options: Optional[dict[str, str]] = None,
+    options: Optional[_Options] = None,
     walltime: Optional[str] = None,
+    initial_point: Optional[_FloatVector] = None,
+    final_shots: Optional[SupportsIndex] = None,
+    *,
+    callback: Optional[_TrainCallback] = None,
+    trace: Optional[Union[str, PathLike[str]]] = None,
 ) -> TrainResult: ...
 def run_quantum_circuit(
     qc: Union[QuantumCircuit, Circuit, str],
@@ -464,8 +600,10 @@ def run_quantum_circuit(
     backend: str = "aer",
     seed: Optional[int] = None,
     fusion: Optional[bool] = None,
-    options: Optional[dict[str, str]] = None,
+    options: Optional[_Options] = None,
     walltime: Optional[str] = None,
+    *,
+    trace: Optional[Union[str, PathLike[str]]] = None,
 ) -> RunResult: ...
 def statevector(
     qc: Circuit, params: Optional[_FloatVector] = None, fusion: bool = True
@@ -484,4 +622,6 @@ def calibrate_parallel_threshold(force: bool = False) -> _CalibrationOutcome: ..
 def backend_cleanup_failures() -> int: ...
 def backend_compatibility(
     circuit: Union[Circuit, str, QuantumCircuit],
+    *,
+    resources: bool = False,
 ) -> _CompatibilityReport: ...
