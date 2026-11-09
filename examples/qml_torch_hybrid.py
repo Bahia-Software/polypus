@@ -2,7 +2,7 @@
 
 ``polypus.torch.QuantumLayer`` turns a native model into a ``torch.nn.Module``:
 its forward pass is ``qml.expval`` (every readout observable, one column each)
-and its backward pass ``qml.jacobian``, so it sits in a ``torch.nn.Sequential``
+and its backward pass ``qml.vjp``, so it sits in a ``torch.nn.Sequential``
 between classical layers and trains with any ``torch.optim`` optimizer.
 
 Here a ``Linear`` layer maps four features onto the angles of two qubits, the
@@ -75,7 +75,7 @@ def main() -> None:
     for _ in range(STEPS):
         optimizer.zero_grad()
         loss = loss_fn(net(X), Y)
-        # One qml.expval call forward, one qml.jacobian call backward.
+        # One qml.expval call forward, one qml.vjp call backward.
         loss.backward()
         optimizer.step()
     final_loss, final_accuracy = evaluate(net, loss_fn)
