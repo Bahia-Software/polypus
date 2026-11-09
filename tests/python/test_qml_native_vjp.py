@@ -9,8 +9,9 @@ the Jacobian takes. With ``exact=True`` it comes from one adjoint run per row
 whatever the number of observables, so it is the contraction to rounding
 (``TOLERANCE``); with shots it runs ``jacobian``'s circuits, so with the same
 ``seed`` it is the contraction of that seed's Jacobian, to rounding too. The
-cotangent is checked for its shape only: a ``NaN`` or an infinity propagates as
-it does through the contraction. Every check runs before a backend exists.
+cotangent is checked for being real and for its shape only: a ``NaN`` or an
+infinity propagates as it does through the contraction. Every check runs before
+a backend exists.
 """
 
 import math
