@@ -138,6 +138,5 @@ per shot, overheads and accounting.
 ../eqe-venv/bin/python -m pytest benchmarks/euro_q_exa/tests
 ```
 
-They use a small synthetic calibration and are **not run by CI** on purpose:
-this benchmark may never become part of the library. Before merging into
-`main`, decide whether they move into `tests/python/` or into `ci.yml`.
+They use a small synthetic calibration and are deliberately **not run by CI**:
+this benchmark is a study, not part of the library.
