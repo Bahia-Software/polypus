@@ -1827,7 +1827,7 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 - **`polypus.torch.QuantumLayer(..., seed=None)`** never passes its `seed` on
   as such: forward pass `n` of the layer calls `qml.expval` with
   `SeedSequence([seed, n, 0]).generate_state(1, uint64)[0]`, and the backward
-  pass of that forward pass calls `qml.jacobian` with `[seed, n, 1]`, so every
+  pass of that forward pass calls `qml.vjp` with `[seed, n, 1]`, so every
   backend call of a training gets its own stream, a layer rebuilt with the same
   `seed` replays the values and gradients step by step, and seeds `s` and
   `s+1` share no stream. The counter is the layer's, outside the `state_dict`.
@@ -2749,12 +2749,14 @@ above.
   in exact mode the output is, bit for bit, `qml.expval(model, x, params,
   exact=True)`. The rows' checks (empty batch, feature count, non-finite
   values) are `expval`'s errors.
-- **Backward = the VJP of `jacobian`.** One `qml.jacobian` call per backward
-  pass, with `wrt` exactly what needs a gradient (`"params"`, `"inputs"`, or
-  `"both"`), none when nothing does; `∂L/∂θ = Σ_b,o g[b,o]·J_θ[b,o,:]` and
-  `∂L/∂x[b] = Σ_o g[b,o]·J_x[b,o,:]`. An amplitude or basis encoder raises
-  `jacobian`'s `polypus.ConfigurationError` only when the input's gradient is
-  wanted. The backward pass is not differentiable (no second derivatives); in
+- **Backward = `qml.vjp`.** One `qml.vjp` call per backward pass (never
+  `qml.jacobian`), with the incoming gradient `g` as its cotangent and `wrt`
+  exactly what needs a gradient (`"params"`, `"inputs"`, or `"both"`), none
+  when nothing does; `∂L/∂θ = Σ_b,o g[b,o]·J_θ[b,o,:]` and
+  `∂L/∂x[b] = Σ_o g[b,o]·J_x[b,o,:]`, so in exact mode one adjoint run per row
+  whatever the number of observables (#559). An amplitude or basis encoder
+  raises `vjp`'s `polypus.ConfigurationError` only when the input's gradient
+  is wanted. The backward pass is not differentiable (no second derivatives); in
   exact mode `torch.autograd.gradcheck` passes with its default tolerances.
 - **dtype and device.** The computation is `float64` on the CPU: the input and
   parameter are converted at the boundary; the output comes back in the
@@ -2763,7 +2765,7 @@ above.
 - **Seeds (C-7).** With `seed=s`, forward pass `n` (counted per layer from 0,
   not in the `state_dict`, so not thread-safe) calls `expval` with
   `SeedSequence([s, n, 0]).generate_state(1, uint64)[0]` and its backward pass
-  calls `jacobian` with `[s, n, 1]` (a forward pass counts even when it raises,
+  calls `vjp` with `[s, n, 1]` (a forward pass counts even when it raises,
   so twin layers stay in step): two layers with the same `seed` replay the
   same values and gradients step by step, every call has its own stream, and
   neighbouring seeds share none. Without `seed`, `None` reaches every call,
@@ -2876,7 +2878,8 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   `test_torch_quantum_layer.py` (the PyTorch layer: forward bit for bit
   `expval` in one call per batch, `gradcheck` with default tolerances for the
   parameters and the inputs, the backward pass the same by the adjoint and by
-  the shift fallback, the `wrt` each backward pass asks for, amplitude
+  the shift fallback, one `qml.vjp` call per backward pass with the `wrt` it
+  asks for and the incoming gradient, never `qml.jacobian`, amplitude
   and basis encoders, dtype and device, shapes, the derived seeds and their
   replay, training with SGD, Adam and LBFGS, `state_dict`, `deepcopy` and
   `from_trained`), `test_torch_import.py` (the import without PyTorch, the

@@ -43,8 +43,8 @@ Entries were curated from the Conventional Commits history. Releases before
   blocks. See `examples/qml_expval_jacobian_loop.py`.
 - `polypus.torch.QuantumLayer(model, *, initial_params=None, seed=None, ...)`,
   a `torch.nn.Module` over a native `qml.Model` for hybrid quantum-classical
-  networks: forward = `qml.expval` over the batch, backward = the
-  vector-Jacobian product of `qml.jacobian` (parameters, inputs or both), so
+  networks: forward = `qml.expval` over the batch, backward = one `qml.vjp`
+  call with the incoming gradient (parameters, inputs or both; #559), so
   it trains with any `torch.optim` optimizer; float32 networks work as is (the
   computation is float64 on the CPU), and a `seed` derives one per backend call
   so a training replays. `polypus.torch.from_trained(trained, ...)` starts one
