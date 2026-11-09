@@ -5,10 +5,11 @@ transpiled to the native gate set (`r`, `cz`) and coupling map, and run on Aer
 with a noise model built from an LRZ calibration snapshot. The physical QPU is
 not used.
 
-Status: local phase complete on bahia189: device model (F1), instances and
-routing study (F2), cost pilot (F3a), emulation sweep for n = 16 at p = 1..3 and
-n = 20 at p = 1 (F3b), analysis and QPU plan (F4). Pending: n = 20 at p >= 2 on
-LRZ's Qaptiva machines.
+Status: complete. Device model (F1), instances and routing study (F2), cost
+pilot (F3a), emulation sweep for n = 16 and 20 at p = 1..3 (F3b, run on LRZ's
+Qaptiva system and cross-checked on a node of our own cluster), analysis and
+QPU plan (F4). These are the results and the plan of our technical report to
+LRZ.
 
 The scripts and tests need the polypus extension built from this branch. To keep
 it apart from other environments on the machine, install the wheel into its own
@@ -124,9 +125,12 @@ python benchmarks/euro_q_exa/qpu_plan.py --out benchmarks/euro_q_exa/results/ana
 standard deviation of the approximation ratio, the normalized ratio
 `(cut - random) / (optimum - random)` (the comparable figure for the signed
 control, whose random baseline is negative), the probability of the optimal cut
-and the share of the ideal gain kept under noise. `qpu_plan.py` counts circuits
-and shots for a physical run and estimates QPU hours from explicit assumptions
-on time per shot, overheads and accounting.
+and the share of the ideal gain kept under noise. `qpu_plan.py` counts the
+circuits, shots and jobs of the plan for the awarded QPU hours (two sessions,
+six blocks: QAOA, validation of polypus against Qiskit, parallel circuits, a
+hybrid VQE loop, drift and more shots where the signal is low; its docstring
+describes each one) and estimates QPU time from explicit assumptions on time
+per shot, overheads and accounting.
 
 ## Tests
 
