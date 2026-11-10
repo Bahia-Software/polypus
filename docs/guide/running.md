@@ -82,6 +82,24 @@ result = polypus.run_quantum_circuit(
 
 A circuit without measurements is read out on all its qubits by both backends.
 
+## Typed targets
+
+Instead of the `infrastructure`/`backend` strings and their provider arguments, `target=` takes one object that says where the run goes. Each class checks its own fields when it is built.
+
+| Target | Same as |
+|---|---|
+| `polypus.Aer(sim_method="automatic", noise_model=None)` | `infrastructure="local", backend="aer"` |
+| `polypus.Native(fusion=None)` | `infrastructure="local", backend="polypus"` |
+| `polypus.Cunqa(nodes=1, cores_per_qpu=2, walltime=None, sim_method="automatic")` | `infrastructure="cunqa"` |
+| `polypus.Qmio(program_format="openqasm")` | `infrastructure="qmio", backend=program_format` |
+| `polypus.Registered(name, options=None)` | `infrastructure=name, options=options` |
+
+```python
+result = polypus.run_quantum_circuit(bell, shots=1000, target=polypus.Native(), seed=7)
+```
+
+`run_quantum_circuit`, `train`, `qml.train` and `qml.predict` accept `target=`. With it, passing `infrastructure`, or `backend`, `sim_method`, `noise_model`, `fusion`, `nodes`, `cores_per_qpu` or `walltime` with a value other than its default, raises `ConfigurationError`. `options=` still applies: it configures `Qmio` (for example its `endpoint`) and `Registered`, but not both `Registered(..., options=...)` and `options=` at once. The strings remain as shorthand, and a seeded run with `target=` gives the same result as the equivalent string call.
+
 ## Tracing a circuit run
 
 `run_quantum_circuit` takes the same keyword-only `trace` argument as `train`, a path (`str` or `os.PathLike`) of a new file for the run's call trace (contract C-12), and follows `POLYPUS_CALL_TRACE` and `POLYPUS_CALL_TRACE_MAX_MB` as `train` does, its file in the variable's directory being named after the run's effective id, `RunResult.id`; see [Tracing the calls of a run](training.md#tracing-the-calls-of-a-run). The header line has `"flow": "run_circuit"`, `null` as `method` and `dims`, the run's `id` and its effective `seed` (`null` on `"qmio"`). The run is one `batch` line, with `"op": "execute_replicas"`, `n` equal to 1 and the run's `shots`, written after one `wave` line per call to the backend. With `n_qpus=1` that is one `run_circuits` call with every shot. With `n_qpus > 1` the shots are split into one replica per QPU, run by `run_shots_distributed` calls, and each `wave` line lists in `replicas` the shots of each replica it ran; over all the waves they add up to `shots`.
