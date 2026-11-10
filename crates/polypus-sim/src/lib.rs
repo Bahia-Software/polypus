@@ -61,7 +61,7 @@
 //! sweep forward and one back, holding [`ADJOINT_STATEVECTORS`] statevectors,
 //! where the parameter-shift rule runs two circuits per rotation.
 
-#![deny(clippy::all)]
+#![warn(missing_docs)]
 
 /// 64-bit complex amplitude type used throughout the simulator.
 pub type C64 = num_complex::Complex<f64>;

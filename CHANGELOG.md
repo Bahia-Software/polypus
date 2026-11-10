@@ -124,6 +124,13 @@ Entries were curated from the Conventional Commits history. Releases before
   `polypus-observable`, CMA-ES and SHADE, and `polypus-backend`'s memory guard
   and planner, and property tests check the OpenQASM round trip and that the
   parallel kernels match the sequential ones on random circuits (#409).
+- For contributors: every workspace crate inherits a `[workspace.lints]` table
+  from the root `Cargo.toml` that denies `unsafe_code` and
+  `clippy::undocumented_unsafe_blocks`, so the three `unsafe` sites
+  `docs/ENGINEERING.md` §5 authorises are the only ones that compile, each with
+  its own block-scoped `allow`. `missing_docs` is on in the crates that are
+  already fully documented, and `cargo deny` keeps `pyo3` out of the pure
+  crates (#408).
 
 ### Fixed
 - `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a
