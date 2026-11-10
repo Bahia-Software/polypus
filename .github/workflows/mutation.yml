@@ -4,11 +4,14 @@ name: Mutation testing
 # coverage says which code the tests run, mutation testing whether they would
 # notice it change. Each job runs one shard of one crate and writes caught /
 # missed / timeout / unviable and the score, caught / (caught + missed), in its
-# summary, and keeps `missed.txt` and `outcomes.json` as an artifact. Surviving
-# mutants never fail a job; cargo-mutants failing to run does (the unmutated
-# tests failing, a build error, the step timing out). The scheduled run, or a
-# manual one with `comment` set, then comments one row per crate on the
-# tracking issue (`report`), the only job that can write to issues.
+# summary, and keeps `missed.txt` and `outcomes.json` as an artifact. The tests
+# run with a 6 GiB address-space cap per process (see the `cargo mutants`
+# step), so that a mutant that allocates without end fails instead of taking
+# the runner down. Surviving mutants never fail a job; cargo-mutants failing
+# to run does (the unmutated tests failing, a build error, the step timing
+# out). The scheduled run, or a manual one with `comment` set, then comments
+# one row per crate on the tracking issue (`report`), the only job that can
+# write to issues.
 #
 # The scripts are .github/scripts/mutation_report.py (tested by
 # test_mutation_report.py, run by hygiene.yml). docs/CONTRIBUTING.md
@@ -89,8 +92,23 @@ jobs:
       # (missed mutants) and 3 (timeouts) are results, so they pass; any other
       # non-zero code is cargo-mutants failing, and fails the job. The code is
       # kept for the report, which tells a finished run from one that is not.
+      #
+      # Every test process runs under a 6 GiB address-space cap (RLIMIT_AS,
+      # virtual memory). Some mutants turn a loop into one that allocates
+      # until the timeout, and two of them at once (--jobs 2) can exhaust the
+      # runner's 16 GB and lose the job (#581). Capped, such a mutant aborts
+      # on a failed allocation once it reaches the cap and its test fails, so
+      # it counts as caught (one still under the cap at the timeout counts as
+      # a timeout). 2 x 6 GiB leaves room for cargo, rustc and the system,
+      # and the unmutated tests of every crate pass with 1 GiB. Cargo runs
+      # the unit, integration and doctest binaries alike through this runner;
+      # the build (cargo, rustc, rustdoc) is not capped. The variable names
+      # the x86-64 Linux target: on another runner architecture the cap would
+      # silently not apply, so rename it if `runs-on` ever changes.
       - name: cargo mutants -p ${{ matrix.crate }} --shard ${{ matrix.shard }}/${{ matrix.shards }}
         timeout-minutes: 180
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=6442450944
         run: |
           set +e
           cargo mutants --package "$CRATE" --all-features --jobs 2 \

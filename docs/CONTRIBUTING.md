@@ -298,6 +298,14 @@ run (the unmutated tests failing, the step timing out) fails its job. A manual
 run (`workflow_dispatch`) reports in the summaries only, unless its `comment`
 input is set.
 
+Every test process runs with a 6 GiB address-space cap (`prlimit --as`,
+through cargo's target runner), because some mutants turn a loop into one that
+allocates until the timeout, and two at once can exhaust the runner's 16 GB.
+Such a mutant aborts on a failed allocation when it reaches the cap, and its
+test fails: it counts as caught (one still under the cap when the timeout hits
+counts as a timeout, as before). The unmutated tests of every crate pass well
+under the cap.
+
 To reproduce a crate's run, or to check that a new test catches a mutant,
 install the version the workflow pins and run it on that crate (it copies the
 tree to a temporary directory; `mutants.out/` is ignored by git):
@@ -308,6 +316,10 @@ cargo mutants --package polypus-observable --all-features           # the whole 
 cargo mutants --package polypus-observable --all-features --list    # its mutants, without running them
 cargo mutants --package polypus-observable --all-features --file crates/polypus-observable/src/qubo.rs --re 'from_matrix'
 cargo mutants --package polypus-sim --all-features --shard 1/3 --sharding round-robin   # one CI job's shard
+# As the CI job runs it, with the same cap on each test process (x86-64 Linux, util-linux's prlimit;
+# on another target the variable name changes, and without the right one the cap is silently not applied):
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="prlimit --as=6442450944" \
+  cargo mutants --package polypus-sim --all-features --jobs 2 --shard 1/3 --sharding round-robin
 ```
 
 Kill a missed mutant with a test of the behaviour it changes, not by
