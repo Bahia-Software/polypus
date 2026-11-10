@@ -191,6 +191,14 @@ mod tests {
     }
 
     #[test]
+    fn num_vars_is_the_declared_width() {
+        for n in [2, 3, 70] {
+            let obs = IsingObservable::new(n, vec![], vec![], 0.0, 1.0).unwrap();
+            assert_eq!(obs.num_vars(), n);
+        }
+    }
+
+    #[test]
     fn rejects_bad_construction() {
         assert!(IsingObservable::new(0, vec![], vec![], 0.0, 1.0).is_err());
         assert!(IsingObservable::new(2, vec![(2, 1.0)], vec![], 0.0, 1.0).is_err());

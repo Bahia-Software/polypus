@@ -785,3 +785,65 @@ fn qng_best_params_fitness_invariant_holds_across_seeds() {
         );
     }
 }
+
+#[test]
+fn every_optimizer_names_and_describes_itself() {
+    use polypus_optimizers::{
+        AlgorithmAdam, AlgorithmCmaEs, AlgorithmExternal, AlgorithmRotosolve, AlgorithmSPSA,
+    };
+    // (name, description, the name, a phrase its description must carry)
+    let cases = [
+        (
+            AlgorithmAdam.name(),
+            AlgorithmAdam.description(),
+            "Adam",
+            "with Adam",
+        ),
+        (
+            AlgorithmCmaEs.name(),
+            AlgorithmCmaEs.description(),
+            "CMA-ES",
+            "(CMA-ES)",
+        ),
+        (
+            AlgorithmDifferentialEvolution.name(),
+            AlgorithmDifferentialEvolution.description(),
+            "Differential Evolution",
+            "Differential Evolution",
+        ),
+        (
+            AlgorithmExternal.name(),
+            AlgorithmExternal.description(),
+            "External",
+            "ask/tell",
+        ),
+        (
+            AlgorithmPSO.name(),
+            AlgorithmPSO.description(),
+            "Particle Swarm Optimization",
+            "(PSO)",
+        ),
+        (
+            AlgorithmQNG.name(),
+            AlgorithmQNG.description(),
+            "Quantum Natural Gradient",
+            "(QNG)",
+        ),
+        (
+            AlgorithmRotosolve.name(),
+            AlgorithmRotosolve.description(),
+            "Rotosolve",
+            "with Rotosolve",
+        ),
+        (
+            AlgorithmSPSA.name(),
+            AlgorithmSPSA.description(),
+            "SPSA",
+            "(SPSA)",
+        ),
+    ];
+    for (name, description, want_name, phrase) in cases {
+        assert_eq!(name, want_name);
+        assert!(description.contains(phrase), "{name}: {description}");
+    }
+}

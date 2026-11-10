@@ -208,6 +208,25 @@ class TestSaveLoad:
             trained.save(tmp_path / "no_such_dir" / "model.json")
         assert list(tmp_path.iterdir()) == []
 
+    def test_an_edited_huge_reps_is_a_value_error(self, trained, tmp_path):
+        import json
+
+        from polypus.qml import load
+
+        path = tmp_path / "model.json"
+        trained.save(path)
+        saved = json.loads(path.read_text())
+        # `real_amplitudes` (layer 1): reps + the final rotation layer overflow.
+        (entry,) = [
+            layer["HardwareEfficient"]
+            for layer in saved["spec"]["layers"]
+            if "HardwareEfficient" in layer
+        ]
+        entry["reps"] = 2**64 - 1
+        path.write_text(json.dumps(saved))
+        with pytest.raises(ValueError, match="layer 1 needs more trainable parameters"):
+            load(path)
+
     @pytest.mark.parametrize(
         "edit",
         [
@@ -228,6 +247,97 @@ class TestSaveLoad:
         trained.save(path)
         path.write_text(edit(json.loads(path.read_text())))
         with pytest.raises(ValueError, match="not a valid polypus.qml.TrainedModel"):
+            load(path)
+
+
+def _strongly_entangling_trained():
+    """Two qubits, a strongly entangling ansatz with explicit ranges and ``cz``:
+    3·2·2 = 12 parameters."""
+    from polypus.qml import Ansatz, Encoder
+
+    model = make_model(
+        num_qubits=2,
+        encoder=Encoder(2).angle_encoder("ry"),
+        ansatz=Ansatz(2).strongly_entangling(2, ranges=[1, 1], entangler="cz"),
+    )
+    return model.bind([0.1 + 0.37 * i for i in range(model.num_params)])
+
+
+def _strongly_entangling_entry(saved):
+    """The strongly entangling layer of a saved spec."""
+    (entry,) = [
+        layer["StronglyEntangling"]
+        for layer in saved["spec"]["layers"]
+        if "StronglyEntangling" in layer
+    ]
+    return entry
+
+
+class TestSaveLoadStronglyEntangling:
+    _ROWS = [[0.3, 1.2], [2.0, 0.4], [1.1, 2.9]]
+
+    def test_round_trip_predicts_identically(self, tmp_path):
+        import json
+
+        from polypus.qml import load
+
+        trained = _strongly_entangling_trained()
+        path = tmp_path / "model.json"
+        trained.save(path)
+        saved = json.loads(path.read_text())
+        assert saved["version"] == 1
+        assert _strongly_entangling_entry(saved) == {
+            "reps": 2,
+            "ranges": [1, 1],
+            "entangler": "Cz",
+        }
+        loaded = load(path)
+        assert loaded.params == trained.params
+        assert loaded.predict(self._ROWS, exact=True) == trained.predict(
+            self._ROWS, exact=True
+        )
+        assert (
+            loaded.run(self._ROWS, exact=True).probabilities
+            == trained.run(self._ROWS, exact=True).probabilities
+        )
+
+    @pytest.mark.parametrize(
+        ("ranges", "message"),
+        [
+            # Two active qubits: 2 would make a qubit its own target.
+            ([1, 2], "range 2 of layer 1"),
+            ([0, 1], "range 0 of layer 0"),
+            ([1], "reps is 2"),
+        ],
+        ids=["n", "zero", "count"],
+    )
+    def test_an_edited_range_is_rejected(self, tmp_path, ranges, message):
+        import json
+
+        from polypus.qml import load
+
+        path = tmp_path / "model.json"
+        _strongly_entangling_trained().save(path)
+        saved = json.loads(path.read_text())
+        _strongly_entangling_entry(saved)["ranges"] = ranges
+        path.write_text(json.dumps(saved))
+        with pytest.raises(ValueError, match=message):
+            load(path)
+
+    def test_an_edited_reps_too_large_to_count_is_rejected(self, tmp_path):
+        import json
+
+        from polypus.qml import load
+
+        path = tmp_path / "model.json"
+        _strongly_entangling_trained().save(path)
+        saved = json.loads(path.read_text())
+        # 3 × 2 qubits × 2**62 parameters do not fit in a usize. The default
+        # ranges, so the count is the first thing that fails.
+        entry = _strongly_entangling_entry(saved)
+        entry["reps"], entry["ranges"] = 2**62, None
+        path.write_text(json.dumps(saved))
+        with pytest.raises(ValueError, match="layer 1 needs more trainable parameters"):
             load(path)
 
 

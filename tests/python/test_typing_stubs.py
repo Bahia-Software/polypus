@@ -134,6 +134,30 @@ class TestOptionsType:
         assert status == 1 and "snippet.py:3: error" in report, report
 
 
+class TestAnsatzTypes:
+    """`Ansatz.strongly_entangling` takes any sequence of ranges and the
+    entangler `Literal` that `hardware_efficient` takes."""
+
+    def test_its_arguments_type_check(self, tmp_path):
+        source = (
+            "from polypus import qml\n"
+            "a: qml.Ansatz = qml.Ansatz(4).strongly_entangling(2)\n"
+            'a = a.strongly_entangling(2, ranges=(1, 3), entangler="cz")\n'
+            'a = a.strongly_entangling(1, ranges=[2], entangler="cx")\n'
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+    def test_an_unknown_entangler_does_not_type_check(self, tmp_path):
+        # A ValueError at run time, so mypy must reject it too.
+        source = (
+            "from polypus import qml\n"
+            'qml.Ansatz(4).strongly_entangling(1, entangler="cy")\n'
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 1 and "snippet.py:2: error" in report, report
+
+
 class TestFitTypes:
     """`Model.fit` types `initial_point` and `final_shots` as `train` does."""
 

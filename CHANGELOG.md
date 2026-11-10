@@ -12,6 +12,19 @@ Entries were curated from the Conventional Commits history. Releases before
 ## [Unreleased]
 
 ### Added
+- `polypus.qml.Ansatz.strongly_entangling(reps, ranges=None, entangler="cx")`,
+  PennyLane's `StronglyEntanglingLayers`: per layer, a general rotation on
+  every qubit, emitted as `Rz(φ)`, `Ry(θ)`, `Rz(ω)`, in that order, so the
+  exact parameter-shift gradient still applies, then an entangler (`"cx"` or
+  `"cz"`) from each qubit `i` to `(i + r) mod n`, with PennyLane's default
+  ranges or one per layer; `3·n·reps` parameters. A range outside `1..=n−1`
+  for the qubits active at that point is a `ValueError` at the call, and the
+  layer saves and loads with `TrainedModel.save`/`qml.load` (format version
+  still 1). In `polypus-qml`: `StronglyEntanglingAnsatz`,
+  `Layer::StronglyEntangling`, `QuantumModel::strongly_entangling` and the
+  `ValidationError` variants `StronglyEntanglingRangesLength` and
+  `StronglyEntanglingRangeOutOfBounds`. The QML guide shows how `EfficientSU2`
+  and `BasicEntanglerLayers` map onto `hardware_efficient` (#505).
 - `polypus.qml.expval(model, x, params, *, ...)` and
   `polypus.qml.jacobian(model, x, params, *, wrt="params", ...)` for a training
   loop of your own over a native `Model`: the expectation of every readout
@@ -98,6 +111,9 @@ Entries were curated from the Conventional Commits history. Releases before
   (`polypus-orchestration`) have a new public field,
   `trace: Option<Arc<CallTracer>>`, so a struct literal must set it;
   `trace: None` keeps today's behaviour.
+- **BREAKING (Rust):** `polypus_qml::ValidationError` has two new variants,
+  `StronglyEntanglingRangesLength` and `StronglyEntanglingRangeOutOfBounds`,
+  so an exhaustive `match` on it outside its crate must handle them (#505).
 - **BREAKING (Rust):** `polypus_physics::hamiltonians::PauliTerm` is
   `{ coefficient, string: PauliString }` instead of a single Pauli on one
   qubit (`qubit`, `axis`), and `PauliSum`'s fields are private: build it with
@@ -113,6 +129,27 @@ Entries were curated from the Conventional Commits history. Releases before
   variants, `InvalidPauliSum`, `UnsupportedOperation`,
   `InvalidFermionOperator` and `InvalidIntegrals`, so an exhaustive `match`
   on it outside its crate must handle them (#529).
+- **BREAKING (Rust):** `polypus_qml::ValidationError` has a new variant,
+  `TooManyParams`, so an exhaustive `match` on it outside its crate must
+  handle it (#505).
+- CI reports how well the tests check the code, not only what they run: the
+  SonarQube Cloud workflow's coverage jobs write Rust line coverage per crate
+  in their summary, and a weekly `mutation.yml` runs `cargo mutants` over the
+  pure-Rust crates (report only) and comments the score per crate on a
+  tracking issue. New tests catch the mutants that survived in
+  `polypus-observable`, CMA-ES and SHADE, and `polypus-backend`'s memory guard
+  and planner, and property tests check the OpenQASM round trip and that the
+  parallel kernels match the sequential ones on random circuits (#409).
+
+### Fixed
+- `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a
+  negative `reps` raised `OverflowError`, and with a `reps` whose parameter
+  count does not fit in 64 bits a `PanicException` (which `except Exception`
+  does not catch); both, and any integer too large for a count, are now a
+  `ValueError` at the call that leaves the `Ansatz` as it was. A layer added
+  after such a parameter count, and a saved file edited to one, fail the same
+  way. In `polypus-qml`, `QuantumModel::compile` returns the new
+  `ValidationError::TooManyParams` instead of panicking (#505).
 
 ### Documentation
 - The documentation site (MkDocs Material) is published at the Pages root,

@@ -108,7 +108,7 @@ pub use jacobian::{ExpectationJacobian, Jacobian, JacobianBlock, JacobianWrt};
 pub use layers::{
     AmplitudeEncoder, AngleEncoder, BasisEncoder, ConvBlock, ConvLayer, Entanglement, Entangler,
     HardwareEfficientAnsatz, IqpEncoder, KeepRule, Layer, Pairing, PoolBlock, PoolLayer,
-    RotationAxis,
+    RotationAxis, StronglyEntanglingAnsatz,
 };
 pub use loss::Loss;
 pub use model::{CompiledModel, QuantumModel, TrainedModel};

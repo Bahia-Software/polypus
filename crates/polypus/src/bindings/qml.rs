@@ -21,7 +21,8 @@ use std::time::{Duration, Instant};
 use numpy::ndarray::{Array2, Array3, ShapeError};
 use numpy::{IntoPyArray, PyArray2};
 use pyo3::exceptions::{
-    PyFileNotFoundError, PyOSError, PyPermissionError, PyRuntimeError, PyTypeError, PyValueError,
+    PyFileNotFoundError, PyOSError, PyOverflowError, PyPermissionError, PyRuntimeError,
+    PyTypeError, PyValueError,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyModule, PyTuple, PyType};
@@ -31,7 +32,7 @@ use polypus_qml::{
     AngleEncoder, CompiledModel, ConvBlock, ConvLayer, Decision, Entanglement, Entangler,
     ExpectationJacobian, HardwareEfficientAnsatz, IqpEncoder, JacobianWrt, KeepRule, Layer, Loss,
     Observable, Pairing, Pauli, PauliString, PoolBlock, PoolLayer, QmlError, QmlProblem,
-    QuantumModel, Readout, RotationAxis, ValidationError,
+    QuantumModel, Readout, RotationAxis, StronglyEntanglingAnsatz, ValidationError,
 };
 
 use super::callback::validate_callback;
@@ -68,6 +69,38 @@ fn validation_to_py_err(e: ValidationError) -> PyErr {
 /// `ValueError`, as `polypus.Circuit`'s do.
 fn validation_to_config_err(e: ValidationError) -> PyErr {
     configuration_error(e.to_string())
+}
+
+/// A count argument of a builder method, such as `reps`: a Python `int` that
+/// fits in a `usize`. A negative or oversized one is a `ValueError` (contract
+/// C-11), not the `OverflowError` PyO3's own conversion raises; any other type
+/// keeps its `TypeError`. On Python 3.11 and later, PyO3 adds a note naming
+/// the argument to whatever this raises (it shows in the traceback, not in
+/// `str(e)`).
+///
+/// A local newtype, like [`AngleArg`](super::circuit::AngleArg), because
+/// `FromPyObject` and `usize` are both foreign to this crate.
+struct CountArg(usize);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for CountArg {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        match ob.extract::<usize>() {
+            Ok(count) => Ok(CountArg(count)),
+            // An integer (or an `__index__` one) outside `usize`: its sign picks
+            // the message.
+            Err(err) if err.is_instance_of::<PyOverflowError>(ob.py()) => {
+                let shown = ob.str()?;
+                Err(PyValueError::new_err(if ob.lt(0)? {
+                    format!("expected a non-negative integer, got {shown}")
+                } else {
+                    format!("expected an integer of at most {}, got {shown}", usize::MAX)
+                }))
+            }
+            Err(err) => Err(err),
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -592,12 +625,13 @@ impl Ansatz {
     ))]
     fn hardware_efficient<'py>(
         mut slf: PyRefMut<'py, Self>,
-        reps: usize,
+        reps: CountArg,
         rotations: Option<Vec<String>>,
         entangler: &str,
         entanglement: &str,
         final_rotation_layer: bool,
     ) -> PyResult<PyRefMut<'py, Self>> {
+        let CountArg(reps) = reps;
         let rotations = match rotations {
             Some(axes) => axes
                 .iter()
@@ -619,8 +653,36 @@ impl Ansatz {
 
     /// Append Qiskit's `RealAmplitudes` preset: one `Ry` per rotation block,
     /// linear `CX` entanglement and a final rotation layer.
-    fn real_amplitudes(mut slf: PyRefMut<'_, Self>, reps: usize) -> PyResult<PyRefMut<'_, Self>> {
+    fn real_amplitudes(
+        mut slf: PyRefMut<'_, Self>,
+        reps: CountArg,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        let CountArg(reps) = reps;
         let layer = Layer::HardwareEfficient(HardwareEfficientAnsatz::real_amplitudes(reps));
+        slf.stack.push(layer)?;
+        Ok(slf)
+    }
+
+    /// Append PennyLane's `StronglyEntanglingLayers`: `reps` layers, each a
+    /// general rotation `Rot(φ, θ, ω)`, applied as `Rz(φ)`, then `Ry(θ)`, then
+    /// `Rz(ω)`, on every active qubit (three parameters per qubit) followed by
+    /// an `entangler` (`"cx"`, the default, or `"cz"`) from every position `i`
+    /// to `(i + r) mod n`. `ranges` gives each layer's `r`, one per layer and
+    /// each in `1..=n-1` for the `n` qubits active at this point; `None` is
+    /// PennyLane's default, `r = (layer mod (n-1)) + 1`. A single active qubit
+    /// gets no entanglers.
+    #[pyo3(signature = (reps, ranges=None, entangler="cx"))]
+    fn strongly_entangling<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        reps: CountArg,
+        ranges: Option<Vec<CountArg>>,
+        entangler: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let layer = Layer::StronglyEntangling(StronglyEntanglingAnsatz {
+            reps: reps.0,
+            ranges: ranges.map(|ranges| ranges.into_iter().map(|range| range.0).collect()),
+            entangler: parse_entangler(entangler)?,
+        });
         slf.stack.push(layer)?;
         Ok(slf)
     }
@@ -915,7 +977,10 @@ fn loads_data(layer: &Layer) -> bool {
         Layer::AngleEncoder(_) | Layer::AmplitudeEncoder(_) | Layer::Iqp(_) | Layer::Basis(_) => {
             true
         }
-        Layer::HardwareEfficient(_) | Layer::Conv(_) | Layer::Pool(_) => false,
+        Layer::HardwareEfficient(_)
+        | Layer::StronglyEntangling(_)
+        | Layer::Conv(_)
+        | Layer::Pool(_) => false,
     }
 }
 
@@ -2734,6 +2799,17 @@ mod tests {
             .unwrap(),
             4
         );
+        // Three per qubit per layer, after pooling too (4 → 2 qubits).
+        let strongly = || Layer::StronglyEntangling(StronglyEntanglingAnsatz::new(2));
+        assert_eq!(check_layers(3, &[strongly()]).unwrap(), 18);
+        assert_eq!(
+            check_layers(
+                4,
+                &[Layer::Pool(PoolLayer::new(PoolBlock::Basic)), strongly()]
+            )
+            .unwrap(),
+            3 + 12
+        );
     }
 
     #[test]
@@ -2786,6 +2862,9 @@ mod tests {
         assert!(!loads_data(&Layer::HardwareEfficient(
             HardwareEfficientAnsatz::new(1)
         )));
+        assert!(!loads_data(&Layer::StronglyEntangling(
+            StronglyEntanglingAnsatz::new(1)
+        )));
         assert!(!loads_data(&Layer::Conv(ConvLayer::new(ConvBlock::Basic))));
         assert!(!loads_data(&Layer::Pool(PoolLayer::new(PoolBlock::Basic))));
     }
@@ -2803,6 +2882,21 @@ mod tests {
         let pool = || Layer::Pool(PoolLayer::new(PoolBlock::Basic));
         assert!(check_layers(2, &[pool()]).is_ok());
         assert!(check_layers(2, &[pool(), pool()]).is_err());
+        // A strongly entangling range must lie in 1..=n-1 for the qubits still
+        // active: 3 is valid on 4 qubits, not on the 2 left after pooling.
+        let ranges = |ranges: Vec<usize>| {
+            Layer::StronglyEntangling(StronglyEntanglingAnsatz {
+                ranges: Some(ranges),
+                ..StronglyEntanglingAnsatz::new(1)
+            })
+        };
+        assert!(check_layers(4, &[ranges(vec![3])]).is_ok());
+        assert!(check_layers(4, &[pool(), ranges(vec![3])]).is_err());
+        assert!(check_layers(4, &[ranges(vec![0])]).is_err());
+        assert!(check_layers(4, &[ranges(vec![1, 1])]).is_err());
+        // 3 × 4 qubits × reps parameters that do not fit: an error, not a panic.
+        let huge = Layer::StronglyEntangling(StronglyEntanglingAnsatz::new(usize::MAX / 4));
+        assert!(check_layers(4, &[huge]).is_err());
     }
 
     #[test]
@@ -2841,6 +2935,72 @@ mod tests {
             .any(|w| w == [GateInstruction::Sdg(0), GateInstruction::H(0)]));
         // Binding nothing gives back the very circuit the model runs.
         assert_eq!(circuit.assign_parameters(&[]).unwrap(), bound);
+    }
+
+    #[test]
+    fn check_layers_refuses_a_parameter_count_that_does_not_fit() {
+        Python::initialize();
+        let too_many = |layer: usize| ValidationError::TooManyParams { layer }.to_string();
+        let message = |layers: &[Layer]| {
+            Python::attach(|py| match check_layers(2, layers) {
+                Ok(count) => panic!("expected an error, got {count} parameter(s)"),
+                Err(err) => {
+                    assert!(err.is_instance_of::<PyValueError>(py), "{err}");
+                    err.value(py).to_string()
+                }
+            })
+        };
+        // A huge `reps` on its own.
+        let huge = Layer::HardwareEfficient(HardwareEfficientAnsatz::new(usize::MAX));
+        assert_eq!(message(&[huge]), too_many(0));
+        // 2 × (2^63 − 1) parameters fit; a convolution or a pooling after them
+        // does not.
+        let full = Layer::HardwareEfficient(HardwareEfficientAnsatz {
+            rotations: vec![RotationAxis::Rx],
+            final_rotation_layer: false,
+            ..HardwareEfficientAnsatz::new(usize::MAX / 2)
+        });
+        assert_eq!(
+            check_layers(2, std::slice::from_ref(&full)).unwrap(),
+            usize::MAX - 1
+        );
+        let conv = Layer::Conv(ConvLayer::new(ConvBlock::Basic));
+        assert_eq!(message(&[full.clone(), conv]), too_many(1));
+        let pool = Layer::Pool(PoolLayer::new(PoolBlock::Basic));
+        assert_eq!(message(&[full, pool]), too_many(1));
+    }
+
+    #[test]
+    fn a_count_argument_is_a_value_error_when_out_of_range() {
+        Python::initialize();
+        Python::attach(|py| {
+            let extract = |source: &str| {
+                let value = py.eval(&std::ffi::CString::new(source).unwrap(), None, None)?;
+                value.extract::<CountArg>().map(|count| count.0)
+            };
+            assert_eq!(extract("3").unwrap(), 3);
+            assert_eq!(extract("2**64 - 1").unwrap(), usize::MAX);
+            for (source, message) in [
+                ("-1", "expected a non-negative integer, got -1"),
+                (
+                    "-2**70",
+                    "expected a non-negative integer, got -1180591620717411303424",
+                ),
+                ("2**64", "got 18446744073709551616"),
+            ] {
+                let err = extract(source).unwrap_err();
+                assert!(err.is_instance_of::<PyValueError>(py), "{source}: {err}");
+                assert!(
+                    err.value(py).to_string().contains(message),
+                    "{source}: {err}"
+                );
+            }
+            // Another type keeps its `TypeError`.
+            for source in ["'3'", "3.0", "None"] {
+                let err = extract(source).unwrap_err();
+                assert!(err.is_instance_of::<PyTypeError>(py), "{source}: {err}");
+            }
+        });
     }
 
     // ── qml.expval / qml.jacobian ────────────────────────────────────────────

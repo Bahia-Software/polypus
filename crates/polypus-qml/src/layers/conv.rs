@@ -92,9 +92,7 @@ impl LayerOps for ConvLayer {
         }
         // Parameter sharing: the block reserves its θ once for the whole layer,
         // *not* per pair. The cursor advances by the block width only.
-        let count = self.param_count();
-        let params = ctx.param_cursor..ctx.param_cursor + count;
-        ctx.param_cursor += count;
+        let params = ctx.reserve(self.param_count())?;
         Ok(LayerAllocation {
             params,
             active: ctx.active.clone(),
@@ -307,6 +305,22 @@ mod tests {
         // 3 pairs × 7 gates.
         assert_eq!(qc.gates().len(), 21);
         assert_eq!(qc.num_params(), 3);
+    }
+
+    #[test]
+    fn plan_rejects_parameters_that_do_not_fit_after_the_earlier_ones() {
+        for block in [ConvBlock::Basic, ConvBlock::Cartan] {
+            let mut c = LayerContext {
+                param_cursor: usize::MAX - 2,
+                layers_planned: 4,
+                ..ctx(2)
+            };
+            assert_eq!(
+                ConvLayer::new(block).plan(&mut c).unwrap_err(),
+                ValidationError::TooManyParams { layer: 4 }
+            );
+            assert_eq!(c.param_cursor, usize::MAX - 2);
+        }
     }
 
     #[test]

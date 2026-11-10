@@ -84,6 +84,12 @@ impl Variant {
         }
     }
 
+    /// How many members the archive keeps next to a population of
+    /// `population` members: the rate times the size, rounded.
+    fn archive_capacity(self, population: usize) -> usize {
+        (self.archive_rate() * population as f64).round() as usize
+    }
+
     /// The fraction `p` of the population the p-best donor comes from. SHADE
     /// draws it per individual, uniformly between `2/N` and `0.2`; L-SHADE
     /// fixes it at `0.11`.
@@ -341,6 +347,80 @@ fn keep_best(population: &mut Vec<Vec<f64>>, fitness: &mut Vec<f64>, size: usize
     *fitness = survivors.iter().map(|&i| fitness[i]).collect();
 }
 
+/// The vectors one trial is built from: its parent, the p-best donor and the
+/// two members whose difference is added (`x2` may come from the archive).
+struct Donors<'a> {
+    parent: &'a [f64],
+    pbest: &'a [f64],
+    x1: &'a [f64],
+    x2: &'a [f64],
+}
+
+/// One trial: current-to-pbest/1, `parent + F·(pbest − parent) + F·(x1 −
+/// x2)` with every difference the shortest arc and the result wrapped into
+/// `[0, 2π)`, then binomial crossover with the parent at rate `cr`, keeping
+/// the mutant at one coordinate `j_rand` drawn uniformly. Draws `j_rand`, then
+/// one uniform per coordinate (the one at `j_rand` included).
+fn trial<R: Rng>(rng: &mut R, donors: &Donors<'_>, cr: f64, f: f64) -> Vec<f64> {
+    let Donors {
+        parent,
+        pbest,
+        x1,
+        x2,
+    } = *donors;
+    let dims = parent.len();
+    let j_rand = if dims > 0 {
+        rng.random_range(0..dims)
+    } else {
+        0
+    };
+    (0..dims)
+        .map(|j| {
+            if rng.random::<f64>() < cr || j == j_rand {
+                // Angles live on a circle: each difference is the shortest arc.
+                wrap_angle(
+                    parent[j]
+                        + f * wrap_difference(pbest[j] - parent[j])
+                        + f * wrap_difference(x1[j] - x2[j]),
+                )
+            } else {
+                parent[j]
+            }
+        })
+        .collect()
+}
+
+/// Selection. A trial at least as good as its parent replaces it (ties go to
+/// the trial, as in the papers); only a strict improvement sends the parent to
+/// the archive and is returned as a success, with the `(CR, F)` of
+/// `controls` that built it and its fitness gain, to feed the memory.
+fn select(
+    population: &mut [Vec<f64>],
+    fitness: &mut [f64],
+    trials: Vec<Vec<f64>>,
+    trial_fitness: Vec<f64>,
+    controls: &[(f64, f64)],
+    archive: &mut Vec<Vec<f64>>,
+) -> Vec<Success> {
+    let mut successes: Vec<Success> = Vec::new();
+    for (i, (trial, value)) in trials.into_iter().zip(trial_fitness).enumerate() {
+        if value >= fitness[i] {
+            let parent = std::mem::replace(&mut population[i], trial);
+            if value > fitness[i] {
+                let (cr, f) = controls[i];
+                successes.push(Success {
+                    cr,
+                    f,
+                    gain: value - fitness[i],
+                });
+                archive.push(parent);
+            }
+            fitness[i] = value;
+        }
+    }
+    successes
+}
+
 /// Remove random members until the archive holds at most `capacity`, as both
 /// papers do when it overflows.
 fn trim_archive<R: Rng>(archive: &mut Vec<Vec<f64>>, capacity: usize, rng: &mut R) {
@@ -431,53 +511,27 @@ pub(crate) fn run_with_rng<R: Rng>(
             } else {
                 &archive[r2 - size]
             };
-            let parent = &population[i];
-            let j_rand = if dims > 0 {
-                rng.random_range(0..dims)
-            } else {
-                0
+            let donors = Donors {
+                parent: &population[i],
+                pbest,
+                x1,
+                x2,
             };
-            let trial = (0..dims)
-                .map(|j| {
-                    if rng.random::<f64>() < cr || j == j_rand {
-                        // Angles live on a circle: each difference is the
-                        // shortest arc.
-                        wrap_angle(
-                            parent[j]
-                                + f * wrap_difference(pbest[j] - parent[j])
-                                + f * wrap_difference(x1[j] - x2[j]),
-                        )
-                    } else {
-                        parent[j]
-                    }
-                })
-                .collect();
             controls.push((cr, f));
-            trials.push(trial);
+            trials.push(trial(rng, &donors, cr, f));
         }
 
         let trial_fitness = oracle.evaluate_batch(&trials);
         check_oracle_len(trials.len(), trial_fitness.len())?;
 
-        // Selection. A trial at least as good as its parent replaces it (ties
-        // go to the trial, as in the papers); only a strict improvement sends
-        // the parent to the archive and feeds the memory.
-        let mut successes: Vec<Success> = Vec::new();
-        for (i, (trial, value)) in trials.into_iter().zip(trial_fitness).enumerate() {
-            if value >= fitness[i] {
-                let parent = std::mem::replace(&mut population[i], trial);
-                if value > fitness[i] {
-                    let (cr, f) = controls[i];
-                    successes.push(Success {
-                        cr,
-                        f,
-                        gain: value - fitness[i],
-                    });
-                    archive.push(parent);
-                }
-                fitness[i] = value;
-            }
-        }
+        let successes = select(
+            &mut population,
+            &mut fitness,
+            trials,
+            trial_fitness,
+            &controls,
+            &mut archive,
+        );
         memory.update(&successes, variant);
 
         let target = schedule.advance();
@@ -485,8 +539,11 @@ pub(crate) fn run_with_rng<R: Rng>(
             keep_best(&mut population, &mut fitness, target);
             log::debug!("Generation {generation}: L-SHADE population reduced to {target}");
         }
-        let capacity = (variant.archive_rate() * population.len() as f64).round() as usize;
-        trim_archive(&mut archive, capacity, rng);
+        trim_archive(
+            &mut archive,
+            variant.archive_capacity(population.len()),
+            rng,
+        );
 
         // Selection never lowers a member's fitness and the reduction drops the
         // worst members, so the best fitness never falls (contract C-5).
@@ -524,6 +581,235 @@ mod tests {
 
     fn success(cr: f64, f: f64, gain: f64) -> Success {
         Success { cr, f, gain }
+    }
+
+    #[test]
+    fn variants_have_the_papers_memory_and_archive_sizes() {
+        // SHADE: H = N, an archive as large as the population. L-SHADE: H = 6,
+        // an archive of 2.6·N.
+        assert_eq!(Variant::Shade.memory_size(50), 50);
+        assert_eq!(Variant::Shade.memory_size(7), 7);
+        assert_eq!(Variant::LShade.memory_size(50), 6);
+        assert_eq!(Variant::Shade.archive_rate(), 1.0);
+        assert_eq!(Variant::LShade.archive_rate(), 2.6);
+        assert_eq!(Variant::Shade.strategy(), DeStrategy::Shade);
+        assert_eq!(Variant::LShade.strategy(), DeStrategy::LShade);
+    }
+
+    #[test]
+    fn the_archive_capacity_is_the_rate_times_the_population_rounded() {
+        assert_eq!(Variant::Shade.archive_capacity(10), 10);
+        assert_eq!(Variant::LShade.archive_capacity(10), 26);
+        assert_eq!(Variant::LShade.archive_capacity(5), 13);
+        assert_eq!(Variant::LShade.archive_capacity(4), 10); // 10.4
+        assert_eq!(Variant::Shade.archive_capacity(0), 0);
+    }
+
+    #[test]
+    fn sampled_controls_follow_the_slot_they_draw() {
+        // CR ~ N(M_CR, 0.1) clipped to [0, 1] (0 for a terminal slot) and
+        // F ~ Cauchy(M_F, 0.1) redrawn until positive and capped at 1, both
+        // from one uniformly drawn slot: reproduced draw by draw from a second
+        // RNG on the same seed, which stays in step with the first.
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        let mut memory = Memory::new(4);
+        memory.cr = vec![Some(0.2), Some(0.9), None, Some(0.5)];
+        memory.f = vec![0.3, 0.05, 0.7, 0.95];
+        let mut rng = StdRng::seed_from_u64(21);
+        let mut twin = StdRng::seed_from_u64(21);
+        let mut slots = [0usize; 4];
+        for _ in 0..4_000 {
+            let (cr, f) = memory.sample(&mut rng);
+            let slot = twin.random_range(0..4);
+            slots[slot] += 1;
+            let want_cr = match memory.cr[slot] {
+                Some(mean) => (mean + 0.1 * standard_normal(&mut twin)).clamp(0.0, 1.0),
+                None => 0.0,
+            };
+            let want_f = loop {
+                let f = memory.f[slot] + 0.1 * (PI * (twin.random::<f64>() - 0.5)).tan();
+                if f > 0.0 {
+                    break f.min(1.0);
+                }
+            };
+            assert_eq!((cr, f), (want_cr, want_f), "slot {slot}");
+        }
+        assert!(slots.iter().all(|&n| n > 800), "{slots:?}");
+    }
+
+    #[test]
+    fn sampled_controls_have_the_papers_location_and_spread() {
+        // One slot at (0.5, 0.5). CR, five deviations from either clip, has
+        // mean 0.5 and standard deviation 0.1. F is Cauchy(0.5, 0.1) drawn
+        // again while not positive, i.e. conditioned on F > 0: its quantile p
+        // is the Cauchy's at P0 + p·(1 − P0), P0 = P(Cauchy ≤ 0) (the cap at 1
+        // only moves its top 6 %).
+        let memory = Memory::new(1);
+        let draws = with_seeded_rng(Some(4), |rng| {
+            (0..40_000).map(|_| memory.sample(rng)).collect::<Vec<_>>()
+        });
+        let n = draws.len() as f64;
+        let mean = draws.iter().map(|d| d.0).sum::<f64>() / n;
+        let sd = (draws.iter().map(|d| (d.0 - mean).powi(2)).sum::<f64>() / n).sqrt();
+        assert!((mean - 0.5).abs() < 0.003, "CR mean {mean}");
+        assert!((sd - 0.1).abs() < 0.003, "CR sd {sd}");
+        let mut f: Vec<f64> = draws.iter().map(|d| d.1).collect();
+        f.sort_by(f64::total_cmp);
+        let sampled = |p: f64| f[(p * n) as usize];
+        let below_zero = 0.5 + (-0.5f64 / 0.1).atan() / PI;
+        let expected =
+            |p: f64| 0.5 + 0.1 * (PI * (below_zero + p * (1.0 - below_zero) - 0.5)).tan();
+        for p in [0.25, 0.5, 0.75] {
+            let (got, want) = (sampled(p), expected(p));
+            assert!(
+                (got - want).abs() < 0.005,
+                "F quantile {p}: {got} vs {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_f_is_drawn_again() {
+        // Choose M_F so that the first Cauchy draw lands on exactly 0: the
+        // sample must not return it (F must be positive) but draw again.
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        let mut twin = StdRng::seed_from_u64(8);
+        let _slot = twin.random_range(0..1);
+        let _cr = standard_normal(&mut twin);
+        let offset = 0.1 * (PI * (twin.random::<f64>() - 0.5)).tan();
+        let mut memory = Memory::new(1);
+        memory.f = vec![-offset];
+        assert_eq!(memory.f[0] + offset, 0.0, "the first draw is exactly 0");
+        let (_, f) = memory.sample(&mut StdRng::seed_from_u64(8));
+        assert!(f > 0.0 && f <= 1.0, "F = {f}");
+    }
+
+    #[test]
+    fn a_trial_keeps_the_parent_where_crossover_does_not_pick_the_mutant() {
+        let parent = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let pbest = [1.5, 2.5, 3.5, 4.5, 5.5];
+        let (x1, x2) = ([0.4; 5], [0.2; 5]);
+        let donors = Donors {
+            parent: &parent,
+            pbest: &pbest,
+            x1: &x1,
+            x2: &x2,
+        };
+        // The mutant coordinate: parent + 0.5·0.5 + 0.5·0.2.
+        let mutant = |j: usize| parent[j] + 0.25 + 0.5 * (0.4 - 0.2);
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        with_seeded_rng(Some(6), |rng| {
+            // CR = 0: exactly one coordinate is the mutant's, drawn uniformly.
+            let mut forced = [0usize; 5];
+            for _ in 0..2_500 {
+                let t = trial(rng, &donors, 0.0, 0.5);
+                let changed: Vec<usize> = (0..5).filter(|&j| t[j] != parent[j]).collect();
+                assert_eq!(changed.len(), 1, "{t:?}");
+                let j = changed[0];
+                assert!(close(t[j], mutant(j)), "{t:?}");
+                forced[j] += 1;
+            }
+            assert!(forced.iter().all(|&n| n > 400), "{forced:?}");
+            // CR = 1: every coordinate is the mutant's.
+            let t = trial(rng, &donors, 1.0, 0.5);
+            assert!((0..5).all(|j| close(t[j], mutant(j))), "{t:?}");
+            // CR = 0.5: about half, plus the forced one.
+            let mutated: usize = (0..2_000)
+                .map(|_| {
+                    let t = trial(rng, &donors, 0.5, 0.5);
+                    (0..5).filter(|&j| t[j] != parent[j]).count()
+                })
+                .sum();
+            let share = mutated as f64 / 10_000.0;
+            assert!((share - 0.6).abs() < 0.03, "mutated share {share}");
+        });
+    }
+
+    #[test]
+    fn a_trial_moves_along_the_shortest_arcs_and_wraps() {
+        // pbest is 0.2 below the parent across the 0/2π seam; x1 − x2 is
+        // +0.3 across it. F = 1: 0.1 − 0.2 + 0.3 = 0.2.
+        let donors = Donors {
+            parent: &[0.1],
+            pbest: &[TAU - 0.1],
+            x1: &[0.15],
+            x2: &[TAU - 0.15],
+        };
+        let t = with_seeded_rng(Some(1), |rng| trial(rng, &donors, 1.0, 1.0));
+        assert!((t[0] - 0.2).abs() < 1e-12, "{t:?}");
+        // Below 0 the result wraps to just under 2π.
+        let donors = Donors {
+            parent: &[0.1],
+            pbest: &[TAU - 0.2],
+            x1: &[0.0],
+            x2: &[0.0],
+        };
+        let t = with_seeded_rng(Some(1), |rng| trial(rng, &donors, 1.0, 1.0));
+        assert!((t[0] - (TAU - 0.2)).abs() < 1e-12, "{t:?}");
+        // No coordinates, no draws to fail on.
+        let empty = Donors {
+            parent: &[],
+            pbest: &[],
+            x1: &[],
+            x2: &[],
+        };
+        assert!(with_seeded_rng(Some(1), |rng| trial(rng, &empty, 0.5, 0.5)).is_empty());
+    }
+
+    #[test]
+    fn selection_replaces_on_ties_but_only_feeds_strict_improvements() {
+        let mut population = vec![vec![0.0], vec![1.0], vec![2.0], vec![3.0]];
+        let mut fitness = vec![1.0, 1.0, 1.0, f64::NAN];
+        let trials = vec![vec![10.0], vec![11.0], vec![12.0], vec![13.0]];
+        let controls = [(0.1, 0.2), (0.3, 0.4), (0.5, 0.6), (0.7, 0.8)];
+        let mut archive = vec![vec![-1.0]];
+        // Better, tied, worse, and better than a NaN parent (NaN compares
+        // false: the parent stays).
+        let successes = select(
+            &mut population,
+            &mut fitness,
+            trials,
+            vec![3.5, 1.0, 0.5, 9.0],
+            &controls,
+            &mut archive,
+        );
+        assert_eq!(
+            population,
+            vec![vec![10.0], vec![11.0], vec![2.0], vec![3.0]]
+        );
+        assert_eq!(fitness[..3], [3.5, 1.0, 1.0]);
+        assert!(fitness[3].is_nan());
+        // Only the strict improvement: its controls, its gain, its parent.
+        assert_eq!(successes.len(), 1);
+        let s = &successes[0];
+        assert_eq!((s.cr, s.f, s.gain), (0.1, 0.2, 2.5));
+        assert_eq!(archive, vec![vec![-1.0], vec![0.0]]);
+    }
+
+    #[test]
+    fn gain_weights_fall_back_to_equal_for_zero_gains() {
+        let weights = gain_weights(&[success(0.5, 0.5, 0.0), success(0.5, 0.5, 0.0)]);
+        assert_eq!(weights, vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn distinct_indices_exclude_both_whatever_their_order() {
+        with_seeded_rng(Some(3), |rng| {
+            for (a, b) in [(1, 4), (4, 1), (0, 5), (2, 3)] {
+                let mut seen = [0usize; 6];
+                for _ in 0..3_000 {
+                    seen[index_except_two(rng, 6, a, b)] += 1;
+                }
+                assert!(
+                    seen.iter()
+                        .enumerate()
+                        .all(|(i, &n)| (i == a || i == b) == (n == 0)),
+                    "({a}, {b}): {seen:?}"
+                );
+            }
+        });
     }
 
     #[test]

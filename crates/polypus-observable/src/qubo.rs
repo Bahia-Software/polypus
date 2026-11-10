@@ -358,6 +358,58 @@ mod tests {
     }
 
     #[test]
+    fn from_matrix_adds_both_triangles_of_an_off_diagonal_pair() {
+        // Q = [[0, 1], [2, 0]]: x0·x1 appears as Q_01 and as Q_10, so its weight
+        // is 1 + 2 = 3, and only the lower entry tells a sum from a difference.
+        let m = QuboObservable::from_matrix(&[vec![0.0, 1.0], vec![2.0, 0.0]], 1.0).unwrap();
+        let ev = m
+            .expectation_batch(&[
+                counts(&[("11", 1)]),
+                counts(&[("01", 1)]),
+                counts(&[("10", 1)]),
+            ])
+            .unwrap();
+        assert_eq!(ev, vec![3.0, 0.0, 0.0]);
+        // A lower triangle alone is a quadratic term too.
+        let lower = QuboObservable::from_matrix(&[vec![0.0, 0.0], vec![2.5, 0.0]], 1.0).unwrap();
+        assert_eq!(
+            lower.expectation_batch(&[counts(&[("11", 1)])]).unwrap(),
+            vec![2.5]
+        );
+    }
+
+    #[test]
+    fn scale_multiplies_every_value() {
+        // f = 1 + 2·x0 + 4·x0·x1, scale = 2 (not ±1, where multiplying and
+        // dividing by the scale agree).
+        let obs = QuboObservable::new(2, vec![(0, 2.0)], vec![(0, 1, 4.0)], 1.0, 2.0).unwrap();
+        let ev = obs
+            .expectation_batch(&[
+                counts(&[("00", 1)]),
+                counts(&[("01", 1)]),
+                counts(&[("11", 1)]),
+            ])
+            .unwrap();
+        assert_eq!(ev, vec![2.0, 6.0, 14.0]);
+        // The matrix form takes the same scale.
+        let m = QuboObservable::from_matrix(&[vec![3.0]], 0.5).unwrap();
+        assert_eq!(
+            m.expectation_batch(&[counts(&[("1", 1)])]).unwrap(),
+            vec![1.5]
+        );
+    }
+
+    #[test]
+    fn num_vars_is_the_declared_width() {
+        for n in [2, 3, 70] {
+            let obs = QuboObservable::new(n, vec![], vec![], 0.0, 1.0).unwrap();
+            assert_eq!(obs.num_vars(), n);
+        }
+        let m = QuboObservable::from_matrix(&vec![vec![0.0; 4]; 4], 1.0).unwrap();
+        assert_eq!(m.num_vars(), 4);
+    }
+
+    #[test]
     fn handles_more_than_64_variables() {
         // A 70-bit key with a linear term on the highest index exercises the
         // byte-indexed path (a u64 parse would overflow).

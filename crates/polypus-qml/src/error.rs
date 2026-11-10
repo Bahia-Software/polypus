@@ -113,6 +113,13 @@ pub enum ValidationError {
     /// is rejected at compile time rather than discovered as an optimizer that
     /// "converges" trivially.
     NoTrainableParams,
+    /// A layer reserves more trainable parameters than fit in a `usize`, on
+    /// its own or after those of the layers before it (only a huge `reps` gets
+    /// there). Raised by the layer's `plan`, which then reserves nothing.
+    TooManyParams {
+        /// The layer (0-based, in the model) whose parameters do not fit.
+        layer: usize,
+    },
     /// A layer needs more active qubits than are available at its position in
     /// the model. Raised by an encoder whose feature count exceeds the number
     /// of active qubits.
@@ -141,6 +148,27 @@ pub enum ValidationError {
     /// [`PoolLayer`](crate::PoolLayer)'s `plan`.
     PoolNeedsTwoQubits {
         /// The number of active qubits available at this position.
+        active: usize,
+    },
+    /// A [`StronglyEntanglingAnsatz`](crate::StronglyEntanglingAnsatz) was
+    /// given explicit `ranges` whose count is not its number of layers: there
+    /// must be exactly one range per layer. Raised by its `plan`.
+    StronglyEntanglingRangesLength {
+        /// The number of layers (`reps`).
+        reps: usize,
+        /// The number of ranges given.
+        got: usize,
+    },
+    /// A [`StronglyEntanglingAnsatz`](crate::StronglyEntanglingAnsatz) range
+    /// lies outside `1..=n-1` for the `n` active qubits at its position (a
+    /// range of `0` or `n` would entangle a qubit with itself). Raised by its
+    /// `plan`, and only for `n ≥ 2`: one active qubit gets no entanglers.
+    StronglyEntanglingRangeOutOfBounds {
+        /// The layer (0-based) the range belongs to.
+        layer: usize,
+        /// The offending range.
+        range: usize,
+        /// The number of active qubits at this position.
         active: usize,
     },
     /// An [`AmplitudeEncoder`](crate::AmplitudeEncoder) was placed anywhere but
@@ -326,6 +354,10 @@ impl fmt::Display for ValidationError {
                 f,
                 "model has no trainable parameters: add at least one ansatz layer"
             ),
+            ValidationError::TooManyParams { layer } => write!(
+                f,
+                "layer {layer} needs more trainable parameters than fit in a usize (reduce reps)"
+            ),
             ValidationError::NotEnoughQubits { needed, active } => write!(
                 f,
                 "layer needs {needed} active qubit(s) but only {active} are available"
@@ -344,6 +376,19 @@ impl fmt::Display for ValidationError {
             ValidationError::PoolNeedsTwoQubits { active } => write!(
                 f,
                 "pooling layer needs at least 2 active qubit(s) but only {active} are available"
+            ),
+            ValidationError::StronglyEntanglingRangesLength { reps, got } => write!(
+                f,
+                "strongly entangling ranges has {got} value(s), but reps is {reps}: give one range per layer"
+            ),
+            ValidationError::StronglyEntanglingRangeOutOfBounds {
+                layer,
+                range,
+                active,
+            } => write!(
+                f,
+                "strongly entangling range {range} of layer {layer} is out of bounds: with {active} active qubit(s) every range must lie in 1..={}",
+                active.saturating_sub(1)
             ),
             ValidationError::AmplitudeEncoderNotFirst => write!(
                 f,
@@ -780,10 +825,35 @@ mod tests {
     }
 
     #[test]
+    fn too_many_params_displays_its_layer() {
+        let s = ValidationError::TooManyParams { layer: 3 }.to_string();
+        assert!(s.contains("layer 3") && s.contains("usize"), "{s}");
+    }
+
+    #[test]
     fn pool_needs_two_qubits_displays_its_value() {
         assert!(ValidationError::PoolNeedsTwoQubits { active: 1 }
             .to_string()
             .contains('1'));
+    }
+
+    #[test]
+    fn strongly_entangling_variants_display_their_values() {
+        let s = ValidationError::StronglyEntanglingRangesLength { reps: 3, got: 2 }.to_string();
+        assert!(s.contains("reps is 3") && s.contains("2 value(s)"), "{s}");
+        let s = ValidationError::StronglyEntanglingRangeOutOfBounds {
+            layer: 1,
+            range: 4,
+            active: 4,
+        }
+        .to_string();
+        assert!(
+            s.contains("range 4")
+                && s.contains("layer 1")
+                && s.contains("4 active")
+                && s.contains("1..=3"),
+            "{s}"
+        );
     }
 
     #[test]
