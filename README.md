@@ -33,7 +33,7 @@
 Polypus splits shots and optimizer populations across `n_qpus` and runs them on a local simulator, on CESGA's CUNQA distributed QPUs or on the QMIO quantum processor. Changing the target means changing one argument, not the algorithm code.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Bahia-Software/polypus/main/assets/overview.svg" alt="Circuits enter the Python API; the Rust core plans the work and runs it on local Aer, the native simulator, CUNQA or QMIO" width="820">
+  <img src="https://raw.githubusercontent.com/Bahia-Software/polypus/main/assets/overview.svg" alt="Your circuit enters the Python API; the Rust core splits shots and optimizer populations across n QPUs and runs them on local simulators (Qiskit Aer, native Rust), on an HPC cluster through CUNQA, or on the QMIO quantum computer" width="820">
 </p>
 
 ## Why Polypus
