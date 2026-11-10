@@ -247,10 +247,10 @@ The [documentation site](https://bahia-software.github.io/polypus/) hosts the [u
 
 ## Architecture
 
-Polypus is a Cargo workspace of 14 crates, all published on [crates.io](https://crates.io/crates/polypus); only the three PyO3 crates link against Python, the rest can be used from any Rust project.
+Polypus is a Cargo workspace of 14 crates, all published on [crates.io](https://crates.io/crates/polypus). The diagram follows one training run through them; only `polypus`, `polypus-evaluation` and `polypus-infrastructure` link against Python, and the rest can be used from any Rust project.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Bahia-Software/polypus/main/assets/architecture.svg" alt="Crate graph: polypus depends on polypus-evaluation, then polypus-orchestration, which uses polypus-infrastructure and polypus-optimizers; polypus-infrastructure uses polypus-backend, polypus-sim and polypus-observable; polypus-sim uses polypus-circuit" width="760">
+  <img src="https://raw.githubusercontent.com/Bahia-Software/polypus/main/assets/architecture.svg" alt="A training run: polypus.train starts a loop in polypus-orchestration; the optimizer proposes candidates, polypus-circuit binds one circuit per candidate, the planner in polypus-backend splits them across n_qpus, polypus-infrastructure runs them in parallel on Aer, the native simulator, CUNQA or QMIO, and polypus-observable turns counts into costs for the next iteration" width="820">
 </p>
 
 <details>
