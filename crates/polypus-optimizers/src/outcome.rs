@@ -33,7 +33,7 @@ pub enum StopReason {
     /// test that fired on the same iteration.
     Callback,
     /// CMA-ES's search distribution degenerated (non-finite, ill-conditioned,
-    /// collapsed or diverging) with no restart left.
+    /// collapsed or diverging) with no restart left, or no budget for one.
     Degenerate,
     /// The external optimizer ended the run itself, with an empty `ask`.
     OptimizerFinished,

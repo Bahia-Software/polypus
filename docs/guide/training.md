@@ -54,6 +54,8 @@ Ctrl+C stops the optimization promptly and raises `KeyboardInterrupt`, with or w
 | `iterations_run` | Iterations actually run, early stopping included |
 | `fitness_history` | `list[float]`, the convergence curve: the best fitness so far after each iteration run, so it never decreases and has `iterations_run` entries. It ends at `best_fitness`, except when a gradient-free optimizer trains on minibatches: its curve holds the minibatch estimates it steered by, while `best_fitness` is re-scored on the whole training set |
 | `converged` | Whether the convergence criterion was met |
+| `stop_reason` | What ended the run: `"iteration_budget"` (`generations`, `max_iters` or `sweeps` used up), `"evaluation_budget"` (L-SHADE's budget, `External`'s `max_evaluations`), `"fitness_tolerance"` (the best fitness stagnated: DE, SHADE, L-SHADE, CMA-ES, Adam, Rotosolve), `"parameter_tolerance"` (PSO's swarm collapsed), `"degenerate"` (CMA-ES's search distribution degenerated), `"optimizer_finished"` (`External`'s `ask()` proposed nothing) or `"callback"` |
+| `n_evaluations` | Candidates scored as a fitness, counted like `TrainProgress.evaluations`, plus, when a gradient-free optimizer trains on minibatches, the re-score of `best_params` on the whole training set. The final re-evaluation is not counted |
 | `final_params` | With `final_shots`, the re-evaluated candidate with the best value; otherwise `None` |
 | `final_fitness` | With `final_shots`, its value with `final_shots` shots; otherwise `None` |
 | `seed` | The effective seed; pass it back as `seed=...` to reproduce the run |
@@ -351,8 +353,8 @@ The values are fitness to **maximise**, as for every Polypus optimizer. Optuna m
 
 **The budget.** `max_evaluations`, an integer `>= 1`, is the most candidates a run evaluates. It is required, since some libraries never say they are done. The run stops:
 
-- when `ask()` returns `None` or an empty batch, and then `converged` is `True`;
-- when the budget is spent, without asking again, or before a batch that would take the run past `max_evaluations`: that batch is neither evaluated nor told, so the budget is never exceeded, and `converged` is `False`.
+- when `ask()` returns `None` or an empty batch, and then `converged` is `True` and `stop_reason` is `"optimizer_finished"`;
+- when the budget is spent, without asking again, or before a batch that would take the run past `max_evaluations`: that batch is neither evaluated nor told, so the budget is never exceeded, `converged` is `False` and `stop_reason` is `"evaluation_budget"`.
 
 A first `ask()` that proposes nothing, and a first batch larger than `max_evaluations`, raise `ValueError`: nothing was evaluated, so there is no result. With an optimizer that asks for a fixed number of candidates per batch, make `max_evaluations` a multiple of it, or the remainder is not spent.
 
@@ -627,7 +629,7 @@ result.final_fitness  # its value with 4096 shots
 | `best_params` | `list[float]`, the parameters of `best_fitness`; a new list on every access |
 | `evaluations` | Candidates scored so far (see below) |
 
-Returning `True` stops the run after that iteration, and `train` returns the `TrainResult` reached so far: `iterations_run` is that iteration, `converged` is `False`, and `best_params` and `best_fitness` are the ones the callback saw last (with `batch_size` in `qml.Model.fit`, except for `Adam`, `best_fitness` is then re-scored on the whole training set, as after any run). Nothing more is evaluated, except the [final re-evaluation](#final-re-evaluation), which is still sent when `final_shots` is given. Returning `None` (a function without `return`) or `False` lets the run go on; a NumPy `bool_` counts as a `bool`. Any other return value, such as `1` or `0.5`, raises `TypeError`, so that a mistake does not go unnoticed.
+Returning `True` stops the run after that iteration, and `train` returns the `TrainResult` reached so far: `iterations_run` is that iteration, `converged` is `False`, `stop_reason` is `"callback"`, and `best_params` and `best_fitness` are the ones the callback saw last (with `batch_size` in `qml.Model.fit`, except for `Adam`, `best_fitness` is then re-scored on the whole training set, as after any run). Nothing more is evaluated, except the [final re-evaluation](#final-re-evaluation), which is still sent when `final_shots` is given. Returning `None` (a function without `return`) or `False` lets the run go on; a NumPy `bool_` counts as a `bool`. Any other return value, such as `1` or `0.5`, raises `TypeError`, so that a mistake does not go unnoticed.
 
 ```python
 import json

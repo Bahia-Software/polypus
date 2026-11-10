@@ -205,9 +205,11 @@ pub struct TrainOutcome {
     pub optimization: OptimizationOutcome,
     /// The final batch, when the flow had [`final_shots`](TrainFlow::final_shots).
     pub final_evaluation: Option<FinalEvaluation>,
-    /// Candidates the optimizer had scored as a fitness, counted as
-    /// [`TrainProgress::evaluations`](crate::TrainProgress::evaluations) is:
-    /// the final batch is not included.
+    /// Candidates scored as a fitness, counted as
+    /// [`TrainProgress::evaluations`](crate::TrainProgress::evaluations) is,
+    /// plus one under a minibatch for a gradient-free optimizer: the re-score
+    /// of `best_params` on every sample after its last iteration. The final
+    /// batch is not included.
     pub n_evaluations: u64,
 }
 
@@ -787,6 +789,8 @@ mod tests {
         built: Arc<std::sync::atomic::AtomicBool>,
         fail_at: Option<usize>,
         cancel_at: Option<usize>,
+        /// Also build a full-dataset view, as a minibatched QML run does.
+        minibatch: bool,
     }
 
     impl OracleFactory for NoisyFactory {
@@ -797,15 +801,21 @@ mod tests {
             errors: &OracleErrorSlot,
         ) -> Oracles {
             self.built.store(true, std::sync::atomic::Ordering::SeqCst);
-            Box::new(NoisyOracle {
-                calls: self.calls,
+            let oracle = |calls| NoisyOracle {
+                calls,
                 scored: std::sync::atomic::AtomicU64::new(0),
                 errors: errors.clone(),
                 cancel: cancel.clone(),
                 fail_at: self.fail_at,
                 cancel_at: self.cancel_at,
-            })
-            .into()
+            };
+            Oracles {
+                evaluation: Box::new(oracle(Arc::clone(&self.calls))),
+                gradient: None,
+                full_evaluation: self.minibatch.then(|| {
+                    Box::new(oracle(Arc::clone(&self.calls))) as Box<dyn EvaluationOracle>
+                }),
+            }
         }
     }
 
@@ -1330,6 +1340,30 @@ mod tests {
                 let last = reports.lock().unwrap().last().unwrap().2;
                 assert_eq!(watched.n_evaluations, last, "{name}");
             }
+        }
+    }
+
+    /// Under a minibatch, a gradient-free optimizer's `best_params` is
+    /// re-scored on every sample after its last report, and that candidate is
+    /// counted; Adam scores the full set during the run.
+    #[test]
+    fn n_evaluations_counts_the_minibatch_rescore() {
+        for (name, method) in every_method() {
+            let factory = NoisyFactory {
+                minibatch: true,
+                ..NoisyFactory::default()
+            };
+            let calls = Arc::clone(&factory.calls);
+            let reports = Reports::default();
+            let outcome = noisy_run_watched(&config().id, method, factory, None, None, |_| {
+                Some(recording(&reports, &calls, None))
+            })
+            .unwrap_or_else(|_| panic!("{name}: the run succeeds"));
+            let scored: usize = calls.lock().unwrap().iter().map(|(c, ..)| c.len()).sum();
+            assert_eq!(outcome.n_evaluations, scored as u64, "{name}");
+            let last = reports.lock().unwrap().last().unwrap().2;
+            let rescore = u64::from(name != "adam");
+            assert_eq!(outcome.n_evaluations, last + rescore, "{name}");
         }
     }
 

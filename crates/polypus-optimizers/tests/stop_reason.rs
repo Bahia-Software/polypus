@@ -337,20 +337,68 @@ fn an_observer_stop_is_reported_as_callback_and_wins_over_a_test() {
     }
 }
 
+/// A stop on a run's last iteration wins too: on the budget's last
+/// iteration, and on the iteration where the optimizer's own test fires.
 #[test]
 fn an_observer_stop_on_the_last_iteration_is_still_callback() {
     for kind in KINDS {
-        let budget = run(kind, Mode::Budget, None).iterations_run;
-        let mut stop_last = |report: &IterationReport<'_>| {
-            if report.iteration == budget {
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
-            }
-        };
-        let outcome = run(kind, Mode::Budget, Some(&mut stop_last));
-        assert_eq!(outcome.stop_reason, StopReason::Callback, "{kind:?}");
+        for mode in [Mode::Budget, Mode::Tolerance] {
+            let last = run(kind, mode, None).iterations_run;
+            let mut stop_last = |report: &IterationReport<'_>| {
+                if report.iteration == last {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            };
+            let outcome = run(kind, mode, Some(&mut stop_last));
+            assert_eq!(outcome.iterations_run, last, "{kind:?} {mode:?}");
+            assert_eq!(
+                outcome.stop_reason,
+                StopReason::Callback,
+                "{kind:?} {mode:?}"
+            );
+            assert!(!outcome.converged, "{kind:?} {mode:?}");
+        }
     }
+}
+
+/// CMA-ES with restarts: every run stagnates on its second generation
+/// (`patience = 1`, a tolerance no gain reaches) and restarts.
+fn cmaes_with_restarts(generations: u32) -> OptimizationOutcome {
+    AlgorithmCmaEs
+        .optimize(AlgorithmCmaEsArgs {
+            oracle: Box::new(Scored(sphere)),
+            population_size: None,
+            generations,
+            dimensions: 3,
+            sigma0: AlgorithmCmaEs::DEFAULT_SIGMA0,
+            tolerance: 1e9,
+            patience: 1,
+            restarts: 5,
+            seed: Some(7),
+            initial_point: None,
+        })
+        .expect("valid arguments optimize successfully")
+}
+
+#[test]
+fn cmaes_restarts_that_use_up_the_budget_report_it() {
+    // Five runs of two generations, then the sixth gets the eleventh only.
+    let outcome = cmaes_with_restarts(11);
+    assert_eq!(outcome.iterations_run, 11);
+    assert_eq!(outcome.stop_reason, StopReason::IterationBudget);
+    assert!(!outcome.converged);
+}
+
+#[test]
+fn a_cmaes_stop_on_the_last_generation_reports_its_cause() {
+    // The fifth run stagnates on generation 10, the last: no budget is left
+    // for a restart, so the stagnation ends the optimisation.
+    let outcome = cmaes_with_restarts(10);
+    assert_eq!(outcome.iterations_run, 10);
+    assert_eq!(outcome.stop_reason, StopReason::FitnessTolerance);
+    assert!(outcome.converged);
 }
 
 #[test]

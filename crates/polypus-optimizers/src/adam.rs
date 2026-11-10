@@ -361,6 +361,9 @@ impl AlgorithmAdam {
             // Judged on the θs measured so far; the θ this step reached is
             // measured below, like the last iteration's.
             converged = fitness_stagnated(&fitness_history, tolerance, patience, iteration);
+            if converged {
+                stop_reason = StopReason::FitnessTolerance;
+            }
             let last = converged || iterations_run == max_iters as usize;
 
             // ── 5. On the last iteration, measure the θ the step reached ──────
@@ -372,9 +375,6 @@ impl AlgorithmAdam {
                 let fitness =
                     measure_last_point(oracle.as_ref(), &theta, &mut best, &mut fitness_history)?;
                 log::debug!("Final θ: fitness {fitness:.4}");
-                if converged {
-                    stop_reason = StopReason::FitnessTolerance;
-                }
             }
 
             // ── 6. Report; a stop asked for here wins over the stagnation stop ─

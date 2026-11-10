@@ -1906,7 +1906,9 @@ reference worker receives) and the `CallSeeds` tests in
   `iterations_run` (int), `converged` (bool), `fitness_history`
   (`list[float]`), `stop_reason` (str, the snake_case name of what ended the
   optimizer's loop) and `n_evaluations` (int, the candidates scored as a
-  fitness, the final batch not included) — and the final re-evaluation, `final_params`
+  fitness, as `TrainProgress.evaluations` counts them, plus the re-score of
+  `best_params` under a minibatch, the final batch not included) — and the
+  final re-evaluation, `final_params`
   (`list[float] | None`) and `final_fitness` (`float | None`), both `None`
   without `final_shots` (C-5), plus `seed` (int, the effective
   seed used) and `id` (str, the effective run id: the caller-supplied `id`
