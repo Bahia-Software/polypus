@@ -98,7 +98,7 @@ Instead of the `infrastructure`/`backend` strings and their provider arguments, 
 result = polypus.run_quantum_circuit(bell, shots=1000, target=polypus.Native(), seed=7)
 ```
 
-`run_quantum_circuit`, `train`, `qml.train` and `qml.predict` accept `target=`. With it, passing `infrastructure`, or `backend`, `sim_method`, `noise_model`, `fusion`, `nodes`, `cores_per_qpu` or `walltime` with a value other than its default, raises `ConfigurationError`. `options=` still applies: it configures `Qmio` (for example its `endpoint`) and `Registered`, but not both `Registered(..., options=...)` and `options=` at once. The strings remain as shorthand, and a seeded run with `target=` gives the same result as the equivalent string call.
+`run_quantum_circuit`, `train`, `qml.train` and `qml.predict` accept `target=`. With it, passing `infrastructure`, or `backend`, `sim_method`, `noise_model`, `fusion`, `nodes`, `cores_per_qpu` or `walltime` with a value other than its default, raises `ConfigurationError`; a value equal to the default (such as `backend="aer"`) is ignored. In `train` and `qml.train`, whose `nodes` and `cores_per_qpu` have no default, passing either at all is an error. `options=` still applies: it configures `Qmio` (for example its `endpoint`) and `Registered`, but not both `Registered(..., options=...)` and `options=` at once. The strings remain as shorthand, and a seeded run with `target=` gives the same counts as the equivalent string call; `RunResult.backend` and `infrastructure` are those of the "Same as" column.
 
 ## Tracing a circuit run
 

@@ -81,6 +81,11 @@ __all__ = [
     "Ising",
     "CachedCost",
     "SampleCost",
+    "Aer",
+    "Native",
+    "Cunqa",
+    "Qmio",
+    "Registered",
     "train",
     "run_quantum_circuit",
     "statevector",
@@ -567,9 +572,12 @@ class SampleCost:
     def __new__(cls, cost_fn: Callable[[_Counts, float], float]) -> SampleCost: ...
 
 # ── Execution targets ───────────────────────────────────────────────────────
+# Each defines `__eq__`, so (as for `Param`) it is unhashable at runtime.
 
 @final
 class Aer:
+    __hash__: ClassVar[None]  # type: ignore[assignment]
+    def __eq__(self, value: object, /) -> bool: ...
     def __new__(
         cls, sim_method: str = "automatic", noise_model: Optional[NoiseModel] = None
     ) -> Aer: ...
@@ -580,12 +588,16 @@ class Aer:
 
 @final
 class Native:
+    __hash__: ClassVar[None]  # type: ignore[assignment]
+    def __eq__(self, value: object, /) -> bool: ...
     def __new__(cls, fusion: Optional[bool] = None) -> Native: ...
     @property
     def fusion(self) -> Optional[bool]: ...
 
 @final
 class Cunqa:
+    __hash__: ClassVar[None]  # type: ignore[assignment]
+    def __eq__(self, value: object, /) -> bool: ...
     def __new__(
         cls,
         nodes: int = 1,
@@ -604,12 +616,16 @@ class Cunqa:
 
 @final
 class Qmio:
+    __hash__: ClassVar[None]  # type: ignore[assignment]
+    def __eq__(self, value: object, /) -> bool: ...
     def __new__(cls, program_format: str = "openqasm") -> Qmio: ...
     @property
     def program_format(self) -> Literal["openqasm", "qir", "qir_bitcode"]: ...
 
 @final
 class Registered:
+    __hash__: ClassVar[None]  # type: ignore[assignment]
+    def __eq__(self, value: object, /) -> bool: ...
     def __new__(cls, name: str, options: Optional[_Options] = None) -> Registered: ...
     @property
     def name(self) -> str: ...
