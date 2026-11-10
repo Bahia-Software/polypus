@@ -380,10 +380,15 @@ boundary stays out-of-process and explicit; see
   arm the `PR_SET_PDEATHSIG` orphan guard on the worker child so it cannot outlive
   a hard kill of the host process (a real HPC requirement — an orphaned worker
   would hold a SLURM node/QPU). This one is **not** a performance optimisation, so
-  the "benchmark that justifies it" rule does not apply; it is unavoidable because
-  `Command::pre_exec` is an `unsafe fn` in std with no safe equivalent, and
-  `PR_SET_PDEATHSIG` resets across `fork` so it can only be armed in the child,
-  between fork and exec — which is exactly what `pre_exec` is for. The block's body
+  the "benchmark that justifies it" rule does not apply; it is unavoidable *within
+  the host process*, because `Command::pre_exec` is an `unsafe fn` in std with no
+  safe equivalent, and `PR_SET_PDEATHSIG` resets across `fork` so it can only be
+  armed in the child, between fork and exec — which is exactly what `pre_exec` is
+  for. The only `unsafe`-free alternative, evaluated in issue #557, moves the arming
+  out of the process: a separate launcher binary that arms the signal, checks its
+  parent and `exec`s the worker in its place. It was rejected because that binary
+  would have to ship in the wheel and be located at run time, and Rust users of the
+  crate would have to build it and point the bridge at it. The block's body
   is itself safe: it calls `nix`'s audited `set_pdeathsig` and `getppid` wrappers
   (async-signal-safe `prctl(2)` / `getppid(2)`) and captures only a `Copy` pid, with
   no allocation, locks or logging between fork and exec. It is not hand-written FFI

@@ -562,6 +562,21 @@ which covers a clean exit but not a hard crash of the parent. If you run this of
 Linux and need crash-proof orphan cleanup, wrap the run in your platform's
 job-object / process-group equivalent.
 
+**What the guard costs at spawn.** Arming the guard needs code to run in the child
+between `fork` and `exec`, so with `arm_pdeathsig` on, std launches the worker with
+`fork` instead of `posix_spawn`, and `fork` copies the page tables of the whole host
+process. Building the backend therefore takes longer the more resident memory the
+Rust/Python process holds: about 45–50 ms per GB, measured in issue #557 on a 16-CPU
+node — the launch takes around 1 ms from a small host and about 100 ms from a 2 GB
+one, on top of the worker's own start-up (a Python interpreter adds some 25 ms). The
+cost is paid once per spawn (each backend build or rebuild), not per call. Turning the
+guard off (`"arm_pdeathsig": "false"`, or `SubprocessConfig::arm_pdeathsig = false`
+from Rust) avoids it at the price of the guard; under SLURM, `proctrack/cgroup` still
+reaps the worker when the step ends (see [Running under SLURM](#running-under-slurm)),
+but only then: if the host dies and the step carries on (a batch script that goes on
+to other work, a step with several tasks), the orphaned worker keeps its CPU and
+memory until the step ends.
+
 ### Running under SLURM
 
 The worker is an **ordinary child process inside your job step**: it shares the
