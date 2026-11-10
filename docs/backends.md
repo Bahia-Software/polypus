@@ -887,7 +887,7 @@ in Rust). Up to 0.7 an unset endpoint silently fell back to a hard-coded private
 #### QMIO transport threat model
 
 The ZeroMQ link to QMIO uses the ZMTP `NULL` mechanism: no encryption and no
-authentication in either direction. The pinned `zeromq` 0.6.0 crate implements only `NULL`
+authentication in either direction. The `zeromq` 0.7.0 crate implements only `NULL`
 (it recognises the `CURVE` name in a peer's greeting but has no `CURVE` handshake or API),
 so the backend cannot do better without a different client or an upstream change.
 

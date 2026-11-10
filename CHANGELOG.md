@@ -171,6 +171,10 @@ Entries were curated from the Conventional Commits history. Releases before
 - CUNQA: the seal looks up a family's QPUs with `get_QPUs` once instead of
   once per wave, and looks them up again after `qdrop` or a failed wave
   (#437).
+- **BREAKING (build):** the `qmio` feature needs Rust 1.89: `zeromq` goes from
+  0.6 to 0.7, which raised its MSRV. Default features keep Rust 1.85. The
+  QMIO reply-size cap is still checked after the reply is received; 0.7 has
+  no receive size limit yet (#383).
 
 ### Fixed
 - `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a

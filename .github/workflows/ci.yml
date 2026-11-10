@@ -239,8 +239,12 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Check (workspace, default features)
         run: cargo check --locked --workspace --all-targets
-      - name: Check (qmio backend)
+      # The qmio feature's own minimum: zeromq 0.7 needs Rust 1.89.
+      - name: Check (qmio backend, Rust 1.89)
+        env:
+          RUSTUP_TOOLCHAIN: "1.89.0"
         run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
           cargo check --locked -p polypus-infrastructure --features qmio --all-targets
           cargo check --locked -p polypus --features qmio --all-targets
 
