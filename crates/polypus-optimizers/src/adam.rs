@@ -20,7 +20,7 @@
 use crate::error::OptimizerError;
 use crate::objective::{EvaluationOracle, GradientOracle};
 use crate::observer::{IterationObserver, IterationReport};
-use crate::outcome::{OptimizationOutcome, Optimizer};
+use crate::outcome::{OptimizationOutcome, Optimizer, StopReason};
 use crate::rng::with_seeded_rng;
 use crate::util::{
     check_initial_point, check_oracle_len, fitness_stagnated, measure_last_point, BestMeasured,
@@ -299,6 +299,7 @@ impl AlgorithmAdam {
         let mut best = BestMeasured::new();
         let mut iterations_run = 0usize;
         let mut converged = false;
+        let mut stop_reason = StopReason::IterationBudget;
         // Best fitness after each iteration (see
         // `OptimizationOutcome::fitness_history`).
         let mut fitness_history: Vec<f64> = Vec::with_capacity(max_iters as usize);
@@ -371,6 +372,9 @@ impl AlgorithmAdam {
                 let fitness =
                     measure_last_point(oracle.as_ref(), &theta, &mut best, &mut fitness_history)?;
                 log::debug!("Final θ: fitness {fitness:.4}");
+                if converged {
+                    stop_reason = StopReason::FitnessTolerance;
+                }
             }
 
             // ── 6. Report; a stop asked for here wins over the stagnation stop ─
@@ -383,6 +387,7 @@ impl AlgorithmAdam {
                 // The θ this step reached stays unmeasured, unless this was
                 // the last iteration anyway.
                 converged = false;
+                stop_reason = StopReason::Callback;
                 break;
             }
             if last {
@@ -399,6 +404,7 @@ impl AlgorithmAdam {
             iterations_run,
             converged,
             fitness_history,
+            stop_reason,
         })
     }
 }

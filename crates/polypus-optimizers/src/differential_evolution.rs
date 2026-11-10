@@ -3,7 +3,7 @@
 use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
 use crate::observer::{IterationObserver, IterationReport, Unobserved};
-use crate::outcome::{OptimizationOutcome, Optimizer};
+use crate::outcome::{OptimizationOutcome, Optimizer, StopReason};
 use crate::rng::with_seeded_rng;
 use crate::shade;
 use crate::util::{
@@ -433,6 +433,7 @@ impl AlgorithmDifferentialEvolution {
 
         let mut iterations_run = 0usize;
         let mut converged = false;
+        let mut stop_reason = StopReason::IterationBudget;
         // Best fitness at the end of each generation; drives the fitness-
         // stagnation early stop and is reported in the outcome.
         let mut fitness_history: Vec<f64> = Vec::with_capacity(max_gen);
@@ -513,10 +514,12 @@ impl AlgorithmDifferentialEvolution {
                 best_params: &best,
             };
             if observer.observe(&report).is_break() {
+                stop_reason = StopReason::Callback;
                 break;
             }
             if fitness_stagnated(&fitness_history, tolerance, patience, generation) {
                 converged = true;
+                stop_reason = StopReason::FitnessTolerance;
                 break;
             }
         }
@@ -527,6 +530,7 @@ impl AlgorithmDifferentialEvolution {
             iterations_run,
             converged,
             fitness_history,
+            stop_reason,
         })
     }
 }
