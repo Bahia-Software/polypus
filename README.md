@@ -33,7 +33,7 @@
 Polypus splits shots and optimizer populations across `n_qpus` and runs them on a local simulator, on CESGA's CUNQA distributed QPUs or on the QMIO quantum processor. Changing the target means changing one argument, not the algorithm code.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Bahia-Software/polypus/main/assets/overview.svg" alt="Circuits enter the Python API; the Rust core plans the work and runs it on local Aer, the native simulator, CUNQA or QMIO" width="820">
+  <img src="https://raw.githubusercontent.com/Bahia-Software/polypus/main/assets/overview.svg" alt="Your circuit enters the Python API; the Rust core splits shots and optimizer populations across n QPUs and runs them on local simulators (Qiskit Aer, native Rust), on an HPC cluster through CUNQA, or on the QMIO quantum computer" width="820">
 </p>
 
 ## Why Polypus
@@ -247,10 +247,10 @@ The [documentation site](https://bahia-software.github.io/polypus/) hosts the [u
 
 ## Architecture
 
-Polypus is a Cargo workspace of 14 crates, all published on [crates.io](https://crates.io/crates/polypus); only the three PyO3 crates link against Python, the rest can be used from any Rust project.
+Polypus is a Cargo workspace of 14 crates, all published on [crates.io](https://crates.io/crates/polypus). The diagram follows one training run through them; only `polypus`, `polypus-evaluation` and `polypus-infrastructure` link against Python, and the rest can be used from any Rust project.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Bahia-Software/polypus/main/assets/architecture.svg" alt="Crate graph: polypus depends on polypus-evaluation, then polypus-orchestration, which uses polypus-infrastructure and polypus-optimizers; polypus-infrastructure uses polypus-backend, polypus-sim and polypus-observable; polypus-sim uses polypus-circuit" width="760">
+  <img src="https://raw.githubusercontent.com/Bahia-Software/polypus/main/assets/architecture.svg" alt="A training run: polypus.train starts a loop in polypus-orchestration; the optimizer proposes candidates, polypus-circuit binds one circuit per candidate, the planner in polypus-backend splits them across n_qpus, polypus-infrastructure runs them in parallel on Aer, the native simulator, CUNQA or QMIO, and polypus-observable turns counts into costs for the next iteration" width="820">
 </p>
 
 <details>
