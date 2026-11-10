@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use polypus_optimizers::{EvaluationOracle, GradientOracle, IterationObserver, IterationReport};
 
-use crate::dispatch::OracleErrorSlot;
+use crate::dispatch::{OracleErrorSlot, Oracles};
 
 /// A training run at the end of one iteration of its optimizer, as a
 /// [`TrainObserver`] sees it.
@@ -96,6 +96,24 @@ impl EvaluationOracle for Counted {
     /// Forwarded and not counted: no optimizer sends a batch with other shots.
     fn evaluate_batch_with_shots(&self, candidates: &[Vec<f64>], shots: u32) -> Vec<f64> {
         self.inner.evaluate_batch_with_shots(candidates, shots)
+    }
+}
+
+/// `oracles` with every evaluation counted into `evaluations`: the evaluation
+/// oracles wrapped in [`Counted`], the exact gradient in [`CountedGradient`].
+pub(crate) fn counted(oracles: Oracles, evaluations: &Arc<AtomicU64>) -> Oracles {
+    let Oracles {
+        evaluation,
+        gradient,
+        full_evaluation,
+    } = oracles;
+    Oracles {
+        evaluation: Box::new(Counted::new(evaluation, evaluations)),
+        gradient: gradient.map(|exact| -> Box<dyn GradientOracle> {
+            Box::new(CountedGradient::new(exact, evaluations))
+        }),
+        full_evaluation: full_evaluation
+            .map(|full| -> Box<dyn EvaluationOracle> { Box::new(Counted::new(full, evaluations)) }),
     }
 }
 

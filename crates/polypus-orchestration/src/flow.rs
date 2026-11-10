@@ -6,6 +6,7 @@
 //! the oracle at run time, keeping this crate `pyo3`-free while every *order* lives
 //! here with the [`Scheduler`](crate::Scheduler) that runs it.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use polypus_infrastructure::{
@@ -15,7 +16,7 @@ use polypus_optimizers::{EvaluationOracle, OptimizationOutcome, OptimizerError};
 
 use crate::dispatch::{dispatch_optimizer_observed, Method, OracleError, OracleErrorSlot, Oracles};
 use crate::final_batch::{final_batch, EliteRecorder};
-use crate::progress::TrainObserver;
+use crate::progress::{counted, TrainObserver};
 use crate::scheduler::Resources;
 use crate::trace::{CallTracer, TracingObserver, TracingPlanner, TracingVariance};
 use crate::walltime::{watched, SystemClock};
@@ -204,6 +205,10 @@ pub struct TrainOutcome {
     pub optimization: OptimizationOutcome,
     /// The final batch, when the flow had [`final_shots`](TrainFlow::final_shots).
     pub final_evaluation: Option<FinalEvaluation>,
+    /// Candidates the optimizer had scored as a fitness, counted as
+    /// [`TrainProgress::evaluations`](crate::TrainProgress::evaluations) is:
+    /// the final batch is not included.
+    pub n_evaluations: u64,
 }
 
 /// The final batch of a [`TrainFlow`] with
@@ -294,6 +299,9 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
             ),
             None => oracles,
         };
+        // Counting changes no call, value or RNG draw of the run (C-7).
+        let evaluations = Arc::new(AtomicU64::new(0));
+        let oracles = counted(oracles, &evaluations);
         let Some(final_shots) = self.final_shots else {
             let optimization = dispatch_optimizer_observed(
                 method,
@@ -307,6 +315,7 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
             return Ok(TrainOutcome {
                 optimization,
                 final_evaluation: None,
+                n_evaluations: evaluations.load(Ordering::Relaxed),
             });
         };
         // The optimizer scores through a recorder of its best candidates; the
@@ -337,6 +346,7 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
             self.initial_point,
             observer.as_deref_mut().map(|o| o as &mut dyn TrainObserver),
         )?;
+        let n_evaluations = evaluations.load(Ordering::Relaxed);
         // A failure or an interrupt in the final batch is the run's error, and
         // the optimizer's result is not returned: log it first, at full
         // precision (`{:?}` prints the shortest exact `f64`), and again on
@@ -368,6 +378,7 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
         Ok(TrainOutcome {
             optimization,
             final_evaluation: Some(final_evaluation),
+            n_evaluations,
         })
     }
 }
@@ -1281,6 +1292,55 @@ mod tests {
             assert_eq!(reports.last().unwrap().2, before_final as u64, "{name}");
             assert_eq!(calls.last().unwrap().1, Some(4096), "{name}");
         }
+    }
+
+    /// `n_evaluations` is every candidate the optimizer had scored, with or
+    /// without an observer, the final batch of `final_shots` not counted, and
+    /// it is what the last report showed.
+    #[test]
+    fn n_evaluations_counts_every_candidate_but_the_final_batch() {
+        for final_shots in [None, Some(4096)] {
+            for (name, method) in every_method() {
+                let factory = NoisyFactory::default();
+                let calls = Arc::clone(&factory.calls);
+                let outcome = noisy_run(method, factory, final_shots, None)
+                    .unwrap_or_else(|_| panic!("{name}: the run succeeds"));
+                let scored: usize = calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(_, shots, _)| shots.is_none())
+                    .map(|(c, ..)| c.len())
+                    .sum();
+                assert_eq!(outcome.n_evaluations, scored as u64, "{name}");
+
+                let (_, method) = every_method()
+                    .into_iter()
+                    .find(|(n, _)| *n == name)
+                    .unwrap();
+                let factory = NoisyFactory::default();
+                let calls = Arc::clone(&factory.calls);
+                let reports = Reports::default();
+                let watched =
+                    noisy_run_watched(&config().id, method, factory, final_shots, None, |_| {
+                        Some(recording(&reports, &calls, None))
+                    })
+                    .unwrap_or_else(|_| panic!("{name}: the watched run succeeds"));
+                assert_eq!(watched, outcome, "{name}");
+                let last = reports.lock().unwrap().last().unwrap().2;
+                assert_eq!(watched.n_evaluations, last, "{name}");
+            }
+        }
+    }
+
+    /// DE scores its initial population, then one population per generation.
+    #[test]
+    fn a_de_run_scores_one_population_more_than_its_generations() {
+        let (_, method) = every_method().swap_remove(0);
+        let outcome = noisy_run(method, NoisyFactory::default(), None, None)
+            .unwrap_or_else(|_| panic!("the run succeeds"));
+        let generations = outcome.optimization.iterations_run as u64;
+        assert_eq!(outcome.n_evaluations, 6 * (generations + 1));
     }
 
     /// A stop returns the run's result so far and still sends the final batch.
