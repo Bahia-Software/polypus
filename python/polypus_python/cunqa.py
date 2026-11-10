@@ -245,6 +245,7 @@ class Cunqa(Infraestructure):
                 _c3_counts(result.counts, readout)
                 for result, (_, readout) in zip(results, prepared)
             ]
-        except Exception:
+        except BaseException:
+            # Also on an interrupt: replies may be left unread on the handles.
             _forget(family_id)
             raise

@@ -208,10 +208,19 @@ _ONE_QUBIT = (
 )
 
 
-@pytest.mark.parametrize("stage", ["run", "gather"])
-def test_failed_wave_refreshes_the_qpus(monkeypatch, stage):
-    # #437: after a wave fails in `run` or `gather`, the next wave looks the
-    # family's QPUs up again instead of trusting the cached handles.
+@pytest.mark.parametrize(
+    "stage,error",
+    [
+        ("run", RuntimeError("vQPU crashed")),
+        ("gather", RuntimeError("vQPU crashed")),
+        ("gather", KeyboardInterrupt()),
+    ],
+    ids=["run", "gather", "gather_interrupted"],
+)
+def test_failed_wave_refreshes_the_qpus(monkeypatch, stage, error):
+    # #437: after a wave fails or is interrupted in `run` or `gather`, the next
+    # wave looks the family's QPUs up again instead of trusting the cached
+    # handles. Seal level: on the Rust side a failed wave ends the run.
     fake = FakeCunqa().install(monkeypatch)
     from polypus_python.cunqa import Cunqa
 
@@ -223,8 +232,8 @@ def test_failed_wave_refreshes_the_qpus(monkeypatch, stage):
     assert wave() == wave() == [{"1": 8}]
     assert fake.names().count("get_QPUs") == 1
 
-    setattr(fake, f"{stage}_error", RuntimeError("vQPU crashed"))
-    with pytest.raises(RuntimeError, match="vQPU crashed"):
+    setattr(fake, f"{stage}_error", error)
+    with pytest.raises(type(error)):
         wave()
     setattr(fake, f"{stage}_error", None)
     assert wave() == [{"1": 8}]
@@ -255,9 +264,12 @@ def test_fake_raises_a_dropped_family_again_with_new_qpus():
     stale = fake.get_QPUs(family=family)[0]
     fake.qdrop(family)
     fake.qraise(1, "00:10:00", family="f")
+    measured = QuantumCircuit(1, 1)
+    measured.measure(0, 0)
     with pytest.raises(TypeError, match="live family"):
-        fake.run(QuantumCircuit(1, 1), stale, shots=4)
-    fake.run(QuantumCircuit(1, 1), fake.get_QPUs(family=family)[0], shots=4)
+        fake.run(measured, stale, shots=4)
+    job = fake.run(measured, fake.get_QPUs(family=family)[0], shots=4)
+    assert job.counts == {"0": 4}
 
 
 def test_uneven_shot_split_gives_every_replica_its_own_qpu_and_seed(monkeypatch):
