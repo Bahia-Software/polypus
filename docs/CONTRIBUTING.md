@@ -261,6 +261,59 @@ with the wheel installed:
 python -m coverage run -m pytest tests/python && python -m coverage combine && python -m coverage report
 ```
 
+Both coverage jobs also write their Rust line coverage **per crate** in the
+job summary of the run (`.github/scripts/coverage_summary.py`), with or
+without the token: the `rust` job for the `test (Rust)` passes, the `python`
+job for the Rust the pytest suite reaches (the bindings above all). The
+reports themselves are the run's `sonar-rust` and `sonar-python` artifacts,
+kept 14 days. Neither job has a coverage threshold. The same table locally,
+from a report of your own:
+
+```bash
+cargo llvm-cov --workspace --lcov --output-path lcov.info   # needs cargo-llvm-cov
+python .github/scripts/coverage_summary.py lcov.info
+```
+
+## Mutation testing
+
+Line coverage says which code the tests run, not whether they would notice it
+change. `.github/workflows/mutation.yml` runs
+[cargo-mutants](https://mutants.rs) every Sunday over `polypus-circuit`,
+`polypus-sim`, `polypus-physics`, `polypus-optimizers`, `polypus-observable`
+and `polypus-backend`, with every feature: it makes small changes to the code
+(a `+` into a `-`, a function body into a constant) and runs the crate's tests
+against each. A mutant the tests fail on is *caught*; one they pass on is
+*missed*, a behaviour no test checks. One job runs each crate, except the two
+slowest, which are split into round-robin shards so that no job comes near the
+runner's 6 h limit: `polypus-circuit` in two and `polypus-sim` in three
+(`--shard K/N --sharding round-robin`, every N-th mutant). Each job writes its
+caught, missed, timed-out and unviable mutants and the score, caught / (caught
++ missed), in its summary, and keeps `missed.txt` and `outcomes.json` as the
+`mutants-<crate>-<K>of<N>` artifact for 30 days. The scheduled run then
+comments one row per crate, its shards added up, on the issue titled
+`mutation: weekly score`, which the workflow creates (or reopens) itself; a
+crate one of whose shards did not run is listed as not run, with the reason.
+It is report-only: missed mutants fail nothing, but cargo-mutants failing to
+run (the unmutated tests failing, the step timing out) fails its job. A manual
+run (`workflow_dispatch`) reports in the summaries only, unless its `comment`
+input is set.
+
+To reproduce a crate's run, or to check that a new test catches a mutant,
+install the version the workflow pins and run it on that crate (it copies the
+tree to a temporary directory; `mutants.out/` is ignored by git):
+
+```bash
+cargo install cargo-mutants --locked --version 27.1.0
+cargo mutants --package polypus-observable --all-features           # the whole crate
+cargo mutants --package polypus-observable --all-features --list    # its mutants, without running them
+cargo mutants --package polypus-observable --all-features --file crates/polypus-observable/src/qubo.rs --re 'from_matrix'
+cargo mutants --package polypus-sim --all-features --shard 1/3 --sharding round-robin   # one CI job's shard
+```
+
+Kill a missed mutant with a test of the behaviour it changes, not by
+excluding it; a mutant that no test can observe (an equivalent one) is worth a
+line in the PR, not an exclusion.
+
 ## Lint policy
 
 `clippy.toml` only tunes lint thresholds/behaviour. Lint *levels* are set in the

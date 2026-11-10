@@ -15,5 +15,9 @@ name = "polypus_circuit"
 # from any Rust project without pulling in PyO3, Qiskit or async runtimes.
 [dependencies]
 
+[dev-dependencies]
+# Property tests of the OpenQASM round trip (`tests/properties.rs`).
+proptest = { workspace = true }
+
 [lints]
 workspace = true

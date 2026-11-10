@@ -424,4 +424,94 @@ mod wave_concurrency_tests {
         assert_eq!(wave_concurrency_for(8 * BUDGET, 28, 8, 10), usize::MAX);
         assert_eq!(wave_concurrency_for(8 * BUDGET, 28, 8, 40), 8);
     }
+
+    #[test]
+    fn wave_concurrency_applies_the_active_budget() {
+        // The real budget of the test run (read, never set: see the wrapper tests
+        // in `mem_budget`). Any real budget holds two 1-qubit statevectors, so
+        // that batch is one wave; no budget holds a 200-qubit one, so that batch
+        // is split one circuit at a time.
+        let bytes = mem_budget::active_budget().bytes;
+        for (qubits, cores, batch) in [(1, 4, 2), (200, 4, 3), (20, 2, 1 << 20)] {
+            assert_eq!(
+                wave_concurrency(qubits, cores, batch),
+                wave_concurrency_for(bytes, qubits, cores, batch),
+                "{qubits} qubits, {cores} cores, {batch} circuits"
+            );
+        }
+        assert_eq!(wave_concurrency(1, 4, 2), usize::MAX);
+        assert_eq!(wave_concurrency(200, 4, 3), 1);
+    }
+}
+
+#[cfg(test)]
+mod default_method_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// A backend that implements only `run_circuits`, recording the size and
+    /// the shots of every call, so the trait's defaults are what is tested.
+    #[derive(Default)]
+    struct MinimalBackend {
+        calls: Mutex<Vec<(usize, u32)>>,
+    }
+
+    impl QuantumBackend for MinimalBackend {
+        fn run_circuits(
+            &self,
+            qcs: &[BoundCircuit],
+            params: &RunParams,
+        ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push((qcs.len(), params.shots));
+            Ok(qcs
+                .iter()
+                .map(|_| HashMap::from([("0".to_string(), u64::from(params.shots))]))
+                .collect())
+        }
+    }
+
+    fn params() -> RunParams {
+        RunParams {
+            id: "defaults".to_string(),
+            shots: 1,
+            seed: None,
+            opt_level: OptLevel::default(),
+        }
+    }
+
+    #[test]
+    fn run_shots_distributed_groups_equal_consecutive_shot_counts() {
+        let backend = MinimalBackend::default();
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let out = backend
+            .run_shots_distributed(&circuit, &[3, 3, 0, 0, 5, 5, 5, 3], &params())
+            .unwrap();
+        // One call per run of equal shot counts; the zero-shot run submits
+        // nothing. The repeat of 3 after the 5s is a run of its own.
+        assert_eq!(*backend.calls.lock().unwrap(), vec![(2, 3), (3, 5), (1, 3)]);
+        let sums: Vec<u64> = out.iter().map(|c| c.values().sum()).collect();
+        assert_eq!(sums, vec![3, 3, 0, 0, 5, 5, 5, 3]);
+        assert!(out[2].is_empty() && out[3].is_empty());
+        // Nothing to run, nothing called.
+        let idle = MinimalBackend::default();
+        assert!(idle
+            .run_shots_distributed(&circuit, &[], &params())
+            .unwrap()
+            .is_empty());
+        assert!(idle.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_optional_hooks_default_to_off() {
+        let backend = MinimalBackend::default();
+        assert!(!backend.wants_cancel_watcher());
+        assert_eq!(backend.replica_count(), None);
+        assert_eq!(backend.walltime(), None);
+        let caps = backend.capabilities();
+        assert_eq!(caps.max_concurrency, usize::MAX);
+        assert!(caps.supports_shot_distribution);
+    }
 }

@@ -3,7 +3,7 @@
 //! instruction-list golden tests, but the actual quantum state and its
 //! measured expectations.
 //!
-//! Eight checks:
+//! Nine checks:
 //! 1. the [`AngleEncoder`] produces the expected tensor-product state;
 //! 2. the [`ConvBlock::Cartan`] block (including the synthesized `ryy`) matches
 //!    an independently hand-applied gate sequence on every canonical basis
@@ -22,6 +22,10 @@
 //! 8. the `BasisEncoder` puts a binary sample on a **computational basis
 //!    state** — a single unit amplitude, matching an independently
 //!    hand-applied `X` on every set bit.
+//! 9. the [`StronglyEntanglingAnsatz`] applies PennyLane's
+//!    `Rot(φ, θ, ω) = Rz(ω)·Ry(θ)·Rz(φ)` with its parameters in `(φ, θ, ω)`
+//!    order: the one-qubit state matches the closed-form first column of
+//!    `Rot`'s matrix.
 //!
 //! `polypus-sim` enters only as a dev-dependency — the crate's public API never
 //! executes a circuit.
@@ -36,7 +40,7 @@ use polypus_circuit::{Fixed, GateInstruction};
 use polypus_qml::{
     ConvBlock, ConvLayer, Dataset, Decision, Entanglement, Entangler, HardwareEfficientAnsatz,
     IqpEncoder, Layer, Loss, Observable, Pauli, PauliString, PoolBlock, PoolLayer, QmlProblem,
-    QuantumModel, Readout, RotationAxis,
+    QuantumModel, Readout, RotationAxis, StronglyEntanglingAnsatz,
 };
 use polypus_sim::{Simulator, SplitMix64, Statevector, StatevectorSimulator, C64};
 
@@ -532,4 +536,37 @@ fn amplitude_encoder_prepares_the_normalized_state() {
     assert_amplitude_encoding(2, &[1.0, 2.0, 0.0, 0.0]);
     // k=3, eight positive values including a zero.
     assert_amplitude_encoding(3, &[0.5, 1.5, 2.0, 0.0, 1.0, 2.5, 3.0, 0.7]);
+}
+
+/// (9) One layer on one qubit is exactly PennyLane's `Rot(φ, θ, ω)`, whose
+/// matrix is
+///
+/// ```text
+/// [ e^{-i(φ+ω)/2}·cos(θ/2)   -e^{ i(φ-ω)/2}·sin(θ/2) ]
+/// [ e^{-i(φ-ω)/2}·sin(θ/2)    e^{ i(φ+ω)/2}·cos(θ/2) ]
+/// ```
+///
+/// so from `|0⟩` the state is its first column. The second amplitude's phase,
+/// `−(φ−ω)/2`, is odd in `φ ↔ ω`: emitting the two `Rz` the other way round, or
+/// binding the parameters in another order, changes it.
+#[test]
+fn strongly_entangling_rotation_is_pennylane_s_rot() {
+    // An Ry encoder at x = 0 is the identity, so only the ansatz acts.
+    let model = QuantumModel::new(1)
+        .angle_encoder(RotationAxis::Ry)
+        .layer(Layer::StronglyEntangling(StronglyEntanglingAnsatz::new(1)))
+        .readout(z0_readout(Decision::Raw))
+        .compile(1)
+        .unwrap();
+    let (phi, theta, omega) = (0.4, 1.1, -0.9);
+    let circuit = model.bind(&[0.0], &[phi, theta, omega]).unwrap();
+    let actual = StatevectorSimulator::new().run(&circuit).unwrap();
+
+    let expected = [
+        C64::from_polar((theta / 2.0).cos(), -(phi + omega) / 2.0),
+        C64::from_polar((theta / 2.0).sin(), -(phi - omega) / 2.0),
+    ];
+    for (a, b) in actual.amplitudes().iter().zip(expected) {
+        assert!(close(*a, b), "amplitude mismatch: {a} vs {b}");
+    }
 }

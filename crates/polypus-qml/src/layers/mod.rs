@@ -12,7 +12,7 @@ mod conv;
 mod encoders;
 mod pool;
 
-pub use ansatz::{Entanglement, Entangler, HardwareEfficientAnsatz};
+pub use ansatz::{Entanglement, Entangler, HardwareEfficientAnsatz, StronglyEntanglingAnsatz};
 pub use conv::{ConvBlock, ConvLayer, Pairing};
 pub use encoders::{AmplitudeEncoder, AngleEncoder, BasisEncoder, IqpEncoder};
 pub use pool::{KeepRule, PoolBlock, PoolLayer};
@@ -109,6 +109,9 @@ pub enum Layer {
     Basis(BasisEncoder),
     /// A hardware-efficient variational block (consumes `θ`).
     HardwareEfficient(HardwareEfficientAnsatz),
+    /// PennyLane's strongly entangling layers: a general rotation per qubit and
+    /// a ring of entanglers whose range changes per layer (consumes `θ`).
+    StronglyEntangling(StronglyEntanglingAnsatz),
     /// A convolution block with parameter sharing across pairs (consumes `θ`).
     Conv(ConvLayer),
     /// A unitary pooling block that shrinks the active set (consumes `θ`).
@@ -123,6 +126,7 @@ impl LayerOps for Layer {
             Layer::Iqp(l) => l.plan(ctx),
             Layer::Basis(l) => l.plan(ctx),
             Layer::HardwareEfficient(l) => l.plan(ctx),
+            Layer::StronglyEntangling(l) => l.plan(ctx),
             Layer::Conv(l) => l.plan(ctx),
             Layer::Pool(l) => l.plan(ctx),
         }
@@ -141,6 +145,7 @@ impl LayerOps for Layer {
             Layer::Iqp(l) => l.emit_traced(qc, alloc, x, trace),
             Layer::Basis(l) => l.emit_traced(qc, alloc, x, trace),
             Layer::HardwareEfficient(l) => l.emit_traced(qc, alloc, x, trace),
+            Layer::StronglyEntangling(l) => l.emit_traced(qc, alloc, x, trace),
             Layer::Conv(l) => l.emit_traced(qc, alloc, x, trace),
             Layer::Pool(l) => l.emit_traced(qc, alloc, x, trace),
         }

@@ -45,5 +45,9 @@ default  = []
 # `parallel`.
 parallel = ["dep:rayon", "dep:serde", "dep:serde_json", "dep:fs4"]
 
+[dev-dependencies]
+# Property test of parallel == sequential (`tests/properties.rs`).
+proptest = { workspace = true }
+
 [lints]
 workspace = true

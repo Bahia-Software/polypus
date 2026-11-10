@@ -902,3 +902,62 @@ fn unseeded_runs_work() {
     });
     assert!(outcome.best_fitness > -1e-8, "{:e}", outcome.best_fitness);
 }
+
+#[test]
+fn check_preconditions_rejects_what_optimize_rejects() {
+    // The same rules, without running anything (`train` checks before any
+    // backend exists).
+    let check = |dimensions, generations, sigma0, patience, initial_point: Option<&[f64]>| {
+        AlgorithmCmaEs::check_preconditions(
+            dimensions,
+            None,
+            generations,
+            sigma0,
+            0,
+            patience,
+            initial_point,
+        )
+    };
+    assert_eq!(check(3, 10, 1.0, 5, None), Ok(()));
+    assert_eq!(check(3, 10, 1.0, 5, Some(&[0.1, 0.2, 0.3])), Ok(()));
+    for (parameter, result) in [
+        ("dimensions", check(0, 10, 1.0, 5, None)),
+        ("generations", check(3, 0, 1.0, 5, None)),
+        ("sigma0", check(3, 10, 0.0, 5, None)),
+        ("patience", check(3, 10, 1.0, 0, None)),
+        ("initial_point", check(3, 10, 1.0, 5, Some(&[0.1, 0.2]))),
+    ] {
+        assert!(
+            matches!(&result, Err(OptimizerError::InvalidConfig { parameter: p, .. }) if *p == parameter),
+            "{parameter}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn a_stop_in_the_last_generation_ends_the_run_converged() {
+    // patience 1 on a flat landscape: each run stagnates after 2 generations.
+    // With a budget of exactly 2 the stop comes in the last generation, and a
+    // restart has nothing left to run, so the run ends there, converged.
+    let (args, log) = setup(flat, 2, 2, 3);
+    let outcome = run(AlgorithmCmaEsArgs {
+        tolerance: 1e-9,
+        patience: 1,
+        restarts: 1,
+        ..args
+    });
+    assert_eq!(batch_sizes(&log), vec![6, 6]);
+    assert_eq!(outcome.iterations_run, 2);
+    assert!(outcome.converged);
+    // One generation more and the restart runs: a population of 12, cut short
+    // by the budget, so not converged.
+    let (args, log) = setup(flat, 2, 3, 3);
+    let outcome = run(AlgorithmCmaEsArgs {
+        tolerance: 1e-9,
+        patience: 1,
+        restarts: 1,
+        ..args
+    });
+    assert_eq!(batch_sizes(&log), vec![6, 6, 12]);
+    assert!(!outcome.converged);
+}

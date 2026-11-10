@@ -150,8 +150,16 @@ Everything after `y` is keyword-only. The execution arguments have defaults (`sh
 | IQP (`ZZFeatureMap`) encoding | `iqp_encoder(entanglement="full")` | none |
 | Hardware-efficient block (Qiskit's `TwoLocal`) | `hardware_efficient(reps, rotations=["ry", "rz"], entangler="cx", entanglement="linear", final_rotation_layer=True)` (`Ansatz` only) | one per rotation gate |
 | `RealAmplitudes` | `real_amplitudes(reps)` (`Ansatz` only) | one per rotation gate |
+| PennyLane's `StronglyEntanglingLayers`: per layer, `Rz(φ)`, `Ry(θ)`, `Rz(ω)` (in that order) on every qubit, then an entangler from each qubit `i` to `(i + r) mod n` | `strongly_entangling(reps, ranges=None, entangler="cx")` (`Ansatz` only) | `3·n·reps` (`n`: qubits active at that point) |
 | QCNN convolution, one block shared by every pair | `conv("basic" \| "cartan", pairing="alternating")` (`Ansatz` only) | 4 (`"basic"`) or 3 (`"cartan"`) |
 | QCNN pooling: each pair of active qubits becomes one | `pool("basic", keep="even_positions")` (`Ansatz` only) | 3 |
+
+In `strongly_entangling`, `ranges` gives each layer's `r`: one per layer, each from `1` to `n − 1`, or `None` for PennyLane's default `r = (layer mod (n − 1)) + 1` (`1, 2, …`). A range outside those bounds, or a count other than `reps`, raises `ValueError` at the call. One active qubit gets no entanglers, only the rotations. The parameters go layer by layer, qubit by qubit, `(φ, θ, ω)` each: PennyLane's `(reps, n, 3)` weights flattened in C order.
+
+Two other common templates are `hardware_efficient` settings rather than methods of their own:
+
+- Qiskit's `EfficientSU2` is the `TwoLocal` with `["ry", "rz"]` rotations, so `hardware_efficient(reps)` is `EfficientSU2(n, reps, entanglement="linear")`. With Qiskit's default `entanglement="reverse_linear"`, use `hardware_efficient(reps, entanglement="full")`: the same unitary (Qiskit chose `"reverse_linear"` as the cheaper equivalent of `"full"`), with more `CX` gates.
+- PennyLane's `BasicEntanglerLayers` is `hardware_efficient(reps, rotations=[axis], entanglement="circular", final_rotation_layer=False)`, with `axis` its `rotation` (`"rx"` by default). On two qubits they differ: `"circular"` entangles `(0, 1)` and then `(1, 0)`, PennyLane only `(0, 1)`.
 
 The `Ansatz` may also re-encode the data between its trainable layers (data re-uploading) with `angle_encoder`, `basis_encoder` and `iqp_encoder`. `Model(encoder, ansatz, readout)` copies the pieces, so building on them afterwards does not change it; it checks that some layer loads the data, that the layers have trainable parameters and that the readout fits the qubits left at the end, and reports `num_params`.
 

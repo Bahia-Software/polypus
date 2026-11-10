@@ -344,12 +344,16 @@ boundary stays out-of-process and explicit; see
   `(n + 1)`-qubit statevector, the same bytes, both to throttle and to refuse,
   and its exact QML gradient falls back to the parameter shift (one
   statevector, logged once per backend at `info`) when the budget holds one but
-  not two. The
-  budget's parsers and `resolve_budget` are pure (they take text / values), so
-  tests never touch `/proc` or the environment — `set_var` in a multithreaded
-  test binary is racy and `unsafe` is off-limits (§5). Several processes
-  sharing one cgroup (MPI ranks of a job step) each see the whole limit and
-  must set `POLYPUS_MEM_BUDGET` per process.
+  not two. The budget's parsers and `resolve_budget` are pure (they take text /
+  values), so the budget logic is tested without `/proc` or the environment.
+  Tests never *write* the environment — `set_var` in a multithreaded test
+  binary is racy and `unsafe` is off-limits (§5). The tests of the wrappers
+  over the active budget (`check_statevector_fits`,
+  `max_statevector_concurrency`, `wave_concurrency`) read it as the process
+  sees it, and assert only what holds for any budget, plus what any Linux host
+  guarantees: there they need `/proc/meminfo`, which a Linux test environment
+  must provide. Several processes sharing one cgroup (MPI ranks of a job step)
+  each see the whole limit and must set `POLYPUS_MEM_BUDGET` per process.
 - **Reproducibility:** the RNG is seedable (`rng.rs` in `polypus-sim` and in
   `polypus-optimizers`). Results must be deterministic given a seed. Don't
   introduce nondeterminism: iteration order over a `HashMap` affecting
