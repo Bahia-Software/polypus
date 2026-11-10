@@ -2569,7 +2569,7 @@ pub fn qml_predict<'py>(
     // Always simulated (qmio is rejected), so a seed always applies (contract C-7).
     let effective_seed = seed_or_entropy(seed, random_seed)?;
     let id = unique_id(&format!("predict_{}_{}", n_qpus, infrastructure))?;
-    // predict takes no `options`: there is no provider backend to pass them to.
+    // predict has no `options=`; a `Registered` target brings its own.
     let target = selection.resolve(None, |options| {
         target_from_strings(
             &infrastructure,

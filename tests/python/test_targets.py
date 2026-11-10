@@ -351,6 +351,21 @@ class TestRunQuantumCircuit:
         )
         assert typed == plain
 
+    def test_options_reach_a_registered_target(self):
+        with pytest.raises(polypus.BackendError, match="'command' option is empty"):
+            _run(target=polypus.Registered("subprocess"), options={"command": []})
+
+    def test_a_native_backend_name_rejects_qiskit_on_any_infrastructure(self):
+        """As before targets: the native check reads `backend` alone."""
+        qc = QuantumCircuit(1)
+        qc.measure_all()
+        with pytest.raises(
+            polypus.ConfigurationError, match="cannot execute a Qiskit QuantumCircuit"
+        ):
+            polypus.run_quantum_circuit(
+                qc, shots=10, infrastructure="cunqa", backend="polypus"
+            )
+
     def test_a_qiskit_circuit_is_rejected_by_a_native_target(self):
         qc = QuantumCircuit(1)
         qc.h(0)
@@ -360,7 +375,7 @@ class TestRunQuantumCircuit:
         ):
             polypus.run_quantum_circuit(qc, shots=10, target=polypus.Native())
 
-    def test_options_reach_a_registered_target(self):
+    def test_options_given_twice_to_a_registered_target(self):
         with pytest.raises(polypus.ConfigurationError, match="options"):
             _run(
                 target=polypus.Registered("subprocess", options=COMMAND),
@@ -400,6 +415,22 @@ class TestTrain:
         assert typed.best_params == plain.best_params
         assert typed.best_fitness == plain.best_fitness
         assert typed.fitness_history == plain.fitness_history
+
+    def test_a_cunqa_target_reaches_qraise_like_the_strings(self, monkeypatch):
+        def qraise_args(**kwargs):
+            fake = FakeCunqa().install(monkeypatch)
+            _train(**kwargs)
+            name, args = fake.calls[0]
+            assert name == "qraise"
+            return {k: v for k, v in args.items() if "fam" not in k}
+
+        typed = qraise_args(
+            target=polypus.Cunqa(nodes=2, cores_per_qpu=3, walltime="01:00:00")
+        )
+        plain = qraise_args(
+            infrastructure="cunqa", nodes=2, cores_per_qpu=3, walltime="01:00:00"
+        )
+        assert typed == plain
 
     def test_a_positional_call_still_works(self):
         result = polypus.train(
@@ -518,3 +549,4 @@ class TestExclusivity:
     )
     def test_a_default_value_is_not_a_conflict(self, defaults):
         _run(target=polypus.Aer(), seed=1, **defaults)
+        _qml_predict(target=polypus.Aer(), seed=1, **defaults)
