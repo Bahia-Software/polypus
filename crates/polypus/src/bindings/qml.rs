@@ -38,9 +38,9 @@ use polypus_qml::{
 use super::callback::validate_callback;
 use super::circuit::Circuit;
 use super::{
-    build_backend_config, counts_to_pylist, extract_labels, finish_optimization,
-    interruptible_token, is_native_backend, is_rotosolve, log_training_start, method_from_pyclass,
-    method_seed, resolve_optimizer_seed, seed_or_entropy, training_observer, unique_id,
+    config_from_strings, counts_to_pylist, extract_labels, finish_optimization,
+    interruptible_token, is_rotosolve, log_training_start, method_from_pyclass, method_seed,
+    resolve_optimizer_seed, seed_or_entropy, training_observer, unique_id,
     validate_cunqa_allocation, validate_final_shots, validate_id, validate_method,
     validate_shots_and_qpus, OptionsArg, RunResult,
 };
@@ -1216,7 +1216,7 @@ impl Model {
         let final_shots = validate_final_shots(final_shots.as_ref())?;
         let callback = validate_callback(callback.as_ref())?;
         let backend = resolve_backend(backend, infrastructure);
-        if exact && !(infrastructure == "local" && is_native_backend(backend)) {
+        if exact && !(infrastructure == "local" && super::targets::is_native_device(backend)) {
             return Err(configuration_error(
                 "exact=True needs infrastructure=\"local\" and backend=\"polypus\": only the \
                  native simulator computes exact probabilities",
@@ -1254,7 +1254,7 @@ impl Model {
 
         // Native circuits never ask for fusion here: `None` keeps the backend's
         // default.
-        let backend_config = build_backend_config(
+        let backend_config = config_from_strings(
             infrastructure,
             backend,
             sim_method,
@@ -1491,7 +1491,9 @@ impl<'a> Execution<'a, '_> {
             self.walltime.as_deref(),
         )?;
         let backend = resolve_backend(self.backend, self.infrastructure);
-        if self.exact && !(self.infrastructure == "local" && is_native_backend(backend)) {
+        if self.exact
+            && !(self.infrastructure == "local" && super::targets::is_native_device(backend))
+        {
             return Err(configuration_error(
                 "exact=True needs infrastructure=\"local\" and backend=\"polypus\": only the \
                  native simulator computes exact probabilities",
@@ -1517,7 +1519,7 @@ impl<'a> Execution<'a, '_> {
         } else {
             Some(seed_or_entropy(self.seed, random_seed)?)
         };
-        let backend_config = build_backend_config(
+        let backend_config = config_from_strings(
             self.infrastructure,
             backend,
             self.sim_method,
