@@ -219,6 +219,15 @@ pub struct TrainResult {
     /// computed from (contract C-5).
     #[pyo3(get)]
     pub fitness_history: Vec<f64>,
+    /// What ended the optimizer's loop, the snake_case name of a
+    /// [`StopReason`](polypus_optimizers::StopReason): `"iteration_budget"`,
+    /// `"fitness_tolerance"`, `"callback"`, …
+    #[pyo3(get)]
+    pub stop_reason: &'static str,
+    /// Candidates scored as a fitness, the final batch not included (see
+    /// [`TrainOutcome::n_evaluations`]).
+    #[pyo3(get)]
+    pub n_evaluations: u64,
     /// With `final_shots`, the candidate the final batch chose: the best
     /// candidates (`best_params` and, for DE, PSO, CMA-ES and `External`, up
     /// to four more), re-evaluated once with `final_shots` shots after the optimizer
@@ -281,6 +290,7 @@ fn outcome_to_train_result(
     py: Python<'_>,
     outcome: OptimizationOutcome,
     final_evaluation: Option<FinalEvaluation>,
+    n_evaluations: u64,
     seed: u64,
     id: String,
 ) -> PyResult<Py<PyAny>> {
@@ -296,6 +306,8 @@ fn outcome_to_train_result(
             iterations_run: outcome.iterations_run,
             converged: outcome.converged,
             fitness_history: outcome.fitness_history,
+            stop_reason: outcome.stop_reason.as_str(),
+            n_evaluations,
             final_params,
             final_fitness,
             seed,
@@ -616,8 +628,12 @@ fn finish_optimization(
     id: String,
     start: Instant,
 ) -> PyResult<Py<PyAny>> {
-    let (outcome, final_evaluation) = match result {
-        Ok(outcome) => (outcome.optimization, outcome.final_evaluation),
+    let (outcome, final_evaluation, n_evaluations) = match result {
+        Ok(outcome) => (
+            outcome.optimization,
+            outcome.final_evaluation,
+            outcome.n_evaluations,
+        ),
         Err(OracleError::Evaluation(boxed)) => {
             // The oracle boxed an `EvaluationError` into the type-erased slot
             // (the scheduler crate is pyo3-free); recover it to re-raise with its
@@ -653,12 +669,14 @@ fn finish_optimization(
             format!(", final_fitness={}", evaluation.fitness)
         });
     log::info!(
-        "training run {id} completed: iterations_run={}, converged={}{final_fitness}, duration={:?}",
+        "training run {id} completed: iterations_run={}, converged={}, stop_reason={}, \
+         n_evaluations={n_evaluations}{final_fitness}, duration={:?}",
         outcome.iterations_run,
         outcome.converged,
+        outcome.stop_reason,
         start.elapsed()
     );
-    outcome_to_train_result(py, outcome, final_evaluation, seed, id)
+    outcome_to_train_result(py, outcome, final_evaluation, n_evaluations, seed, id)
 }
 
 /// Parse a `polypus.DE` / `PSO` / `QNG` / `CMAES` / `Adam` / `SPSA` / `Rotosolve` /

@@ -1002,8 +1002,9 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     same iteration.
   - Postconditions of a stop: the run returns a `TrainResult` with
     `iterations_run` the iteration that stopped it, `len(fitness_history) ==
-    iterations_run`, `converged = False` (also when the optimizer's own test
-    fired on the same iteration: the stop wins), `best_params` and
+    iterations_run`, `converged = False` and `stop_reason = "callback"` (also
+    when the optimizer's own test fired on the same iteration: the stop
+    wins), `best_params` and
     `best_fitness` those of the last call (with a minibatch, except for Adam,
     `best_fitness` is then re-scored on every sample, as after any run; see
     "Minibatches" below), and every other postcondition of
@@ -1903,7 +1904,9 @@ reference worker receives) and the `CallSeeds` tests in
 - `train` / `qml.train` return a **`TrainResult`** exposing the full
   optimization outcome — `best_params` (`list[float]`), `best_fitness` (float),
   `iterations_run` (int), `converged` (bool), `fitness_history`
-  (`list[float]`) — and the final re-evaluation, `final_params`
+  (`list[float]`), `stop_reason` (str, the snake_case name of what ended the
+  optimizer's loop) and `n_evaluations` (int, the candidates scored as a
+  fitness, the final batch not included) — and the final re-evaluation, `final_params`
   (`list[float] | None`) and `final_fitness` (`float | None`), both `None`
   without `final_shots` (C-5), plus `seed` (int, the effective
   seed used) and `id` (str, the effective run id: the caller-supplied `id`
