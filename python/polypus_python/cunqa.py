@@ -1,6 +1,7 @@
 import copy
 import os
 import sys
+import threading
 from functools import lru_cache
 
 from qiskit import QuantumCircuit, transpile
@@ -107,6 +108,28 @@ def _convert(qc):
         to_ir(copy.deepcopy(prepared))
 
 
+# The QPU handles of each live family, looked up once instead of once per wave
+# (#437). Keyed by the family name, which `qraise` returns and both `run_qcs`
+# (`family_id`) and `drop_qpus` (`family`) receive. Dropped on `qdrop` and when
+# a wave fails, so a family raised again under the same name, or one whose
+# handles went bad, is looked up afresh.
+_QPUS = {}
+_QPUS_LOCK = threading.Lock()
+
+
+def _qpus_for(family_id):
+    with _QPUS_LOCK:
+        qpus = _QPUS.get(family_id)
+        if qpus is None:
+            qpus = _QPUS[family_id] = get_QPUs(co_located=True, family=family_id)
+        return qpus
+
+
+def _forget(family_id):
+    with _QPUS_LOCK:
+        _QPUS.pop(family_id, None)
+
+
 class Cunqa(Infraestructure):
     def get_qpus(self, **kwargs) -> object:
         n = kwargs["n"]
@@ -144,6 +167,7 @@ class Cunqa(Infraestructure):
         # `qdrop(*families)` accepts family names only (it explicitly does NOT
         # take a job id), so `family` is what must be forwarded here.
         family = kwargs["family"]
+        _forget(family)
         qdrop(family)
         return None
 
@@ -175,10 +199,7 @@ class Cunqa(Infraestructure):
         # Absent/empty keeps CUNQA's own default rather than guessing one.
         sim_method = args.get("sim_method") or None
 
-        try:
-            qpus = get_QPUs(co_located=True, family=family_id)
-        except Exception as e:
-            raise e
+        qpus = _qpus_for(family_id)
 
         # Asynchronously run the quantum circuits on the QPUs
         try:
@@ -224,5 +245,6 @@ class Cunqa(Infraestructure):
                 _c3_counts(result.counts, readout)
                 for result, (_, readout) in zip(results, prepared)
             ]
-        except Exception as e:
-            raise e
+        except Exception:
+            _forget(family_id)
+            raise

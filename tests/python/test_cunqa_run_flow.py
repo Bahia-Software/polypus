@@ -6,9 +6,10 @@
 call against CUNQA's real signatures at one release tag and simulates each job
 with Aer. Pinned here: the ``qraise`` reservation, one ``run`` per QPU with the
 run options, ``gather``, the release with ``qdrop`` (also after a failure), the
-C-3 counts shape and the C-7 per-QPU seeds, and the C-3 keys the seal makes
+C-3 counts shape and the C-7 per-QPU seeds, the C-3 keys the seal makes
 of what CUNQA 3.0.0 returns for a circuit without measurements (#253) and with
-several or wider classical registers (#304).
+several or wider classical registers (#304), and one ``get_QPUs`` per family
+rather than per wave (#437).
 """
 
 import pytest
@@ -155,11 +156,9 @@ def test_qpus_are_dropped_when_a_job_fails(monkeypatch):
     assert fake.dropped == list(fake.families)
 
 
-def test_train_runs_each_wave_on_the_family(monkeypatch):
-    # A DE population is evaluated in waves of at most n_qpus circuits, each
-    # wave one `run` per QPU on the one family raised for the whole training.
-    fake = FakeCunqa().install(monkeypatch)
-    result = polypus.train(
+def _train(id="cunqa_flow"):
+    # DE with a population of 4 on 2 QPUs: at least two waves.
+    return polypus.train(
         polypus.Circuit(1).ry(0, polypus.Param(0)).measure_all(),
         polypus.DE(generations=1, population_size=4),
         shots=16,
@@ -169,10 +168,17 @@ def test_train_runs_each_wave_on_the_family(monkeypatch):
         infrastructure="cunqa",
         nodes=1,
         cores_per_qpu=1,
-        id="cunqa_flow",
+        id=id,
         backend="aer",
         seed=3,
     )
+
+
+def test_train_runs_each_wave_on_the_family(monkeypatch):
+    # A DE population is evaluated in waves of at most n_qpus circuits, each
+    # wave one `run` per QPU on the one family raised for the whole training.
+    fake = FakeCunqa().install(monkeypatch)
+    result = _train()
     names = fake.names()
     assert names.count("qraise") == 1 and names[-1] == "qdrop"
     assert fake.dropped == [result.id]
@@ -186,6 +192,72 @@ def test_train_runs_each_wave_on_the_family(monkeypatch):
     assert [run["options"]["seed"] for run in first] == [3, 4]
     assert second[1]["options"]["seed"] == second[0]["options"]["seed"] + 1
     assert second[0]["options"]["seed"] != 3
+
+
+def test_get_qpus_runs_once_per_family(monkeypatch):
+    # #437: the QPU handles are looked up once per family, not once per wave.
+    fake = FakeCunqa().install(monkeypatch)
+    _train()
+    assert len(fake.runs) >= 4
+    assert fake.names().count("get_QPUs") == 1
+
+
+_ONE_QUBIT = (
+    'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[1];\ncreg c[1];\n'
+    "x q[0];\nmeasure q[0] -> c[0];\n"
+)
+
+
+@pytest.mark.parametrize("stage", ["run", "gather"])
+def test_failed_wave_refreshes_the_qpus(monkeypatch, stage):
+    # #437: after a wave fails in `run` or `gather`, the next wave looks the
+    # family's QPUs up again instead of trusting the cached handles.
+    fake = FakeCunqa().install(monkeypatch)
+    from polypus_python.cunqa import Cunqa
+
+    fake.qraise(2, "00:10:00", family="fam")
+
+    def wave():
+        return Cunqa().run_qcs(qcs=[_ONE_QUBIT], shots=8, family_id="fam", seed=1)
+
+    assert wave() == wave() == [{"1": 8}]
+    assert fake.names().count("get_QPUs") == 1
+
+    setattr(fake, f"{stage}_error", RuntimeError("vQPU crashed"))
+    with pytest.raises(RuntimeError, match="vQPU crashed"):
+        wave()
+    setattr(fake, f"{stage}_error", None)
+    assert wave() == [{"1": 8}]
+    assert fake.names().count("get_QPUs") == 2
+
+
+def test_family_raised_again_after_qdrop_gets_its_new_qpus(monkeypatch):
+    # #437: `qdrop` forgets the family's handles, so a family raised again
+    # under the same name is looked up afresh (the fake rejects stale QPUs).
+    fake = FakeCunqa().install(monkeypatch)
+    from polypus_python.cunqa import Cunqa
+
+    def wave():
+        return Cunqa().run_qcs(qcs=[_ONE_QUBIT], shots=8, family_id="fam", seed=1)
+
+    fake.qraise(2, "00:10:00", family="fam")
+    assert wave() == [{"1": 8}]
+    Cunqa().drop_qpus(family="fam")
+    fake.qraise(2, "00:10:00", family="fam")
+    assert wave() == [{"1": 8}]
+    assert fake.names().count("get_QPUs") == 2
+    assert fake.runs[-1]["qpu"] is fake.families["fam"][0]
+
+
+def test_fake_raises_a_dropped_family_again_with_new_qpus():
+    fake = FakeCunqa()
+    family = fake.qraise(1, "00:10:00", family="f")
+    stale = fake.get_QPUs(family=family)[0]
+    fake.qdrop(family)
+    fake.qraise(1, "00:10:00", family="f")
+    with pytest.raises(TypeError, match="live family"):
+        fake.run(QuantumCircuit(1, 1), stale, shots=4)
+    fake.run(QuantumCircuit(1, 1), fake.get_QPUs(family=family)[0], shots=4)
 
 
 def test_uneven_shot_split_gives_every_replica_its_own_qpu_and_seed(monkeypatch):
