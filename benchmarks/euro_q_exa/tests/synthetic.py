@@ -31,7 +31,7 @@ COUPLING = [[1, 0], [0, 2], [3, 1], [3, 2], [4, 3]]
 def snapshot(**overrides):
     raw = {
         "backend_name": "TEST",
-        "timestamp": "2026-10-19T00:00:00Z",
+        "timestamp": "2026-01-01T00:00:00Z",
         "T1": [40.0, 50.0, NAN, 45.0, 30.0, 10.0],
         # Values chosen so no gate is relaxation-limited under the default or
         # the slow-gate assumptions (that case has its own test).

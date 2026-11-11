@@ -1,40 +1,34 @@
-# Euro-Q-Exa emulator benchmark (#391)
+# Euro-Q-Exa device emulation (#391)
 
-QAOA-MaxCut on an emulated Euro-Q-Exa (IQM, backend `EQE1`): circuits are
-transpiled to the native gate set (`r`, `cz`) and coupling map, and run on Aer
-with a noise model built from an LRZ calibration snapshot. The physical QPU is
-not used.
+Emulation of QAOA-MaxCut on a model of Euro-Q-Exa (IQM, backend `EQE1`):
+circuits are transpiled to the native gate set (`r`, `cz`) and coupling map, and
+run on Aer with a noise model built from a calibration snapshot of the device.
+Nothing here runs on the physical QPU, and polypus has no backend for it.
 
-Status: complete. Device model (F1), instances and routing study (F2), cost
-pilot (F3a), emulation sweep for n = 16 and 20 at p = 1..3 (F3b, run on LRZ's
-Qaptiva system and cross-checked on a node of our own cluster), analysis and
-QPU plan (F4). These are the results and the plan of our technical report to
-LRZ.
+## Setup
 
-The scripts and tests need the polypus extension built from this branch. To keep
-it apart from other environments on the machine, install the wheel into its own
-virtualenv:
+The scripts and tests need the polypus wheel plus Qiskit, Qiskit Aer, pytest
+(`requirements-dev.txt`) and networkx (`requirements-examples.txt`):
 
 ```bash
+pip install -r requirements-dev.txt -r requirements-examples.txt
 maturin build --release --out dist
-python -m venv --system-site-packages ../eqe-venv
-../eqe-venv/bin/pip install --no-deps --force-reinstall --ignore-installed dist/polypus_quantum-*.whl
+pip install --no-deps --force-reinstall dist/polypus_quantum-*.whl
 ```
-
-(`--ignore-installed`: with the same version number already in the base
-environment, pip would otherwise install nothing.) A wheel built here is tagged
-for this machine's glibc (`manylinux_2_39`); another system may need its own
-build.
 
 ## Inputs
 
-LRZ calibration data is not committed. Pass the two files LRZ sends:
+No calibration data is committed: the scripts read the two files the provider
+supplies, passed on the command line.
 
-- `calibration_data_Euro-Q-Exa_<date>_active_qubits.json`: per-qubit T1, T2
-  (Ramsey), T2 echo, single-qubit and readout fidelities, CZ fidelity per edge,
-  keyed by the chip's original labels (54 qubits).
+- A calibration snapshot (JSON): per-qubit T1, T2 (Ramsey), T2 echo,
+  single-qubit and readout fidelities and CZ fidelity per edge, keyed by the
+  chip's original labels.
 - `coupling_map.txt`: the backend's coupling map, in its compact labels
-  (52 qubits; out-of-service qubits are dropped and the rest renumbered).
+  (out-of-service qubits are dropped and the rest renumbered).
+
+Without them only the tests run, on a small synthetic calibration
+(`tests/synthetic.py`).
 
 ## Device model (`device.py`)
 
@@ -55,7 +49,7 @@ Pipeline for one circuit:
    `build_noise_model(device, assumptions, qubits=qubits)`;
 4. run on Aer with `method="statevector"`.
 
-Never run the full 52-qubit circuit with a noise model: Aer's automatic method
+Never run the full-device circuit with a noise model: Aer's automatic method
 picks a density matrix, and Aer 0.17.2 crashed on such circuits (see
 `compact`). Every relaxation channel uses T2 capped at T1 for the same reason
 (see `_cap_t2`).
@@ -63,11 +57,13 @@ picks a density matrix, and Aer 0.17.2 crashed on such circuits (see
 ## Instances (`instances.py`)
 
 QAOA-MaxCut on random 3-regular graphs (main set) and on signed subgraphs of the
-device's own coupling graph (control, no routing cost), n = 16 and 20, three of
-each, from fixed seeds, with exact optima. Circuits come from polypus's
-`build_qaoa_circuit` (parameters: all betas, then all gammas); the cost layer is
-`rzz(-γ w)` per edge, so QAOA maximizes the cut. Counts are read with qubit 0
-rightmost; `approximation_ratio` uses polypus's `expectation_value`.
+device's own coupling graph (control, no routing cost), from fixed seeds, with
+exact optima. Circuits come from polypus's `build_qaoa_circuit` (parameters: all
+betas, then all gammas); the cost layer is `rzz(-γ w)` per edge, so QAOA
+maximizes the cut. `native_qaoa_circuit` builds the same circuit as a
+`polypus.Circuit`, and `ising_cost` gives the cut as a native `polypus.Ising`
+for `polypus.train`. Counts are read with qubit 0 rightmost;
+`approximation_ratio` uses polypus's `expectation_value`.
 
 ## Routing study (`routing.py`)
 
@@ -78,65 +74,14 @@ python benchmarks/euro_q_exa/routing.py --calibration <calibration.json> \
 
 transpiles every instance for p = 1..3 with 10 transpiler seeds, keeps the
 highest-ESP run, and writes `instances.json`, `routing.csv` (every seed) and
-`routing_summary.md` (the two-qubit gate count and depth table for LRZ).
-`results/` is git-ignored.
-
-## Cost pilot (`cost_pilot.py`)
-
-```bash
-python benchmarks/euro_q_exa/cost_pilot.py --calibration <calibration.json> \
-    --coupling-map <coupling_map.txt> --out benchmarks/euro_q_exa/results
-```
-
-times, on one 3-regular instance per size and p = 1..3, a short noiseless
-`polypus.train` (DE, the cut as a native `polypus.Ising`; native backend with
-`native_qaoa_circuit` and Aer with the Qiskit circuit) and the noisy evaluation
-of the routed circuit (gate + readout noise, and with idle noise), then projects
-the full sweep. Writes `cost_pilot.json`.
-
-## Emulation sweep (`run_emulator.py`)
-
-```bash
-python benchmarks/euro_q_exa/run_emulator.py --calibration <calibration.json> \
-    --coupling-map <coupling_map.txt> --out benchmarks/euro_q_exa/results \
-    --sizes 16 --p 1 2 3
-```
-
-trains each (instance, p) without noise on the native backend (3 DE seeds,
-SHADE, population 40, 300 generations, 4000 shots, no early stop), then evaluates the trained
-parameters at 4000 shots under conditions A (ideal), B (ideal, routed),
-C (EQE noise), D (C with readout mitigation), I (C plus idle noise), and, for the
-best seed at `--sensitivity-p`, E (slow gates) and I_R (Ramsey T2 while
-waiting); plus P0 (random cuts) and, for 3-regular graphs, the published fixed
-angles under A, C and I. One gzipped JSON per (instance, p) under
-`results/sweep/`, with rows and counts; finished units are skipped on rerun.
-From the cost pilot, n = 20 with p >= 2 takes most of the time (an evaluation
-with idle noise is ~23 min at p = 2 and ~1 h at p = 3 on 8 cores).
-
-## Analysis and QPU plan (`analyze.py`, `qpu_plan.py`)
-
-```bash
-python benchmarks/euro_q_exa/analyze.py --sweep benchmarks/euro_q_exa/results/sweep \
-    --out benchmarks/euro_q_exa/results/analysis
-python benchmarks/euro_q_exa/qpu_plan.py --out benchmarks/euro_q_exa/results/analysis
-```
-
-`analyze.py` aggregates the sweep per (family, n, p, condition): mean and
-standard deviation of the approximation ratio, the normalized ratio
-`(cut - random) / (optimum - random)` (the comparable figure for the signed
-control, whose random baseline is negative), the probability of the optimal cut
-and the share of the ideal gain kept under noise. `qpu_plan.py` counts the
-circuits, shots and jobs of the plan for the awarded QPU hours (two sessions,
-six blocks: QAOA, validation of polypus against Qiskit, parallel circuits, a
-hybrid VQE loop, drift and more shots where the signal is low; its docstring
-describes each one) and estimates QPU time from explicit assumptions on time
-per shot, overheads and accounting.
+`routing_summary.md` (two-qubit gate count and depth). `results/` is
+git-ignored.
 
 ## Tests
 
 ```bash
-../eqe-venv/bin/python -m pytest benchmarks/euro_q_exa/tests
+python -m pytest benchmarks/euro_q_exa/tests
 ```
 
-They use a small synthetic calibration and are deliberately **not run by CI**:
-this benchmark is a study, not part of the library.
+They use the synthetic calibration and are deliberately **not run by CI**: this
+is a study, not part of the library.

@@ -14,9 +14,9 @@ circuit (the calibrated errors in the target): a cheap proxy for how much of the
 signal survives, not a prediction of the approximation ratio.
 
 Usage (writes ``instances.json``, ``routing.csv`` with every seed, and
-``routing_summary.md``, the table for LRZ, into ``--out``):
+and ``routing_summary.md`` into ``--out``):
     python benchmarks/euro_q_exa/routing.py \
-        --calibration calibration_data_Euro-Q-Exa_20261019_active_qubits.json \
+        --calibration <calibration.json> \
         --coupling-map coupling_map.txt --out benchmarks/euro_q_exa/results
 """
 

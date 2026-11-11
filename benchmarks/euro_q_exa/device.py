@@ -14,8 +14,8 @@ coupling map — into what the benchmark needs:
   * optional idle noise: relaxation on the qubits that wait while others run
     gates, added to a scheduled circuit by :func:`add_idle_noise`.
 
-Labels. The calibration is keyed by the chip's *original* labels (54 qubits),
-the backend by *compact* ones (52): qubits that are out of service are dropped
+Labels. The calibration is keyed by the chip's *original* labels, the backend
+by *compact* ones: qubits that are out of service are dropped
 and the rest renumbered in order. A qubit is out of service when its calibration
 has no finite T1, T2 or single-qubit fidelity. :func:`build_device` derives the
 compact → original mapping from that rule and refuses to build a device unless
@@ -35,12 +35,11 @@ per qubit and symmetric: the calibration gives one readout fidelity, read as
 ``1 - (P(1|0) + P(0|1)) / 2``.
 
 Gates use the echo T2, and every relaxation channel caps T2 at T1 (Aer
-0.17.2 cannot run the Kraus channels T2 > T1 needs; see ``_cap_t2``). The Ramsey T2 (1-3 us on many EQE1 qubits) is not usable
-inside gates: with it, relaxation alone over a 40-60 ns gate exceeds the
-calibrated infidelity of most gates (48 of 52 ``r``, 36 of 82 CZ on the
-2026-10-19 snapshot), i.e. it contradicts the device's own benchmarks. The slow
-frequency noise it measures matters while a qubit *waits*, which is where idle
-noise can use it.
+0.17.2 cannot run the Kraus channels T2 > T1 needs; see ``_cap_t2``). The Ramsey
+T2 can be far shorter than the echo one, and then it is not usable inside gates:
+relaxation alone over a 40-60 ns gate would exceed the calibrated infidelity of
+many gates, i.e. contradict the device's own benchmarks. The slow frequency noise
+it measures matters while a qubit *waits*, which is where idle noise can use it.
 
 Idle noise. A circuit transpiled against :func:`build_target`'s target with
 ``scheduling_method="alap"`` carries ``delay`` instructions where qubits wait;
@@ -59,7 +58,7 @@ leakage are not modelled.
 
 Usage (summary + validation against a real snapshot):
     python benchmarks/euro_q_exa/device.py \
-        --calibration calibration_data_Euro-Q-Exa_20261019_active_qubits.json \
+        --calibration <calibration.json> \
         --coupling-map coupling_map.txt
 """
 
@@ -318,8 +317,8 @@ def _cap_t2(t1_us, t2_us):
     Physically T2 may reach 2 T1, but with T2 > T1 thermal relaxation is a
     Kraus channel, and Aer 0.17.2 fails on noise models holding such channels
     next to the others: "Kraus is empty", a failed eigendecomposition, or a
-    segmentation fault (seen with QAOA circuits on the 2026-10-19 EQE1
-    snapshot; every part of the model alone ran). Capped, relaxation is a mix of
+    segmentation fault (seen with QAOA circuits on a real calibration snapshot;
+    every part of the model alone ran). Capped, relaxation is a mix of
     Paulis and reset, which Aer handles. For gates the calibrated fidelity is
     still matched exactly (the depolarizing part makes up the rest); for idle
     noise the cap makes dephasing slightly stronger on the qubits with T2 > T1.
@@ -442,10 +441,10 @@ def compact(circuit: QuantumCircuit):
     the same classical bits, so measured counts read the same. Delays on unused
     qubits are dropped. Run it with ``build_noise_model(..., qubits=qubits)``.
 
-    Why: a routed circuit spans all 52 device qubits. Aer can drop the unused
+    Why: a routed circuit spans every device qubit. Aer can drop the unused
     ones itself, but not reliably with a noise model: its automatic method picks
     a density matrix (2^(2n) entries for the n qubits left), and even an explicit
-    statevector run of a scheduled 52-qubit circuit under noise crashed Aer
+    statevector run of a scheduled full-device circuit under noise crashed Aer
     0.17.2 (segmentation fault). A compacted circuit avoids both.
     """
     used = {

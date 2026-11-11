@@ -5,6 +5,8 @@ import math
 
 import instances as inst
 import networkx as nx
+import numpy as np
+import polypus
 import pytest
 from qiskit.quantum_info import SparsePauliOp, Statevector
 from synthetic import COUPLING
@@ -128,3 +130,65 @@ def test_qaoa_weights_enter_the_cost_layer():
     value = _expected_cut(pair, circuit, [math.pi / 8, math.pi / 2])
     assert pair.optimum == 1.0
     assert value == pytest.approx(1.0)
+
+
+def test_ising_cost_is_the_cut_and_training_maximizes_it():
+    # One edge: the optimum is 1 and p = 1 reaches it exactly, so DE on the
+    # native backend must climb close to 1. A wrong sign in the Ising mapping
+    # (or in the QAOA layer) would drive the fitness to 0 instead.
+    edge = inst._finish("edge", "3reg", 2, 0, [(0, 1, 1.0)])
+    result = polypus.train(
+        inst.native_qaoa_circuit(edge, 1),
+        polypus.DE(generations=15, population_size=8, seed=3),
+        shots=400,
+        n_qpus=1,
+        dimensions=2,
+        expectation_function=inst.ising_cost(edge),
+        infrastructure="local",
+        nodes=1,
+        cores_per_qpu=1,
+        id="test-ising-edge",
+        backend="polypus",
+        seed=3,
+    )
+    assert 0.9 < result.best_fitness <= 1.0
+
+
+def test_ising_cost_handles_signed_weights():
+    # Two disjoint edges, -1 and +1: the best cut takes only the +1 edge.
+    pair = inst._finish("signs", "lattice", 4, 0, [(0, 1, -1.0), (2, 3, 1.0)])
+    result = polypus.train(
+        inst.native_qaoa_circuit(pair, 1),
+        polypus.DE(generations=15, population_size=8, seed=4),
+        shots=400,
+        n_qpus=1,
+        dimensions=2,
+        expectation_function=inst.ising_cost(pair),
+        infrastructure="local",
+        nodes=1,
+        cores_per_qpu=1,
+        id="test-ising-signs",
+        backend="polypus",
+        seed=4,
+    )
+    assert 0.9 < result.best_fitness <= pair.optimum
+
+
+@pytest.mark.parametrize("p", [1, 2])
+def test_native_circuit_matches_the_qiskit_one(p):
+    # Same state for the same parameter vector: trained parameters transfer.
+    from qiskit.quantum_info import Statevector
+
+    instance = inst._finish(
+        "signs", "lattice", 4, 0, [(0, 1, -1.0), (1, 2, 1.0), (2, 3, 1.0)]
+    )
+    values = [0.3, -0.7, 1.1, 0.4][: 2 * p]
+    native = polypus.statevector(
+        inst.native_qaoa_circuit(instance, p, measure=False), values
+    )
+    qiskit_circuit = inst.qaoa_circuit(instance, p).remove_final_measurements(
+        inplace=False
+    )
+    expected = Statevector(qiskit_circuit.assign_parameters(values)).data
+    overlap = abs(np.vdot(expected, np.asarray(native)))
+    assert overlap == pytest.approx(1.0, abs=1e-10)
