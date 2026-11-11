@@ -3,7 +3,8 @@
 //! A [`Target`] says where a run executes: Aer, the native simulator, CUNQA,
 //! QMIO or a registered backend, with the settings each one reads. Python
 //! builds one either from a target class (`polypus.Aer`, `Native`, `Cunqa`,
-//! `Qmio`, `Registered`), each validating its own fields, or from the
+//! `Qmio`, `Registered`), each validating its own fields (a `sim_method` is
+//! Aer's to check, when the run starts), or from the
 //! `infrastructure`/`backend` strings through [`target_from_strings`], whose
 //! aliases all live in [`ALIASES`].
 
@@ -344,7 +345,13 @@ fn options_to_py<'py>(
         match value {
             OptionValue::Str(text) => dict.set_item(key, text)?,
             OptionValue::List(items) => dict.set_item(key, PyList::new(py, items)?)?,
-            _ => dict.set_item(key, py.None())?,
+            // `OptionValue` is `#[non_exhaustive]` in another crate, so the
+            // match needs this arm: refuse a value it cannot show, never drop it.
+            other => {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "options['{key}'] holds an unsupported value {other:?}"
+                )))
+            }
         }
     }
     Ok(dict)
@@ -928,6 +935,72 @@ mod tests {
         );
         assert_eq!(ProgramFormat::QirText.option_value(), "qir_text");
         assert_eq!(ProgramFormat::QirText.public_name(), "qir");
+    }
+
+    fn endpoint() -> HashMap<String, OptionValue> {
+        HashMap::from([(
+            "endpoint".to_owned(),
+            OptionValue::from("tcp://qmio.example:5556"),
+        )])
+    }
+
+    #[test]
+    fn options_are_added_to_a_qmio_target() {
+        let target = with_options(
+            Target::Qmio {
+                program_format: program_format("qir").unwrap(),
+                options: HashMap::new(),
+            },
+            Some(endpoint()),
+        )
+        .unwrap();
+        assert!(matches!(
+            target,
+            Target::Qmio { program_format: ProgramFormat::QirText, ref options } if *options == endpoint()
+        ));
+    }
+
+    /// `Qmio("qir")` and `infrastructure="qmio", backend="qir"` both submit
+    /// `qir_text`, with `options=` merged over the defaults.
+    #[cfg(feature = "qmio")]
+    #[test]
+    fn a_qir_qmio_target_builds_qir_text_with_the_options() {
+        let typed = with_options(
+            Target::Qmio {
+                program_format: program_format("qir").unwrap(),
+                options: HashMap::new(),
+            },
+            Some(endpoint()),
+        )
+        .unwrap();
+        let strings = target_from_strings(
+            "qmio",
+            "qir",
+            DEFAULT_SIM_METHOD,
+            None,
+            DEFAULT_NODES,
+            DEFAULT_CORES_PER_QPU,
+            None,
+            None,
+            Some(endpoint()),
+        )
+        .unwrap();
+        for target in [typed, strings] {
+            let crate::infrastructure::BackendConfig::Registered { name, options } =
+                crate::bindings::build_backend_config(target).unwrap()
+            else {
+                panic!("qmio must build a Registered config");
+            };
+            assert_eq!(name, "qmio");
+            assert_eq!(
+                options.get("program_format"),
+                Some(&OptionValue::from("qir_text"))
+            );
+            assert_eq!(
+                options.get("endpoint"),
+                Some(&OptionValue::from("tcp://qmio.example:5556"))
+            );
+        }
     }
 
     #[test]

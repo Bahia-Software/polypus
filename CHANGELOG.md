@@ -13,11 +13,12 @@ Entries were curated from the Conventional Commits history. Releases before
 
 ### Added
 - Typed execution targets: `polypus.Aer`, `Native`, `Cunqa`, `Qmio` and
-  `Registered`, each checking its own fields when built, and a `target=`
+  `Registered`, each checking its own fields when built (except `sim_method`,
+  which Aer checks when the run starts), and a `target=`
   keyword on `run_quantum_circuit`, `train`, `qml.train` and `qml.predict`
   that replaces `infrastructure`, `backend` and their provider arguments
-  (passing one of those with a non-default value next to it is a
-  `ConfigurationError`). Strings stay as shorthand; every accepted
+  (passing one of those next to it is a `ConfigurationError`, except
+  `backend` or `sim_method` left at its default). Strings stay as shorthand; every accepted
   `infrastructure`/`backend` spelling now resolves through one alias table
   with unchanged errors. `infrastructure` (and, for `train`/`qml.train`,
   `nodes`, `cores_per_qpu` and `id`) now defaults to `None` so a call with

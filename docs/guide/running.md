@@ -84,7 +84,7 @@ A circuit without measurements is read out on all its qubits by both backends.
 
 ## Typed targets
 
-Instead of the `infrastructure`/`backend` strings and their provider arguments, `target=` takes one object that says where the run goes. Each class checks its own fields when it is built.
+Instead of the `infrastructure`/`backend` strings and their provider arguments, `target=` takes one object that says where the run goes. Each class checks its own fields when it is built, except `sim_method`, which Aer checks when the run starts.
 
 | Target | Same as |
 |---|---|
@@ -98,7 +98,7 @@ Instead of the `infrastructure`/`backend` strings and their provider arguments, 
 result = polypus.run_quantum_circuit(bell, shots=1000, target=polypus.Native(), seed=7)
 ```
 
-`run_quantum_circuit`, `train`, `qml.train` and `qml.predict` accept `target=`. With it, passing `infrastructure`, or `backend`, `sim_method`, `noise_model`, `fusion`, `nodes`, `cores_per_qpu` or `walltime` with a value other than its default, raises `ConfigurationError`; a value equal to the default (such as `backend="aer"`) is ignored. In `train` and `qml.train`, whose `nodes` and `cores_per_qpu` have no default, passing either at all is an error. `options=` still applies: it configures `Qmio` (for example its `endpoint`) and `Registered`, but not both `Registered(..., options=...)` and `options=` at once. The strings remain as shorthand, and a seeded run with `target=` gives the same counts as the equivalent string call; `RunResult.backend` and `infrastructure` are those of the "Same as" column.
+`run_quantum_circuit`, `train`, `qml.train` and `qml.predict` accept `target=`. With it, passing `infrastructure`, `noise_model`, `fusion`, `nodes`, `cores_per_qpu` or `walltime` at all, or `backend` or `sim_method` with a value other than its default, raises `ConfigurationError`; `backend="aer"` and `sim_method="automatic"` are ignored. `options=` still applies: it configures `Qmio` (for example its `endpoint`) and `Registered`, but not both `Registered(..., options=...)` and `options=` at once. The strings remain as shorthand, and a seeded run with `target=` gives the same counts as the equivalent string call; `RunResult.backend` and `infrastructure` are those of the "Same as" column.
 
 ## Tracing a circuit run
 

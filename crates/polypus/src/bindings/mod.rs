@@ -1479,18 +1479,20 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 ///
 /// `target` (keyword-only, default `None`) is a typed target, `polypus.Aer`,
 /// `Native`, `Cunqa`, `Qmio` or `Registered`, used instead of `infrastructure`,
-/// `backend` and the provider arguments (`sim_method`, `noise_model`, `fusion`,
-/// `nodes`, `cores_per_qpu`, `walltime`); any of those given a non-default
-/// value next to it raises `ConfigurationError`. Without `target`,
-/// `infrastructure` is required.
-#[pyfunction(signature=(qc, shots, infrastructure=None, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, *, trace=None, target=None))]
+/// `backend` and the provider arguments. Next to it, `infrastructure`,
+/// `noise_model`, `fusion`, `nodes`, `cores_per_qpu` or `walltime` given at
+/// all, or `backend` or `sim_method` with a non-default value, raises
+/// `ConfigurationError`. Without `target`, `infrastructure` is required.
+// `nodes`/`cores_per_qpu` are `None` at runtime so an explicit value next to
+// `target=` is seen; `text_signature` keeps showing their defaults.
+#[pyfunction(signature=(qc, shots, infrastructure=None, n_qpus=1, nodes=None, cores_per_qpu=None, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, *, trace=None, target=None), text_signature = "(qc, shots, infrastructure=None, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method=\"automatic\", noise_model=None, backend=\"aer\", seed=None, fusion=None, options=None, walltime=None, *, trace=None, target=None)")]
 pub fn run_quantum_circuit<'py>(
     qc: Bound<'py, PyAny>,
     shots: u32,
     infrastructure: Option<String>,
     n_qpus: u32,
-    nodes: u32,
-    cores_per_qpu: u32,
+    nodes: Option<u32>,
+    cores_per_qpu: Option<u32>,
     sim_method: &str,
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
@@ -1512,11 +1514,13 @@ pub fn run_quantum_circuit<'py>(
             ("sim_method", sim_method != DEFAULT_SIM_METHOD),
             ("noise_model", noise_model.is_some()),
             ("fusion", fusion.is_some()),
-            ("nodes", nodes != DEFAULT_NODES),
-            ("cores_per_qpu", cores_per_qpu != DEFAULT_CORES_PER_QPU),
+            ("nodes", nodes.is_some()),
+            ("cores_per_qpu", cores_per_qpu.is_some()),
             ("walltime", walltime.is_some()),
         ],
     )?;
+    let nodes = nodes.unwrap_or(DEFAULT_NODES);
+    let cores_per_qpu = cores_per_qpu.unwrap_or(DEFAULT_CORES_PER_QPU);
     let (infrastructure, backend) = (selection.infrastructure.clone(), selection.backend.clone());
     // Entry-point trace carrying the full circuit `Debug` repr on every call:
     // large and high-volume, so it stays at `debug` rather than the default log.
@@ -1831,10 +1835,11 @@ pub fn run_quantum_circuit<'py>(
 ///
 /// `target` (keyword-only, default `None`) is a typed target, `polypus.Aer`,
 /// `Native`, `Cunqa`, `Qmio` or `Registered`, used instead of `infrastructure`,
-/// `backend` and the provider arguments (`sim_method`, `noise_model`, `fusion`,
-/// `nodes`, `cores_per_qpu`, `walltime`); any of those given a non-default
-/// value next to it raises `ConfigurationError`. Without `target`,
-/// `infrastructure` (with `nodes` and `cores_per_qpu`) is required.
+/// `backend` and the provider arguments. Next to it, `infrastructure`,
+/// `noise_model`, `fusion`, `nodes`, `cores_per_qpu` or `walltime` given at
+/// all, or `backend` or `sim_method` with a non-default value, raises
+/// `ConfigurationError`. Without `target`, `infrastructure` (with `nodes` and
+/// `cores_per_qpu`) is required.
 #[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure=None, nodes=None, cores_per_qpu=None, id=None, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, initial_point=None, final_shots=None, *, callback=None, trace=None, target=None))]
 pub fn train<'py>(
     qc: Bound<'py, PyAny>,
@@ -2219,10 +2224,11 @@ fn bind_feature_rows<'py>(
 ///
 /// `target` (keyword-only, default `None`) is a typed target, `polypus.Aer`,
 /// `Native`, `Cunqa`, `Qmio` or `Registered`, used instead of `infrastructure`,
-/// `backend` and the provider arguments (`sim_method`, `noise_model`, `nodes`,
-/// `cores_per_qpu`, `walltime`); any of those given a non-default value next to
-/// it raises `ConfigurationError`. Without `target`, `infrastructure` (with
-/// `nodes` and `cores_per_qpu`) is required.
+/// `backend` and the provider arguments. Next to it, `infrastructure`,
+/// `noise_model`, `nodes`, `cores_per_qpu` or `walltime` given at all, or
+/// `backend` or `sim_method` with a non-default value, raises
+/// `ConfigurationError`. Without `target`, `infrastructure` (with `nodes` and
+/// `cores_per_qpu`) is required.
 #[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure=None, nodes=None, cores_per_qpu=None, id=None, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, walltime=None, *, y_train=None, initial_point=None, final_shots=None, callback=None, target=None))]
 pub fn qml_train<'py>(
     feature_map: Bound<'py, PyAny>,
@@ -2478,11 +2484,12 @@ pub fn qml_train<'py>(
 ///
 /// `target` (keyword-only, default `None`) is a typed target, `polypus.Aer`,
 /// `Native`, `Cunqa`, `Qmio` or `Registered`, used instead of `infrastructure`,
-/// `backend` and the provider arguments (`sim_method`, `noise_model`, `nodes`,
-/// `cores_per_qpu`, `walltime`); any of those given a non-default value next to
-/// it raises `ConfigurationError`. Without `target`, `infrastructure` is
-/// required.
-#[pyfunction(name = "predict", signature = (feature_map, ansatz, x, params, shots, infrastructure=None, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, walltime=None, *, target=None))]
+/// `backend` and the provider arguments. Next to it, `infrastructure`,
+/// `noise_model`, `nodes`, `cores_per_qpu` or `walltime` given at all, or
+/// `backend` or `sim_method` with a non-default value, raises
+/// `ConfigurationError`. Without `target`, `infrastructure` is required.
+// `nodes`/`cores_per_qpu`: see `run_quantum_circuit`.
+#[pyfunction(name = "predict", signature = (feature_map, ansatz, x, params, shots, infrastructure=None, n_qpus=1, nodes=None, cores_per_qpu=None, sim_method="automatic", noise_model=None, backend="aer", seed=None, walltime=None, *, target=None), text_signature = "(feature_map, ansatz, x, params, shots, infrastructure=None, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method=\"automatic\", noise_model=None, backend=\"aer\", seed=None, walltime=None, *, target=None)")]
 pub fn qml_predict<'py>(
     feature_map: Bound<'py, PyAny>,
     ansatz: Bound<'py, PyAny>,
@@ -2491,8 +2498,8 @@ pub fn qml_predict<'py>(
     shots: u32,
     infrastructure: Option<String>,
     n_qpus: u32,
-    nodes: u32,
-    cores_per_qpu: u32,
+    nodes: Option<u32>,
+    cores_per_qpu: Option<u32>,
     sim_method: &str,
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
@@ -2510,11 +2517,13 @@ pub fn qml_predict<'py>(
             ("backend", backend != DEFAULT_BACKEND),
             ("sim_method", sim_method != DEFAULT_SIM_METHOD),
             ("noise_model", noise_model.is_some()),
-            ("nodes", nodes != DEFAULT_NODES),
-            ("cores_per_qpu", cores_per_qpu != DEFAULT_CORES_PER_QPU),
+            ("nodes", nodes.is_some()),
+            ("cores_per_qpu", cores_per_qpu.is_some()),
             ("walltime", walltime.is_some()),
         ],
     )?;
+    let nodes = nodes.unwrap_or(DEFAULT_NODES);
+    let cores_per_qpu = cores_per_qpu.unwrap_or(DEFAULT_CORES_PER_QPU);
     let (infrastructure, backend) = (selection.infrastructure.clone(), selection.backend.clone());
     validate_shots_and_qpus(shots, n_qpus)?;
     validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
@@ -2898,8 +2907,8 @@ mod tests {
             500,
             Some("local".to_string()),
             1,
-            1,
-            2,
+            Some(1),
+            Some(2),
             "automatic",
             None,
             "polypus",
@@ -2970,8 +2979,8 @@ mod tests {
                 100,
                 Some("local".to_string()),
                 1,
-                1,
-                2,
+                Some(1),
+                Some(2),
                 "automatic",
                 None,
                 "polypus",
@@ -3023,8 +3032,8 @@ mod tests {
                     100,
                     Some("local".to_string()),
                     1,
-                    1,
-                    2,
+                    Some(1),
+                    Some(2),
                     "automatic",
                     None,
                     "polypus",
@@ -3104,8 +3113,8 @@ mod tests {
                 100,
                 Some("qmio".to_string()),
                 1,
-                1,
-                2,
+                Some(1),
+                Some(2),
                 "automatic",
                 None,
                 "aer",
@@ -5090,8 +5099,8 @@ mod tests {
                 16,
                 Some("qmio".to_string()),
                 1,
-                1,
-                1,
+                Some(1),
+                Some(1),
                 "automatic",
                 None,
                 "aer",
