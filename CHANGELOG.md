@@ -208,6 +208,11 @@ Entries were curated from the Conventional Commits history. Releases before
   0.6 to 0.7, which raised its MSRV. Default features keep Rust 1.85. The
   QMIO reply-size cap is still checked after the reply is received; 0.7 has
   no receive size limit yet (#383).
+- For contributors: the Hygiene check also scans the messages of the commits
+  it analyses (merge base to head on pull requests, base to head on merge-queue
+  groups and pushes to `main`) with the same public rules as file content, plus
+  the private patterns on `main`, and flags internal `bahia<N>` host names
+  alongside login-node names. Commit messages admit no allow-list exceptions.
 
 ### Fixed
 - `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a
