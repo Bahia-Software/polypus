@@ -99,8 +99,6 @@
 //! }
 //! ```
 
-#![deny(clippy::all)]
-
 pub mod adam;
 pub mod cmaes;
 pub mod differential_evolution;
