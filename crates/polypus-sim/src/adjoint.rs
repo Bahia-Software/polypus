@@ -265,6 +265,8 @@ fn backward(
         return Ok(());
     };
     let mut pending = targets.iter().peekable();
+    // Each gate's inverse, built once for both states into one buffer.
+    let mut inverse = Vec::new();
     for i in (first..gates.len()).rev() {
         poll(cancellation)?;
         let mut here = None;
@@ -275,8 +277,14 @@ fn backward(
         if i == first {
             break;
         }
-        psi.apply_inverse(&gates[i])?;
-        lambda.apply_inverse(&gates[i])?;
+        inverse.clear();
+        psi.push_inverse(&gates[i], &mut inverse)?;
+        for part in &inverse {
+            psi.apply(part)?;
+        }
+        for part in &inverse {
+            lambda.apply(part)?;
+        }
     }
     Ok(())
 }
