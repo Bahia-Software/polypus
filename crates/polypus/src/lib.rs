@@ -97,6 +97,10 @@
 //! # License
 //! European Union Public Licence (EUPL), version 1.2 or – as soon as they will be approved by the European Commission – subsequent versions of the EUPL.
 
+#![warn(missing_docs)]
+
+/// The VQC optimizers (DE, PSO, QNG) and their oracle traits, re-exported from the
+/// pure-Rust `polypus-optimizers` crate.
 pub mod algorithms;
 mod bindings;
 /// Custom Python exception hierarchy raised across the FFI boundary.

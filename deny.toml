@@ -53,6 +53,30 @@ confidence-threshold = 0.8
 # for a fast-moving library. Tighten to "deny" once the tree stabilizes.
 multiple-versions = "warn"
 wildcards = "warn"
+# Workspace boundaries (docs/ENGINEERING.md §2): pyo3 stays out of the pure crates.
+# `wrappers` lists the only crates allowed to depend on each entry DIRECTLY. The
+# entries cover every crate in the graph that links Python: `pyo3-ffi`, `pyo3`,
+# the direct dependents of `pyo3` (`numpy`, `polypus`, `polypus-evaluation`,
+# `polypus-infrastructure`) and `polypus-orchestration`, which links it only
+# transitively. So a pure crate cannot pull `pyo3` in, either by naming it or
+# through any crate that links it. Keep these lists in step with §2 when a crate
+# is added or a boundary moves.
+#
+# The `polypus` entry means "nothing may depend on the PyO3 edge". cargo-deny
+# reads an empty `wrappers` as "banned everywhere", which would ban `polypus`
+# itself, so the list names the crate itself: a crate never depends on itself,
+# so no other crate is allowed. cargo-deny therefore reports this entry as
+# `warning[unused-wrapper]` on every run. That warning is expected: do not
+# "fix" it by removing the wrapper or the entry.
+deny = [
+    { crate = "pyo3-ffi", wrappers = ["pyo3"], reason = "links libpython; only pyo3 may wrap it (docs/ENGINEERING.md §2)" },
+    { crate = "pyo3", wrappers = ["numpy", "polypus", "polypus-evaluation", "polypus-infrastructure"], reason = "only the PyO3-touching crates may link Python; the rest are pure Rust (docs/ENGINEERING.md §2)" },
+    { crate = "numpy", wrappers = ["polypus"], reason = "links pyo3; only the polypus edge converts arrays (docs/ENGINEERING.md §2)" },
+    { crate = "polypus", wrappers = ["polypus"], reason = "the PyO3 edge; no crate may depend on it (docs/ENGINEERING.md §2)" },
+    { crate = "polypus-infrastructure", wrappers = ["polypus", "polypus-evaluation", "polypus-orchestration"], reason = "links pyo3; a pure crate depending on it would pull pyo3 transitively (docs/ENGINEERING.md §2)" },
+    { crate = "polypus-orchestration", wrappers = ["polypus", "polypus-evaluation"], reason = "links pyo3 transitively through polypus-infrastructure (docs/ENGINEERING.md §2)" },
+    { crate = "polypus-evaluation", wrappers = ["polypus"], reason = "links pyo3; only the polypus edge assembles it (docs/ENGINEERING.md §2)" },
+]
 
 [sources]
 unknown-registry = "deny"
