@@ -76,7 +76,7 @@ it). Lints and builds:
 ```bash
 cargo fmt --all --check
 ruff check && ruff format --check          # ruff pinned in requirements-dev.txt
-cargo deny check                           # licenses + advisories (needs cargo-deny, deny.toml)
+cargo deny check                           # licenses, advisories and bans (needs cargo-deny, deny.toml)
 cargo metadata --locked --format-version 1 > /dev/null   # Cargo.lock matches the manifests
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo clippy --locked -p polypus-infrastructure --features qmio --all-targets -- -D warnings
@@ -328,10 +328,32 @@ line in the PR, not an exclusion.
 
 ## Lint policy
 
-`clippy.toml` only tunes lint thresholds/behaviour. Lint *levels* are set in CI
-(`-D warnings`) and, optionally, in the `[workspace.lints]` table of the root
-`Cargo.toml`. Do not sprinkle `#[allow(...)]` to silence CI; if a lint is wrong
-for the whole workspace, change the policy in one place and say why in the PR.
+`clippy.toml` only tunes lint thresholds/behaviour. Lint *levels* are set in the
+`[workspace.lints]` table of the root `Cargo.toml`, which every member crate
+inherits with `[lints] workspace = true` (a new crate must add it too), and CI
+runs clippy with `-D warnings` on top. The table denies:
+
+- `clippy::all`, so a Clippy finding fails a local `cargo clippy` as well as CI;
+- `unsafe_code`: `unsafe` is allowed only at the sites `ENGINEERING.md` §5
+  authorises, each with its own block-scoped `#[allow(unsafe_code)]`. A new
+  `unsafe` anywhere else does not compile until it has a benchmark, a
+  `// SAFETY:` comment and maintainer sign-off, and its own `allow`;
+- `clippy::undocumented_unsafe_blocks`: every `unsafe` block, including the
+  authorised ones, needs its `// SAFETY:` comment.
+
+`missing_docs` is not in the table, because with `-D warnings` a workspace-wide
+`warn` would fail every crate that still has undocumented public items. A crate
+turns it on with `#![warn(missing_docs)]` in its `lib.rs` once it is fully
+documented, and must then stay that way.
+
+The workspace boundaries of `ENGINEERING.md` §2 (`pyo3` only in the crates
+allowed to touch Python) are enforced by `cargo deny check`, through the `bans`
+section of `deny.toml`: it names the only crates that may depend directly on
+`pyo3` and on every crate that links it (`pyo3-ffi`, `numpy` and the
+PyO3-touching workspace crates; nothing may depend on `polypus`).
+
+Do not sprinkle `#[allow(...)]` to silence CI; if a lint is wrong for the whole
+workspace, change the policy in one place and say why in the PR.
 
 ## Commit messages
 

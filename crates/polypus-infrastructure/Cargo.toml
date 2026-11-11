@@ -48,3 +48,6 @@ polypus-subprocess-backend = { workspace = true }
 # The conformance battery, used by `tests/conformance.rs` to certify the four
 # built-in backends against the documented semantics. Pyo3-free dev-only dependency.
 polypus-backend-conformance = { workspace = true }
+
+[lints]
+workspace = true
