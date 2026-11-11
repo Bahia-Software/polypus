@@ -16,3 +16,6 @@ polypus-backend = { workspace = true }
 # Used only to *build the circuits* the battery feeds a backend (a Bell pair, an
 # all-ones deterministic circuit, mixed widths). No PyO3.
 polypus-circuit = { workspace = true }
+
+[lints]
+workspace = true

@@ -25,3 +25,6 @@ polypus-qml = { workspace = true }
 pyo3 = { workspace = true }
 # Count-weighted aggregation in the Python-callback observable fallback.
 rayon = { workspace = true }
+
+[lints]
+workspace = true
