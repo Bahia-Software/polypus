@@ -147,6 +147,11 @@ Entries were curated from the Conventional Commits history. Releases before
   its own block-scoped `allow`. `missing_docs` is on in the crates that are
   already fully documented, and `cargo deny` keeps `pyo3` out of the pure
   crates (#408).
+- For contributors: the CI, Hygiene and SonarQube Cloud workflows also run on
+  GitHub merge-queue groups, a prerequisite for enabling the queue on `main`.
+  Hygiene checks the queue's candidate commit against `main` with the public
+  rules; SonarQube Cloud skips its jobs there, since the quality gate already
+  ran on the pull request and the push to `main` reports on the merged commit.
 
 ### Fixed
 - `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a

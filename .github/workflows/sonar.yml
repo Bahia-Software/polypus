@@ -3,10 +3,16 @@ name: SonarQube Cloud
 # Code-quality dashboard (sonar-project.properties): Rust and Python coverage,
 # the clippy report, then the SonarQube Cloud scan. On pull requests the scan
 # job fails when the quality gate fails; pushes to main only report.
+#
+# Merge-queue groups skip every job: the quality gate already ran on the pull
+# request, and the push to main reports on the merged commit. A skipped job
+# satisfies a required check, so the queue does not wait on the 45-minute
+# coverage jobs nor creates a SonarQube branch per queue group.
 on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
 
 concurrency:
   group: sonar-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('push-{0}', github.run_id) }}
@@ -24,6 +30,7 @@ jobs:
   # the Python suite reaches is measured by the `python` job.
   rust:
     name: Rust coverage + clippy report
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -86,6 +93,7 @@ jobs:
   # it reaches (lcov-python.info).
   python:
     name: Python coverage
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -154,6 +162,7 @@ jobs:
   scan:
     name: SonarQube Cloud scan
     needs: [rust, python]
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # Pull requests from forks get no secrets, and the token is missing until

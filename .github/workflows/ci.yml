@@ -4,9 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
 
 # Pull requests: one group per PR, so a new push cancels the run it supersedes.
-# Pushes to main: one group per run, never cancelled. The release gate
+# Pushes to main and merge-queue groups: one group per run, never cancelled. The release gate
 # (release.yml) needs a completed push run for the exact commit it publishes,
 # and a shared group would cancel a queued run as soon as a newer one queued.
 concurrency:
