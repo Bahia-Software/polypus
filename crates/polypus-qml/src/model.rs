@@ -661,8 +661,11 @@ impl CompiledModel {
     /// - a sample of the wrong width is [`QmlError::FeatureCountMismatch`], and
     ///   an amplitude or basis encoder rejects its samples as
     ///   [`template_for`](Self::template_for) does;
-    /// - a model with an instruction the shift rule cannot differentiate is
-    ///   [`QmlError::NoExactGradient`], whatever `wrt`;
+    /// - a model with an instruction no exact gradient differentiates is
+    ///   [`QmlError::NoExactGradient`], whatever `wrt`; one only adjoint
+    ///   differentiation takes (the controlled rotations, the phase gates, the
+    ///   `u` family) is built, and only its shifted circuits fail, with the
+    ///   same error;
     /// - with `wrt` [`Inputs`](JacobianWrt::Inputs) or
     ///   [`Both`](JacobianWrt::Both), an amplitude or basis encoder, whose
     ///   angles have no derivative in `x`, is [`QmlError::NoInputGradient`];

@@ -16,7 +16,9 @@ use crate::{
 };
 use polypus_backend::mem_budget::{active_budget, check_fits};
 use polypus_circuit::{ConcreteCircuit, GateInstruction, ParameterizedCircuit};
-use polypus_sim::{sample_projected, SimError, Simulator, StatevectorSimulator, MAX_CLBITS};
+use polypus_sim::{
+    sample_projected, AngleRef, SimError, Simulator, StatevectorSimulator, MAX_CLBITS,
+};
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -431,10 +433,11 @@ impl NativeStatevectorBackend {
     /// Whether an adjoint gradient of `num_qubits`-qubit circuits fits in the
     /// memory budget (issue #503): `Ok(true)` when the two statevectors one run
     /// holds ([`polypus_sim::ADJOINT_STATEVECTORS`]) fit, `Ok(false)` when one
-    /// fits but not two — the caller then takes the parameter shift, which needs
-    /// one, and this logs that at `info` level the first time it happens on
-    /// this backend (never silently, and not again on every gradient of a long
-    /// fit) — and
+    /// fits but not two — the caller then takes the parameter shift, which
+    /// needs a single statevector (unless the model has no shift rule: a model
+    /// only the adjoint differentiates fails instead, issue #561), and this logs
+    /// that at `info` level the first time it happens on this backend (never
+    /// silently, and not again on every gradient of a long fit) — and
     /// [`BackendError::InsufficientMemory`] when not even one fits, the error
     /// [`run_circuits_exact`](Self::run_circuits_exact) refuses the same circuits
     /// with. So the adjoint never refuses a width the exact path runs.
@@ -462,8 +465,9 @@ impl NativeStatevectorBackend {
         if !self.shift_fallback_logged.swap(true, Ordering::Relaxed) {
             log::info!(
                 "the exact gradient of a {num_qubits}-qubit circuit falls back to the parameter-shift \
-                 rule: the adjoint gradient needs {} statevectors at once and the memory budget \
-                 holds one",
+                 rule where the model has one (a model only the adjoint differentiates fails \
+                 instead): the adjoint gradient needs {} statevectors at once and the memory \
+                 budget holds one",
                 polypus_sim::ADJOINT_STATEVECTORS
             );
         }
@@ -472,8 +476,8 @@ impl NativeStatevectorBackend {
 
     /// Run adjoint differentiations: for each task, the derivatives of
     /// `⟨ψ|O|ψ⟩` (`O|b⟩ = weight(b)|b⟩`, `|ψ⟩` the final state of its circuit)
-    /// with respect to the angle of each gate at a position of its `wrt`, one
-    /// row per task in submission order. See
+    /// with respect to each gate angle named in its `wrt`, one row per task in
+    /// submission order. See
     /// [`StatevectorSimulator::adjoint_gradient`] for what is differentiated.
     ///
     /// The exact path's counterpart for gradients, an **inherent** method like
@@ -575,15 +579,16 @@ impl NativeStatevectorBackend {
 }
 
 /// One adjoint differentiation for
-/// [`NativeStatevectorBackend::run_adjoint`]: a circuit, the positions of the
-/// rotations to differentiate, and the diagonal observable as a weight per
-/// basis state (qubit `q` is bit `q`).
+/// [`NativeStatevectorBackend::run_adjoint`]: a circuit, the gate angles to
+/// differentiate, and the diagonal observable as a weight per basis state
+/// (qubit `q` is bit `q`).
 #[derive(Debug, Clone)]
 pub struct AdjointTask<'a, W> {
     /// The circuit, simulated exactly as written.
     pub circuit: &'a ConcreteCircuit,
-    /// Positions in `circuit.gates()` of the gates to differentiate.
-    pub wrt: &'a [usize],
+    /// The angles to differentiate: a position in `circuit.gates()` and one of
+    /// that gate's angles each.
+    pub wrt: &'a [AngleRef],
     /// `O|b⟩ = weight(b)|b⟩`; pure and callable from any thread.
     pub weight: W,
 }
@@ -2289,6 +2294,14 @@ mod tests {
             1,
             "two fallbacks of one backend are logged once, at info"
         );
+        // #561: the record does not promise a fallback a model only the
+        // adjoint differentiates cannot take.
+        assert!(CAPTURE
+            .0
+            .lock()
+            .expect("the capture lock is never poisoned")
+            .iter()
+            .any(|(_, message)| message.contains("only the adjoint differentiates fails instead")));
         let fresh = NativeStatevectorBackend::new(0);
         assert!(!fresh.adjoint_fits_against(n, budget(one)).unwrap());
         assert_eq!(captured_fallbacks(n), 2, "another backend logs its own");
@@ -2325,7 +2338,7 @@ mod tests {
         let circuits: Vec<ConcreteCircuit> = (0..5)
             .map(|i| adjoint_circuit(3, 0.4 + 0.3 * i as f64))
             .collect();
-        let wrt = [1usize, 3, 4];
+        let wrt = [1, 3, 4].map(|position| AngleRef::new(position, 0));
         let tasks: Vec<AdjointTask<'_, _>> = circuits
             .iter()
             .map(|circuit| AdjointTask {
@@ -2372,7 +2385,7 @@ mod tests {
         let stop = || true;
         let task = [AdjointTask {
             circuit: &long,
-            wrt: &[0],
+            wrt: &[AngleRef::new(0, 0)],
             weight: z0,
         }];
         assert!(matches!(
@@ -2380,14 +2393,15 @@ mod tests {
             Err(BackendError::Aborted(_))
         ));
         let bad = adjoint_circuit(2, 0.1);
-        let not_a_rotation = [AdjointTask {
+        // Gate 0 is an `H`: no angle to differentiate.
+        let no_angle = [AdjointTask {
             circuit: &bad,
-            wrt: &[0],
+            wrt: &[AngleRef::new(0, 0)],
             weight: z0,
         }];
-        match backend.run_adjoint(&not_a_rotation, None) {
+        match backend.run_adjoint(&no_angle, None) {
             Err(BackendError::NativeCircuit(message)) => {
-                assert!(message.contains("not a Pauli rotation"), "{message}")
+                assert!(message.contains("has no angle"), "{message}")
             }
             other => panic!("expected NativeCircuit, got {other:?}"),
         }

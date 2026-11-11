@@ -69,6 +69,25 @@ Entries were curated from the Conventional Commits history. Releases before
   `ExpectationJacobian`'s), `AdjointRun` and `DiagonalObservable`. In
   `polypus-infrastructure`: `NativeStatevectorBackend::adjoint_fits`/
   `run_adjoint` and `AdjointTask`. `benchmarks/bench_adjoint.py` measures it.
+- Adjoint differentiation of the gates the parameter shift has no rule for
+  (#561): `polypus-sim`'s `StatevectorSimulator::adjoint_gradient` also
+  differentiates `Crx`, `Cry`, `Crz`, `Cp`, `Cu1`, `P`, `U1`, `U`, `UGate`,
+  `U2`, `Cu3` and `Cu` (each of their angles, through its generator, the phase
+  of `Cu`/`Cu3` relative to the control included) and `U0` (derivative `0`),
+  with a new reduction kernel that gives the same bits with and without the
+  `parallel` feature. In `polypus-qml` a model with such gates is built like
+  any other and gets its exact gradient and Jacobian by the adjoint
+  (`adjoint_runs`, `gradient_from_adjoint`, `jacobian_from_adjoint`), while
+  the parameter-shift methods fail with `QmlError::NoExactGradient`, which
+  names the instruction and points at exact mode; when exact mode cannot fit
+  the adjoint's two statevectors it has no shift to fall back to, and the
+  error says so (`QmlProblem::check_shift_fallback`,
+  `ExpectationJacobian::check_shift_fallback`). No layer emits these gates
+  yet, so nothing changes for a model built from Python. New: `AngleRef` in
+  `polypus-circuit` (re-exported by `polypus-sim`), the `SimError` variant
+  `AngleIndexOutOfRange`, and `polypus-qml`'s `test-support` feature (hidden
+  constructors for the tests of the crates downstream; never enabled in a
+  library or wheel build).
 - `polypus.qml.Model.num_observables`, the readout's observables (the columns
   of `qml.expval`), and pickling of `Model`, so `copy.deepcopy` works: it
   travels as the JSON of its spec, rebuilt through the checks of `qml.load`
@@ -95,6 +114,20 @@ Entries were curated from the Conventional Commits history. Releases before
   `libm` (`erf` for the Boys function).
 
 ### Changed
+- **BREAKING (Rust):** an adjoint derivative is named by an `AngleRef`
+  (`position`, `angle`) instead of a gate position, so a gate with several
+  angles can have one derivative per angle (#561):
+  `StatevectorSimulator::adjoint_gradient`'s `wrt`, `AdjointTask::wrt` in
+  `polypus-infrastructure` and `AdjointRun::wrt` in `polypus-qml` are
+  `&[AngleRef]`/`Vec<AngleRef>`. A Pauli rotation's angle is
+  `AngleRef::new(position, 0)`; its derivative is unchanged, bit for bit.
+  `SimError` has the new variant `AngleIndexOutOfRange`, and
+  `NotDifferentiable` now means a gate without angles or the call of a
+  declared gate.
+- The message of `QmlError::NoExactGradient`, which reaches Python as
+  `polypus.EvaluationError` (from `Model.fit`) or `ValueError` (from
+  `qml.jacobian`), starts `no exact gradient for this model:` instead of
+  `no exact parameter-shift gradient for this model:` (#561).
 - **BREAKING (Rust):** `polypus_qml::ValidationError` has two new variants,
   `StronglyEntanglingRangesLength` and `StronglyEntanglingRangeOutOfBounds`,
   so an exhaustive `match` on it outside its crate must handle them (#505).

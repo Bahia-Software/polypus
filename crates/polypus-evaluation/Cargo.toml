@@ -25,3 +25,8 @@ polypus-qml = { workspace = true }
 pyo3 = { workspace = true }
 # Count-weighted aggregation in the Python-callback observable fallback.
 rayon = { workspace = true }
+
+[dev-dependencies]
+# The oracle's tests build a problem whose templates hold gates no layer emits
+# (issue #561); the feature only exists for tests, never for a library build.
+polypus-qml = { workspace = true, features = ["test-support"] }

@@ -21,7 +21,7 @@ Rules of the road:
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`, `test_cunqa_contract.py`) | ✅ present | the CUNQA seal sent `cores` to `qraise`, which CUNQA renamed `cores_per_qpu` in 2.4.0, so every reservation raised `TypeError` on CUNQA ≥ 2.4 (#204, fixed: `cores_per_qpu` goes through unchanged; **CUNQA 2.3 is no longer supported**); `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` received `backend` and `id` and CUNQA `run_qcs` received `backend`, none of them read (LOCAL-2, #230, fixed: Rust no longer sends them); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
-| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings; `polypus-qml`'s `every_instruction_kind_is_classified` in `src/problem.rs` for the gradient's gate classification; `polypus-sim`'s `apply_inverse_undoes_every_instruction_kind` in `src/statevector.rs` and `every_instruction_kind_is_differentiated_through` in `tests/adjoint.rs` for the adjoint gradient) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
+| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings; `polypus-qml`'s `every_instruction_kind_is_classified` in `src/problem.rs` for the gradient's gate classification; `polypus-sim`'s `apply_inverse_undoes_every_instruction_kind` in `src/statevector.rs`, `every_generator_is_the_derivative_of_the_simulated_matrix` in `src/adjoint.rs` (the table of generators) and `every_instruction_kind_is_differentiated_through` in `tests/adjoint.rs` for the adjoint gradient) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed); CUNQA 3.0.0 failed such a job (`key 'counts' not found`) and split the key of a circuit with several classical registers with spaces (#253, #304, fixed in the seal); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` (+ `crates/polypus-optimizers/tests/initial_point.rs` and `tests/python/test_initial_point.py` for `initial_point`, `tests/python/test_final_shots.py` for `final_shots`, and `tests/python/test_qml_native_initial_point_final_shots.py` for both through `qml.Model.fit`; `crates/polypus-optimizers/tests/observer.rs` and `tests/python/test_callback.py` for `callback`) | ✅ present | DE `best_fitness` mismatch (C4) |
@@ -435,20 +435,31 @@ semantics** (the native simulator is the reference; QIR decompositions may
 differ only by a global phase; the OpenQASM 3 definitions may not differ at
 all, under the profile's Qiskit phase conventions).
 
-**Consumers that classify the vocabulary.** `polypus-qml`'s exact
-parameter-shift gradient (`classify` in `crates/polypus-qml/src/problem.rs`)
-sorts every instruction kind into the Pauli rotations it can differentiate
-(`rx`, `ry`, `rz`, `rxx`, `rzz`), the parameter-free instructions it copies,
-and the angle-taking ones it rejects. An instruction kind it does not name is
-rejected, never passed through, so adding an instruction also means
-classifying it there: `every_instruction_kind_is_classified` fails until it is.
-The native simulator's adjoint gradient
-(`StatevectorSimulator::adjoint_gradient`) differentiates the same five
-rotations and steps back through the inverse of every other instruction
+**Consumers that classify the vocabulary.** `polypus-qml`'s exact gradient
+(`classify` in `crates/polypus-qml/src/problem.rs`) sorts every instruction
+kind into the Pauli rotations both its gradients differentiate (`rx`, `ry`,
+`rz`, `rxx`, `rzz`: the parameter shift and the adjoint), the angle-taking
+kinds only the adjoint differentiates (`crx`, `cry`, `crz`, `cp`, `cu1`, `p`,
+`u1`, `u`/`U`, `u2`, `cu3`, `cu`, `u0`), the parameter-free instructions it
+copies, and the one angle-taking kind no exact gradient differentiates (the
+call of a declared gate), which it rejects. An instruction kind it does not
+name is rejected, never passed through, so adding an instruction also means
+classifying it there: `every_instruction_kind_is_classified` fails until it
+is, and it lists the three sets of angle-taking kinds explicitly. The native
+simulator's adjoint gradient (`StatevectorSimulator::adjoint_gradient`)
+differentiates the Pauli rotations and the adjoint-only kinds above, each
+angle through the generator `G = i·(∂U)·U†` of the matrix it simulates (the
+table of generators, `family` in `crates/polypus-sim/src/adjoint.rs`; a
+gate's angles are numbered as `polypus_circuit::AngleRef` documents), and
+steps back through the inverse of every other instruction
 (`Statevector::apply_inverse`, built from the vocabulary itself: no
 instruction is added for it); `apply_inverse_undoes_every_instruction_kind`
 and `every_instruction_kind_is_differentiated_through` fail until a new
-instruction has its inverse.
+instruction has its inverse, and the latter also until every angle-taking
+kind but the declared gate is differentiated;
+`every_generator_is_the_derivative_of_the_simulated_matrix` holds each
+generator to the matrix `Statevector::apply` applies (so a change of phase
+convention there fails it).
 
 Corollaries:
 
@@ -2348,9 +2359,12 @@ batching and distribution are the oracle's concern.
   machine precision for every layer. One gradient runs
   `num_gradient_circuits() = num_circuits · (1 + 2 · occurrences)` circuits. The
   rule is exact only for gates `exp(−iθP/2)` with `P` a Pauli product; every
-  `GateInstruction` kind is classified, and a model containing one the rule
-  cannot handle has no exact gradient (`QmlError::NoExactGradient`, raised
-  lazily, so gradient-free optimizers still train it).
+  `GateInstruction` kind is classified (C-2), and a model containing one the
+  rule cannot handle has no parameter-shift gradient (`QmlError::NoExactGradient`,
+  raised lazily, so gradient-free optimizers still train it). Its message
+  names the instruction (position and gate); for a gate only the adjoint
+  differentiates (below) it says that the gradient with shots cannot
+  differentiate it and exact mode (`exact=True`) can.
   - *Adjoint differentiation.* For a caller that holds the exact statevector,
     `adjoint_runs(θ, base)` and `gradient_from_adjoint` give the same gradient
     with no shifted circuit: one run per sample — the untied template bound at
@@ -2364,6 +2378,21 @@ batching and distribution are the oracle's concern.
     in about three simulations holding two statevectors
     (`StatevectorSimulator::adjoint_gradient`), against `2 · occurrences + 1`
     circuits.
+  - *Gates only the adjoint differentiates (#561).* The adjoint also takes the
+    controlled rotations, the phase gates and the `u` family (C-2), which have
+    no two-term shift rule: each angle through its generator, the phase of
+    `cu`/`cu3` relative to the control included, `u0` with derivative `0`. A
+    model with one is built like any other; its occurrences are its trainable
+    angles, numbered in gate order and, within a gate, in angle order
+    (`AngleRef`: `θ, φ, λ`, then `cu`'s `γ`; `u2`'s `φ, λ`), and `adjoint_runs`
+    / `gradient_from_adjoint` give its exact gradient — the derivative of the
+    fitness, a parameter several angles share summed — while every
+    parameter-shift method (`num_gradient_circuits`, `gradient_circuits`,
+    `gradient_from_counts`, `gradient_from_probabilities`) fails with
+    `NoExactGradient`. One that reads the sample, an expression angle, or the
+    call of a declared gate still has no exact gradient at all, and that
+    error comes first. No layer emits these gates today, so no model built
+    from Python reaches either the capability or the error.
 - **(f) The oracle.** The `QmlOracle` scores a native problem
   (`QmlSource::Native`) through the same candidate windows as the Qiskit form:
   one finite fitness per candidate (C-5), sampled through the planner or, in
@@ -2376,8 +2405,13 @@ batching and distribution are the oracle's concern.
   holds one statevector of the width but not two
   (`NativeStatevectorBackend::adjoint_fits`), it is the parameter shift's
   instead, logged at `info` the first time on that backend (once per fit, or
-  per `qml.jacobian` call, not once per gradient); when it holds none, the
-  error is the exact path's
+  per `qml.jacobian` call, not once per gradient) — unless the model is one
+  only the adjoint differentiates ((e)), which has no shift to fall back to:
+  the caller asks `QmlProblem::check_shift_fallback` (or
+  `ExpectationJacobian::check_shift_fallback`) first, and the error is
+  `NoExactGradient` naming the memory of two statevectors and the
+  instruction, before anything runs; when the budget holds none, the error is
+  the exact path's
   `InsufficientMemory`. The sampled (shots) gradient is always the parameter
   shift's. Without a minibatch its `value_and_gradient`
   returns `θ`'s fitness, read from the gradient's own base circuits (those
@@ -2422,7 +2456,8 @@ batching and distribution are the oracle's concern.
     gates the shift would move, and `jacobian_from_adjoint` reads them through
     the same bookkeeping (parameter, or feature times its chain-rule factor),
     with the same blocks. No loss: the observable is the readout's own. It is
-    the shift's Jacobian to rounding.
+    the shift's Jacobian to rounding, and, on a model only the adjoint
+    differentiates ((e)), the Jacobian itself.
   - *Circuits and order.* `2 · shifts` circuits per sample and no unshifted
     one, `shifts` counting the gates that read a parameter (a parameter shared
     by `g` gates counts `g` times) for `Params`, the gates that read the sample
@@ -2437,13 +2472,18 @@ batching and distribution are the oracle's concern.
     from counts, an unbiased estimator. The chain rule over it,
     `−(1/n)·Σ_i Σ_o ∂loss/∂⟨O_o⟩(x_i) · J[i, o, :]`, is `QmlProblem`'s
     gradient for every loss.
-  - *Errors, all at construction.* A sample of the wrong width or one its
-    encoder rejects is that `QmlError`; a model the shift rule cannot
-    differentiate is `QmlError::NoExactGradient`, whatever `wrt`; with
+  - *Errors, at construction but one.* A sample of the wrong width or one its
+    encoder rejects is that `QmlError`; a model no exact gradient
+    differentiates is `QmlError::NoExactGradient`, whatever `wrt`; with
     `Inputs` or `Both`, an amplitude or basis encoder, whose angles have no
     derivative in the sample, is `QmlError::NoInputGradient` naming it;
     samples that read their parameters or features through different gates are
-    `QmlError::NoExactGradient`, never a silently wrong Jacobian.
+    `QmlError::NoExactGradient`, never a silently wrong Jacobian. The one
+    error after construction: a model only the adjoint differentiates ((e)) is
+    built, and its shifted circuits (`circuits`) and their readers
+    (`jacobian_from_counts`, `jacobian_from_probabilities`) fail with
+    `NoExactGradient`; its adjoint runs work. `qml.jacobian(exact=True)`'s
+    memory fallback is (f)'s.
 
 ### The Python API (`polypus.qml`)
 
@@ -2756,19 +2796,28 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     `the_adjoint_gradient_needs_an_exact_gradient_too` in `src/problem.rs`,
     with `crates/polypus-sim/tests/adjoint.rs` for the simulator's derivative:
     (e)'s adjoint differentiation;
+  - the `untie_*` tests (among them
+    `untie_numbers_every_angle_of_each_adjoint_only_gate_in_angle_order`, which
+    pins each gate's angle order) and
+    `a_model_only_the_adjoint_differentiates_gets_its_exact_gradient_from_it`
+    in `src/problem.rs`, `adjoint_only_messages_name_the_gate_and_the_way_out`
+    in `src/error.rs`, and in `crates/polypus-sim` the adjoint-only tests of
+    `tests/adjoint.rs` with `every_generator_is_the_derivative_of_the_simulated_matrix`
+    in `src/adjoint.rs`: (e)'s gates only the adjoint differentiates;
   - `crates/polypus-qml/tests/jacobian.rs`, the `untie_traced_*` tests in
     `src/problem.rs`, the tests in `src/jacobian.rs` (a structure other than
-    sample 0's, an angle gate that is not a Pauli rotation, an opaque encoder
-    against `wrt`), and the trace tests in `src/model.rs` and the encoders:
-    (g);
+    sample 0's, an angle gate only the adjoint differentiates, a declared
+    gate, an opaque encoder against `wrt`), and the trace tests in
+    `src/model.rs` and the encoders: (g);
   - the `serde_tests` and `trained_model_tests` in `src/model.rs`: the save
     format, exact round-trip and revalidation on load;
   - the `native_*`, `a_minibatch_*`, `evaluate_full_*` and `the_factory_*`
     tests in `crates/polypus-evaluation/src/qml_oracle.rs`, the `exact_*`
     and `adjoint_*` tests and
     `the_adjoint_needs_two_statevectors_and_falls_back_to_the_shift_with_one`
-    in `crates/polypus-infrastructure/src/native.rs`, `the_shift_fallback_*`
-    and `a_cancelled_exact_gradient_*` in `qml_oracle.rs`, and the `adam_*` and
+    in `crates/polypus-infrastructure/src/native.rs`, `the_shift_fallback_*`,
+    `a_model_only_the_adjoint_differentiates_explains_each_failure` and
+    `a_cancelled_exact_gradient_*` in `qml_oracle.rs`, and the `adam_*` and
     `a_minibatched_*` tests in `crates/polypus-orchestration/src/dispatch.rs`:
     (f);
   - `a_bound_circuit_converts_gate_for_gate` and
@@ -2780,8 +2829,9 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     independent of the block size, row order, one backend created and closed
     once, a cancellation or an error between blocks, a backend closed when no
     scheduler can be built over it, the array conversion, the exact Jacobian
-    by the adjoint whatever the blocks, a Ctrl+C inside an exact block and the
-    watcher that stops it), with the window
+    by the adjoint whatever the blocks, the exact Jacobian of a model only the
+    adjoint differentiates that cannot fall back, a Ctrl+C inside an exact
+    block and the watcher that stops it), with the window
     tests in `crates/polypus-evaluation/src/qml_oracle.rs`
     (`a_backend_*`, `the_lift_*`, `many_circuits_per_item_*`,
     `the_window_is_never_zero`): `qml.expval`/`qml.jacobian`'s execution.

@@ -773,7 +773,7 @@ impl QmlOracle {
                 if native.adjoint_fits(width)? {
                     self.exact_adjoint_gradient(native, &problem, theta, base)
                 } else {
-                    self.exact_shift_gradient(native, &problem, theta)
+                    self.exact_shift_gradient(native, &problem, theta, width)
                 }
             }
             None => {
@@ -840,13 +840,19 @@ impl QmlOracle {
     /// The exact parameter-shift gradient: every circuit of
     /// [`gradient_circuits`](QmlProblem::gradient_circuits) run exactly in one
     /// batch, the fitness read from the base circuits that lead it. What exact
-    /// mode runs when the adjoint's two statevectors do not fit (M2).
+    /// mode runs when the adjoint's two statevectors of `width` qubits do not
+    /// fit (M2). A model only the adjoint differentiates (#561) has no shift
+    /// to fall back to: [`QmlProblem::check_shift_fallback`] says so first, in
+    /// terms of the memory, so the end user is not told to use the exact mode
+    /// they are in.
     fn exact_shift_gradient(
         &self,
         native: &NativeStatevectorBackend,
         problem: &QmlProblem,
         theta: &[f64],
+        width: usize,
     ) -> Result<(f64, Vec<f64>), EvaluationError> {
+        problem.check_shift_fallback(width)?;
         let bound = native_circuits(problem.gradient_circuits(theta)?);
         let probabilities = self.run_exact(native, &bound)?;
         let n = problem.num_circuits();
@@ -1700,23 +1706,32 @@ class Bound:
     /// A small native problem: 3 qubits, an angle encoder, a basic convolution
     /// (shared parameters) and a `Z₁` readout, over `n` samples.
     fn native_problem(n: usize) -> Arc<QmlProblem> {
+        let data = Dataset::from_rows(&native_rows(n), &native_labels(n)).unwrap();
+        Arc::new(QmlProblem::new(native_model(), data, Loss::SquaredError).unwrap())
+    }
+
+    fn native_model() -> polypus_qml::CompiledModel {
         let z1 =
             Observable::new(vec![(1.0, PauliString::new(vec![(1, Pauli::Z)]).unwrap())]).unwrap();
-        let model = QuantumModel::new(3)
+        QuantumModel::new(3)
             .angle_encoder(RotationAxis::Ry)
             .hardware_efficient(1)
             .conv(polypus_qml::ConvBlock::Basic)
             .readout(Readout::new(vec![z1], Decision::Raw).unwrap())
             .compile(3)
-            .unwrap();
-        let rows: Vec<Vec<f64>> = (0..n)
+            .unwrap()
+    }
+
+    fn native_rows(n: usize) -> Vec<Vec<f64>> {
+        (0..n)
             .map(|i| vec![0.3 * i as f64, 1.1 - 0.2 * i as f64, 0.7 + 0.1 * i as f64])
-            .collect();
-        let labels: Vec<f64> = (0..n)
+            .collect()
+    }
+
+    fn native_labels(n: usize) -> Vec<f64> {
+        (0..n)
             .map(|i| if i % 2 == 0 { 0.5 } else { -0.4 })
-            .collect();
-        let data = Dataset::from_rows(&rows, &labels).unwrap();
-        Arc::new(QmlProblem::new(model, data, Loss::SquaredError).unwrap())
+            .collect()
     }
 
     fn native_oracle(
@@ -2094,7 +2109,7 @@ class Bound:
             .exact_adjoint_gradient(native, &problem, theta, base)
             .unwrap();
         let (shift_value, shift) = oracle
-            .exact_shift_gradient(native, &problem, theta)
+            .exact_shift_gradient(native, &problem, theta, 3)
             .unwrap();
         assert_eq!(adjoint_value, shift_value);
         assert_close_to_the_shift(&adjoint, &shift);
@@ -2103,6 +2118,114 @@ class Bound:
             oracle.value_and_gradient(theta, problem.num_params()),
             Some((adjoint_value, adjoint))
         );
+    }
+
+    /// `native_problem(n)`'s problem with, after its ansatz, gates only the
+    /// adjoint differentiates (#561) reading its parameters — a controlled
+    /// rotation first, at the same position in every sample. No layer emits
+    /// them, so the templates are written by hand (`test-support`).
+    fn adjoint_only_problem(n: usize) -> (Arc<QmlProblem>, usize) {
+        use polypus_circuit::{GateInstruction as G, GateParam::Param, ParameterizedCircuit};
+        let problem = Arc::try_unwrap(native_problem(n)).expect("one owner");
+        let model = native_model();
+        let mut first = None;
+        let templates = native_rows(n)
+            .iter()
+            .map(|row| {
+                let mut gates = model.template_for(row).unwrap().gates().to_vec();
+                assert_eq!(gates.pop(), Some(G::MeasureAll));
+                first = Some(gates.len());
+                gates.extend([
+                    G::Crx {
+                        control: 0,
+                        target: 1,
+                        theta: Param(0),
+                    },
+                    G::Cu {
+                        control: 2,
+                        target: 1,
+                        theta: Param(1),
+                        phi: polypus_circuit::GateParam::Fixed(0.2),
+                        lam: Param(2),
+                        gamma: Param(0),
+                    },
+                    G::H(1),
+                    G::MeasureAll,
+                ]);
+                let mut template = ParameterizedCircuit::new(3);
+                for gate in gates {
+                    template.try_push(gate).unwrap();
+                }
+                template
+            })
+            .collect();
+        let problem = problem.with_templates_for_tests(templates).unwrap();
+        (Arc::new(problem), first.expect("one sample at least"))
+    }
+
+    fn no_exact_gradient(error: Option<&EvaluationError>) -> &str {
+        match error {
+            Some(EvaluationError::Qml(QmlError::NoExactGradient { reason })) => reason,
+            other => panic!("expected NoExactGradient, got {other:?}"),
+        }
+    }
+
+    /// #561, through the oracle that `Model.fit` trains with, for a model only
+    /// the adjoint differentiates: exact mode takes the adjoint (and it is the
+    /// adjoint gradient computed apart); when two statevectors do not fit, the
+    /// fallback says so — the memory, the instruction and its gate, and exact
+    /// mode — instead of telling the user to use exact mode; with shots, the
+    /// parameter shift's own message names the instruction and points at exact
+    /// mode.
+    #[test]
+    fn a_model_only_the_adjoint_differentiates_explains_each_failure() {
+        let (problem, first) = adjoint_only_problem(4);
+        let theta = &native_candidates(&problem, 1)[0];
+        let instruction = format!("instruction {first} (Crx");
+
+        let exact = native_oracle(&problem, true, None, 0);
+        let (value, gradient) = exact
+            .value_and_gradient(theta, problem.num_params())
+            .expect("the adjoint differentiates it");
+        assert!(value.is_finite());
+        assert_eq!(gradient, adjoint_gradient(&problem, theta));
+        assert!(gradient.iter().any(|g| g.abs() > 1e-6), "{gradient:?}");
+
+        let QmlSource::Native {
+            exact: Some(native),
+            ..
+        } = &exact.source
+        else {
+            panic!("an exact native oracle");
+        };
+        let memory = exact
+            .exact_shift_gradient(native, &problem, theta, 3)
+            .unwrap_err();
+        let reason = no_exact_gradient(Some(&memory));
+        for needle in [
+            instruction.as_str(),
+            "two statevectors of 3 qubits",
+            "exact",
+        ] {
+            assert!(reason.contains(needle), "{needle:?} missing: {reason}");
+        }
+        assert!(
+            memory
+                .to_string()
+                .contains("no exact gradient for this model"),
+            "{memory}"
+        );
+
+        let sampled = native_oracle(&problem, false, None, 0);
+        assert_eq!(
+            sampled.gradient_batch(theta, problem.num_params()),
+            vec![0.0; problem.num_params()]
+        );
+        let err = sampled.errors.take().expect("the failure is recorded");
+        let reason = no_exact_gradient(err.downcast_ref::<EvaluationError>());
+        for needle in [instruction.as_str(), "shots", "exact=True"] {
+            assert!(reason.contains(needle), "{needle:?} missing: {reason}");
+        }
     }
 
     /// A cancellation stops the exact gradient as one between the planner's

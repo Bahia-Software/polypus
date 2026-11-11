@@ -74,3 +74,9 @@ uuid = { workspace = true }
 # (crates/polypus/src/bindings/calibration.rs); the actual parallel kernels
 # live in polypus-sim/polypus-infrastructure, which depend on it themselves.
 rayon = { workspace = true }
+
+[dev-dependencies]
+# The tests of `qml.jacobian`'s exact path build a Jacobian whose templates
+# hold gates no layer emits (issue #561); the feature only exists for tests,
+# never for the wheel.
+polypus-qml = { workspace = true, features = ["serde", "test-support"] }

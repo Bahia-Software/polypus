@@ -14,12 +14,15 @@
 //! ([`JacobianBlock::jacobian_from_adjoint`](crate::JacobianBlock::jacobian_from_adjoint)).
 //!
 //! The circuits are the parameter shift's untied templates bound at the
-//! unshifted values, so the gates differentiated are exactly the ones the shift
-//! rule moves, with the same per-occurrence bookkeeping: an angle that several
+//! unshifted values, so the gates differentiated are the ones the shift rule
+//! moves, with the same per-occurrence bookkeeping: an angle that several
 //! gates share is the sum of their derivatives, and a gate that reads the
-//! sample adds its derivative times each feature's chain-rule factor.
+//! sample adds its derivative times each feature's chain-rule factor. On a
+//! model with gates the shift has no rule for (the controlled rotations, the
+//! phase gates, the `u` family; issue #561), the runs differentiate their
+//! trainable angles too, each angle of a multi-angle gate its own occurrence.
 
-use polypus_circuit::ConcreteCircuit;
+use polypus_circuit::{AngleRef, ConcreteCircuit};
 
 use crate::error::QmlError;
 
@@ -94,19 +97,22 @@ impl DiagonalObservable {
 
 /// One adjoint differentiation to run: the derivatives of
 /// `⟨ψ|observable|ψ⟩`, with `|ψ⟩` the final state of `circuit`, with respect
-/// to the angle of each gate at a position in `wrt`.
+/// to each gate angle named in `wrt`.
 ///
 /// The circuit ends in its `measure_all` and is to be simulated **as written**
 /// — not transpiled, nor otherwise rewritten — since `wrt` holds positions in
 /// it. Every gate in `wrt` is a Pauli rotation (`Rx`, `Ry`, `Rz`, `Rxx`,
-/// `Rzz`). The result handed back is one derivative per entry of `wrt`, in
-/// `wrt`'s order.
+/// `Rzz`) or, on a model only the adjoint differentiates, a controlled
+/// rotation, a phase gate or a gate of the `u` family, with the angle named by
+/// its [`AngleRef`]. The result handed back is one derivative per entry of
+/// `wrt`, in `wrt`'s order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AdjointRun {
     /// The untied template bound at the unshifted values.
     pub circuit: ConcreteCircuit,
-    /// Positions in `circuit.gates()` of the gates to differentiate.
-    pub wrt: Vec<usize>,
+    /// The gate angles to differentiate: a position in `circuit.gates()` and
+    /// one of that gate's angles each.
+    pub wrt: Vec<AngleRef>,
     /// The observable to differentiate.
     pub observable: DiagonalObservable,
 }
