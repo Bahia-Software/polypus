@@ -30,3 +30,6 @@ serde_json = { workspace = true, features = ["float_roundtrip"] }
 [features]
 default = []
 serde = ["dep:serde"] # opt-in serialization of compiled models (design doc §17)
+
+[lints]
+workspace = true

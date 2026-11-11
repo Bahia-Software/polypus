@@ -102,6 +102,8 @@
 //! A symmetric kernel computes the upper triangle, diagonal included, and
 //! mirrors it.
 
+#![warn(missing_docs)]
+
 mod adjoint;
 mod dataset;
 mod error;
