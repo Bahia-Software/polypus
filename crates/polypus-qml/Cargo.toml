@@ -35,3 +35,6 @@ serde = ["dep:serde"] # opt-in serialization of compiled models (design doc §17
 # adjoint differentiates). Enable it from `[dev-dependencies]` only; nothing in
 # a library or wheel build may turn it on.
 test-support = []
+
+[lints]
+workspace = true

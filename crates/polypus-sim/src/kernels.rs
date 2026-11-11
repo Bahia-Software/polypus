@@ -53,28 +53,91 @@ fn combine_1q(m: &[[C64; 2]; 2], a: C64, b: C64) -> (C64, C64) {
     (m[0][0] * a + m[0][1] * b, m[1][0] * a + m[1][1] * b)
 }
 
-/// Dense single-qubit gate on target `t`.
-pub(crate) fn apply_1q(data: &mut [C64], n: usize, t: usize, m: &[[C64; 2]; 2], parallel: bool) {
-    // Real `assert!`s, not `debug_assert!`s: the parallel path writes through a
-    // raw pointer, so these O(1) checks are what keep a bad index from being
-    // undefined behaviour in release. Callers validate first and return a
-    // typed error; reaching these is a bug.
-    assert!(t < n && data.len() == 1usize << n);
-    let half = 1usize << (n - 1);
-    let low = (1usize << t) - 1;
-    let bit = 1usize << t;
+/// The amplitude pairs `(i0, i1)` a 2×2 update on target `t` visits, one per
+/// sub-state `g ∈ [0, count)`, as bit masks computed once so the loop body is
+/// the same branch-free arithmetic for both kernels. Built only by
+/// [`Pairs::target`] and [`Pairs::controlled`], which check the operands.
+#[derive(Clone, Copy)]
+struct Pairs {
+    count: usize,
+    /// `i0` is `g` with a zero inserted below `low` and then below `high`
+    /// (bit insertion, see the module docs), with `set` ORed in.
+    low: usize,
+    high: usize,
+    set: usize,
+    /// `1 << t`: `i1 = i0 | bit`.
+    bit: usize,
+}
+
+impl Pairs {
+    /// Every pair on target `t` of an `n`-qubit buffer: `2^(n-1)` of them,
+    /// only bit `t` inserted (`high` = all ones makes the second insertion a
+    /// no-op).
+    fn target(n: usize, t: usize) -> Self {
+        // Real `assert!`s, not `debug_assert!`s: the parallel path writes
+        // through a raw pointer, so these O(1) checks are what keep a bad index
+        // from being undefined behaviour in release. Callers validate first and
+        // return a typed error; reaching these is a bug.
+        assert!(t < n);
+        Pairs {
+            count: 1usize << (n - 1),
+            low: (1usize << t) - 1,
+            high: usize::MAX,
+            set: 0,
+            bit: 1usize << t,
+        }
+    }
+
+    /// Only the pairs on target `t` whose control bit `c` is set: `2^(n-2)` of
+    /// them, both fixed bits inserted as in [`two_qubit_indices`] and bit `c`
+    /// set.
+    fn controlled(n: usize, c: usize, t: usize) -> Self {
+        // See `Pairs::target`.
+        assert!(c < n && t < n && c != t);
+        let (lo, hi) = (c.min(t), c.max(t));
+        Pairs {
+            count: 1usize << (n - 2),
+            low: (1usize << lo) - 1,
+            high: (1usize << hi) - 1,
+            set: 1usize << c,
+            bit: 1usize << t,
+        }
+    }
+
+    /// The pair for sub-state `g`.
+    #[inline]
+    fn pair(self, g: usize) -> (usize, usize) {
+        let a = (g & self.low) | ((g & !self.low) << 1);
+        let i0 = (a & self.high) | ((a & !self.high) << 1) | self.set;
+        (i0, i0 | self.bit)
+    }
+}
+
+/// Apply 2×2 matrix `m` to every pair of `pairs` on an `n`-qubit buffer: the
+/// shared body of [`apply_1q`] and [`apply_controlled_1q`].
+fn apply_pairs(data: &mut [C64], n: usize, pairs: Pairs, m: &[[C64; 2]; 2], parallel: bool) {
+    // See `Pairs::target`.
+    assert!(data.len() == 1usize << n);
+    let count = pairs.count;
 
     #[cfg(feature = "parallel")]
     if parallel {
         use rayon::prelude::*;
         let base = data.as_mut_ptr() as usize;
-        (0..half).into_par_iter().for_each(|g| {
-            let i0 = (g & low) | ((g & !low) << 1);
-            let i1 = i0 | bit;
-            // SAFETY: g ↦ {i0, i1} is injective and the image pairs are pairwise
-            // disjoint (every amplitude lies in exactly one pair), so no two
-            // iterations alias the same index — no data race. Indices are < 2^n
-            // = data.len(). `base` is the buffer's own pointer.
+        (0..count).into_par_iter().for_each(|g| {
+            let (i0, i1) = pairs.pair(g);
+            // The `;` after the block makes it a statement, so this `allow` can apply.
+            #[allow(unsafe_code)] // authorised `unsafe` site: docs/ENGINEERING.md §5
+            // SAFETY: inserting a zero bit is injective, and so is ORing `set`
+            // into it (for `controlled`, bit `c` is the other inserted zero; for
+            // `target`, `set` is 0). Bit `t` is an inserted zero that `set`
+            // never touches (c ≠ t), so g ↦ i0 is injective, every i0 has bit
+            // `t` clear and i1 = i0 | (1 << t) has it set. No i0 equals another
+            // pair's i1, so the pairs are pairwise disjoint and no two
+            // iterations alias the same amplitude — no data race. `Pairs`'
+            // constructors assert t, c < n, so with g < count both indices keep
+            // bits ≥ n clear: they are < 2^n = data.len(), asserted above.
+            // `base` is the buffer's own pointer.
             unsafe {
                 let p = base as *mut C64;
                 let a = *p.add(i0);
@@ -82,7 +145,7 @@ pub(crate) fn apply_1q(data: &mut [C64], n: usize, t: usize, m: &[[C64; 2]; 2], 
                 let (na, nb) = combine_1q(m, a, b);
                 *p.add(i0) = na;
                 *p.add(i1) = nb;
-            }
+            };
         });
         return;
     }
@@ -90,13 +153,17 @@ pub(crate) fn apply_1q(data: &mut [C64], n: usize, t: usize, m: &[[C64; 2]; 2], 
     #[cfg(not(feature = "parallel"))]
     let _ = parallel;
 
-    for g in 0..half {
-        let i0 = (g & low) | ((g & !low) << 1);
-        let i1 = i0 | bit;
+    for g in 0..count {
+        let (i0, i1) = pairs.pair(g);
         let (na, nb) = combine_1q(m, data[i0], data[i1]);
         data[i0] = na;
         data[i1] = nb;
     }
+}
+
+/// Dense single-qubit gate on target `t`.
+pub(crate) fn apply_1q(data: &mut [C64], n: usize, t: usize, m: &[[C64; 2]; 2], parallel: bool) {
+    apply_pairs(data, n, Pairs::target(n, t), m, parallel);
 }
 
 /// Diagonal single-qubit gate: multiply each amplitude by `d0` or `d1`
@@ -293,49 +360,7 @@ pub(crate) fn apply_controlled_1q(
     m: &[[C64; 2]; 2],
     parallel: bool,
 ) {
-    // See `apply_1q`: these guard the raw-pointer writes below in release.
-    assert!(c < n && t < n && c != t && data.len() == 1usize << n);
-    let quarter = 1usize << (n - 2);
-
-    #[cfg(feature = "parallel")]
-    if parallel {
-        use rayon::prelude::*;
-        let base = data.as_mut_ptr() as usize;
-        (0..quarter).into_par_iter().for_each(|g| {
-            // Ordered `[00, 01, 10, 11]` by `(bit_c, bit_t)`: the last two are
-            // the control-set pair.
-            let idx = two_qubit_indices(g, t, c);
-            let (i0, i1) = (idx[2], idx[3]);
-            // SAFETY: inserting the two fixed bits maps `[0, 2^(n-2))`
-            // injectively onto the indices with bit `c` set and bit `t` clear,
-            // so g ↦ i0 is injective and i1 = i0 | (1 << t) is the unique partner
-            // of i0. Every i0 has bit `t` clear and every i1 has it set, so no i0
-            // equals another pair's i1; the pairs are therefore pairwise disjoint
-            // (no index belongs to two of them) and no two iterations alias the
-            // same amplitude — no data race. Both indices keep bits ≥ n clear, so
-            // they are < 2^n = data.len(). `base` is the buffer's own pointer.
-            unsafe {
-                let p = base as *mut C64;
-                let a = *p.add(i0);
-                let b = *p.add(i1);
-                let (na, nb) = combine_1q(m, a, b);
-                *p.add(i0) = na;
-                *p.add(i1) = nb;
-            }
-        });
-        return;
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    let _ = parallel;
-
-    for g in 0..quarter {
-        let idx = two_qubit_indices(g, t, c);
-        let (i0, i1) = (idx[2], idx[3]);
-        let (na, nb) = combine_1q(m, data[i0], data[i1]);
-        data[i0] = na;
-        data[i1] = nb;
-    }
+    apply_pairs(data, n, Pairs::controlled(n, c, t), m, parallel);
 }
 
 /// Compute the four amplitude indices a two-qubit gate on `(q0, q1)` mixes for
@@ -361,7 +386,7 @@ pub(crate) fn apply_2q(
     m: &[[C64; 4]; 4],
     parallel: bool,
 ) {
-    // See `apply_1q`: these guard the raw-pointer writes below in release.
+    // See `Pairs::target`: these guard the raw-pointer writes below in release.
     assert!(q0 < n && q1 < n && q0 != q1 && data.len() == 1usize << n);
     let quarter = 1usize << (n - 2);
 
@@ -371,6 +396,8 @@ pub(crate) fn apply_2q(
         let base = data.as_mut_ptr() as usize;
         (0..quarter).into_par_iter().for_each(|g| {
             let idx = two_qubit_indices(g, q0, q1);
+            // The `;` after the block makes it a statement, so this `allow` can apply.
+            #[allow(unsafe_code)] // authorised `unsafe` site: docs/ENGINEERING.md §5
             // SAFETY: across g the index quadruples are pairwise disjoint (each
             // amplitude belongs to exactly one quadruple), so no two iterations
             // alias. All indices are < 2^n = data.len().
@@ -385,7 +412,7 @@ pub(crate) fn apply_2q(
                 for (row, &target) in m.iter().zip(idx.iter()) {
                     *p.add(target) = row[0] * v[0] + row[1] * v[1] + row[2] * v[2] + row[3] * v[3];
                 }
-            }
+            };
         });
         return;
     }
@@ -791,6 +818,47 @@ mod tests {
         for n in [3, 5, 7] {
             assert_controlled_1q_matches_reference(n, &gates::x());
             assert_controlled_1q_matches_reference(n, &gates::u(0.7, 1.1, -0.4));
+        }
+    }
+
+    /// For every target `t` on `n` qubits: the sequential path equals a
+    /// reference that finds each pair by scanning for bit `t` clear, and (when
+    /// compiled in) the parallel path equals the sequential one — both bit for
+    /// bit (docs/ENGINEERING.md §4).
+    fn assert_1q_matches_reference(n: usize, m: &[[C64; 2]; 2]) {
+        for t in 0..n {
+            let bit = 1usize << t;
+            let mut reference = sample_data(n);
+            for i0 in (0..1usize << n).filter(|i| i & bit == 0) {
+                let (na, nb) = combine_1q(m, reference[i0], reference[i0 | bit]);
+                reference[i0] = na;
+                reference[i0 | bit] = nb;
+            }
+
+            let mut sequential = sample_data(n);
+            apply_1q(&mut sequential, n, t, m, false);
+            assert!(
+                sequential == reference,
+                "sequential path differs from the scanning reference (n={n}, t={t})"
+            );
+
+            if cfg!(feature = "parallel") {
+                let mut parallel = sample_data(n);
+                apply_1q(&mut parallel, n, t, m, true);
+                assert!(
+                    parallel == sequential,
+                    "parallel path differs from the sequential one (n={n}, t={t})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn one_qubit_matches_reference_on_every_target() {
+        // n = 1 is the edge of the enumeration: a single sub-state g = 0.
+        for n in [1, 3, 5, 7] {
+            assert_1q_matches_reference(n, &gates::h());
+            assert_1q_matches_reference(n, &gates::u(0.7, 1.1, -0.4));
         }
     }
 

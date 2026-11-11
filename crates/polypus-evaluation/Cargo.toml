@@ -30,3 +30,6 @@ rayon = { workspace = true }
 # The oracle's tests build a problem whose templates hold gates no layer emits
 # (issue #561); the feature only exists for tests, never for a library build.
 polypus-qml = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

@@ -80,3 +80,6 @@ rayon = { workspace = true }
 # hold gates no layer emits (issue #561); the feature only exists for tests,
 # never for the wheel.
 polypus-qml = { workspace = true, features = ["serde", "test-support"] }
+
+[lints]
+workspace = true

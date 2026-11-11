@@ -64,7 +64,7 @@
 //! rotations, the phase gates and the `u` family, which the two-term shift
 //! rule does not.
 
-#![deny(clippy::all)]
+#![warn(missing_docs)]
 
 /// 64-bit complex amplitude type used throughout the simulator.
 pub type C64 = num_complex::Complex<f64>;
