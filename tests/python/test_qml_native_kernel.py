@@ -361,11 +361,12 @@ def _qiskit_state(encoder, row):
 
 class TestMemoryBudget:
     # `POLYPUS_MEM_BUDGET` is read on every call. One-qubit states take 32
-    # bytes, so in 1 KiB a 12 x 12 matrix (1152 bytes) leaves no room for the
-    # two states an inner product needs, and a 10 x 10 one (800 bytes) leaves
-    # room for seven, so it runs in tiles.
+    # bytes, so in 1 KiB a 12 x 12 matrix (1152 bytes) leaves no room for a
+    # single state, an 11 x 11 one (968 bytes) for one, so each entry is one
+    # compute-uncompute circuit, and a 10 x 10 one (800 bytes) for seven, so it
+    # runs in tiles of inner products.
 
-    def test_a_matrix_that_leaves_no_room_for_two_states_is_refused(self, monkeypatch):
+    def test_a_matrix_that_leaves_no_room_for_one_state_is_refused(self, monkeypatch):
         encoder = qml.Encoder(1).angle_encoder("ry")
         rows = [[0.3 * i] for i in range(12)]
         monkeypatch.setenv("POLYPUS_MEM_BUDGET", "1KiB")
@@ -376,16 +377,21 @@ class TestMemoryBudget:
         message = str(refused.value)
         for part in (
             "a 12 x 12 fidelity matrix (1.1",
-            "2 1-qubit statevectors (32 B each)",
+            "the 1-qubit statevector (32 B)",
             "1.00 KiB",
             "set by POLYPUS_MEM_BUDGET",
         ):
             assert part in message, (part, message)
         # Fewer rows at a time fit, and give those rows of the whole matrix.
         tiled = kernel(encoder, rows[:10], rows[:10])
+        # Room for one state beside the matrix: computed, not refused, one
+        # circuit per entry, the same kernel to rounding.
+        one_at_a_time = kernel(encoder, rows[:11])
         monkeypatch.delenv("POLYPUS_MEM_BUDGET")
         whole = kernel(encoder, rows, rows)
         assert np.array_equal(tiled, whole[:10, :10])
+        np.testing.assert_allclose(one_at_a_time, whole[:11, :11], rtol=0, atol=1e-12)
+        assert np.array_equal(one_at_a_time, one_at_a_time.T)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

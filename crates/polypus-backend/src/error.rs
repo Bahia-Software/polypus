@@ -335,9 +335,21 @@ mod tests {
         let huge = InsufficientMemoryForResult {
             result_bytes: u64::MAX,
             statevector_bytes: u64::MAX,
-            ..refusal
+            ..refusal.clone()
         };
         assert!(huge.to_string().contains("(more than 16.00 EiB)"));
+        // One statevector reads as one.
+        let one = InsufficientMemoryForResult {
+            statevectors: 1,
+            ..refusal
+        };
+        let message = one.to_string();
+        for part in [
+            "beside the 20-qubit statevector (16.00 MiB) it is computed from",
+            "together they need 16.00 MiB",
+        ] {
+            assert!(message.contains(part), "{part:?} missing from {message:?}");
+        }
     }
 
     #[test]

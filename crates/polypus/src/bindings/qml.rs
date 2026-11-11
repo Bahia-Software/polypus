@@ -2361,31 +2361,40 @@ impl JacobianRun {
 
 /// `qml.kernel_matrix`: one sample per pair `(i, j)` of the kernel, one
 /// compute-uncompute circuit each, read into one value per pair; or, exactly,
-/// the whole matrix from the native backend's inner products.
+/// the whole matrix from the native backend.
 struct KernelRun {
     kernel: FidelityKernel,
-    /// One value per pair, in pair order, filled block by block.
-    values: Vec<f64>,
-    /// The whole `rows × columns` matrix, when the exact inner products
-    /// computed it ([`run_exact_all`](Primitive::run_exact_all)).
+    /// The `rows × columns` matrix, row-major: the native backend's whole
+    /// result ([`run_exact_all`](Primitive::run_exact_all)), or allocated by
+    /// the first block read and filled block by block, each pair's value
+    /// written at its entry (a symmetric kernel's at its mirror too), so the
+    /// pairs' values are never held beside it.
     matrix: Option<Vec<f64>>,
+    /// The pairs whose values are in `matrix`.
+    filled: usize,
 }
 
 impl KernelRun {
     fn new(kernel: FidelityKernel) -> Self {
         KernelRun {
             kernel,
-            values: Vec::new(),
             matrix: None,
+            filled: 0,
         }
     }
 
-    /// The `rows × columns` matrix, row-major: the inner products' or the
-    /// pairs' values assembled (a symmetric kernel's mirrored).
+    /// The `rows × columns` matrix, row-major, once every pair is in it (a
+    /// kernel with no pairs has an empty one).
     fn into_matrix(self) -> Result<Vec<f64>, QmlError> {
+        if self.filled != self.kernel.num_pairs() {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: self.kernel.num_pairs(),
+                got: self.filled,
+            });
+        }
         match self.matrix {
             Some(matrix) => Ok(matrix),
-            None => self.kernel.matrix(&self.values),
+            None => self.kernel.zero_matrix(),
         }
     }
 }
@@ -2421,38 +2430,37 @@ impl Primitive for KernelRun {
             }
             .into());
         }
-        match results {
-            BlockResults::Counts(counts) => {
-                for counts in &counts {
-                    self.values.push(self.kernel.fidelity_from_counts(counts)?);
-                }
-            }
-            BlockResults::Exact(probabilities) => {
-                for probabilities in &probabilities {
-                    self.values
-                        .push(self.kernel.fidelity_from_probabilities(probabilities)?);
-                }
-            }
-        }
+        let values = match results {
+            BlockResults::Counts(counts) => counts
+                .iter()
+                .map(|counts| self.kernel.fidelity_from_counts(counts))
+                .collect::<Result<Vec<_>, _>>()?,
+            BlockResults::Exact(probabilities) => probabilities
+                .iter()
+                .map(|probabilities| self.kernel.fidelity_from_probabilities(probabilities))
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        let matrix = match &mut self.matrix {
+            Some(matrix) => matrix,
+            None => self.matrix.insert(self.kernel.zero_matrix()?),
+        };
+        self.kernel.place(matrix, samples.start, &values)?;
+        self.filled += values.len();
         Ok(())
     }
 
-    /// The exact kernel by inner products of statevectors: each state simulated
-    /// once when they all fit in the memory budget, in tiles otherwise, rather
-    /// than one compute-uncompute circuit per pair. When the budget holds one
-    /// statevector of the width but not two, `None`: the compute-uncompute
-    /// circuits run in blocks instead (the backend logs it). A Ctrl+C or a
-    /// cancellation stops it in flight ([`watched`]).
+    /// The exact kernel in one call to the native backend, which picks its
+    /// route by the memory budget with the matrix counted: inner products of
+    /// statevectors, each state simulated once when they all fit and in tiles
+    /// otherwise, or, when the budget holds one statevector beside the matrix
+    /// but not two, one compute-uncompute circuit per pair (the backend logs
+    /// it). Never `None`, so the circuits never run in blocks here. A Ctrl+C
+    /// or a cancellation stops it in flight ([`watched`]).
     fn run_exact_all(
         &mut self,
         native: &NativeStatevectorBackend,
         cancel: &CancelToken,
     ) -> Option<Result<(), PrimitiveError>> {
-        match native.fidelity_fits(self.kernel.num_qubits()) {
-            Ok(true) => {}
-            Ok(false) => return None,
-            Err(e) => return Some(Err(PrimitiveError::Infrastructure(e.into()))),
-        }
         let kernel = &self.kernel;
         let columns = (!kernel.is_symmetric()).then(|| kernel.column_states());
         let matrix = watched(cancel, |stop| {
@@ -2465,6 +2473,7 @@ impl Primitive for KernelRun {
         Some(match matrix {
             Ok(Ok(matrix)) => {
                 self.matrix = Some(matrix);
+                self.filled = self.kernel.num_pairs();
                 Ok(())
             }
             Ok(Err(e)) => Err(PrimitiveError::Infrastructure(e.into())),
@@ -4007,17 +4016,18 @@ mod tests {
         for symmetric in [true, false] {
             let mut whole = kernel_run(symmetric);
             sampled_on_native(&mut whole, 5, usize::MAX);
-            assert_eq!(whole.values.len(), whole.kernel.num_pairs());
+            assert_eq!(whole.filled, whole.kernel.num_pairs());
             for block in [1, 2, 5] {
                 let mut blocked = kernel_run(symmetric);
                 sampled_on_native(&mut blocked, 5, block);
-                assert_eq!(blocked.values, whole.values, "block {block}");
+                assert_eq!(blocked.matrix, whole.matrix, "block {block}");
             }
             let mut other_seed = kernel_run(symmetric);
             sampled_on_native(&mut other_seed, 6, usize::MAX);
-            assert_ne!(other_seed.values, whole.values);
-            // The sampled matrix: the values in pair order, a symmetric one
-            // mirrored bit for bit, every entry a frequency.
+            assert_ne!(other_seed.matrix, whole.matrix);
+            // The sampled matrix: each block written at its pairs' entries as
+            // it is read, a symmetric one mirrored bit for bit, every entry a
+            // frequency.
             let n2 = whole.kernel.num_columns();
             let matrix = whole.into_matrix().unwrap();
             for (k, value) in matrix.iter().enumerate() {
@@ -4038,9 +4048,18 @@ mod tests {
             for block in [1, 2, usize::MAX] {
                 let mut run = kernel_run(symmetric);
                 run.run_exact(block);
-                // The inner products ran, not the circuits.
-                assert!(run.values.is_empty());
+                // One call to the native backend computed the whole matrix,
+                // whatever the blocks: its result, bit for bit.
+                let kernel = &run.kernel;
+                let native = NativeStatevectorBackend::new(0)
+                    .fidelity_matrix(
+                        kernel.row_states(),
+                        (!symmetric).then(|| kernel.column_states()),
+                        None,
+                    )
+                    .unwrap();
                 let matrix = run.into_matrix().unwrap();
+                assert_eq!(matrix, native, "block {block}");
                 for (k, (a, b)) in matrix.iter().zip(&reference).enumerate() {
                     // Two exact routes, a few dozen roundings each.
                     assert!((a - b).abs() < 1e-12, "entry {k}: {a} != {b}");
@@ -4081,7 +4100,7 @@ mod tests {
         )
         .unwrap();
         // 4 rows: 10 pairs, so 10 circuits in blocks of 4: three calls.
-        assert_eq!(run.values.len(), 10);
+        assert_eq!(run.filled, 10);
         assert_eq!(counters.get(), (1, 3, 1));
     }
 
@@ -4104,7 +4123,7 @@ mod tests {
             "{err:?}"
         );
         assert_eq!(run.built.get(), 1);
-        assert_eq!(run.inner.values.len(), 5);
+        assert_eq!(run.inner.filled, 5);
         assert_eq!(counters.get(), (1, 1, 1));
 
         let counters = Counters::new();
@@ -4195,7 +4214,7 @@ mod tests {
             other => panic!("expected the interrupt, got {other:?}"),
         }
         assert_eq!(guard.polls.load(Ordering::SeqCst), 2);
-        assert!(run.matrix.is_none() && run.values.is_empty());
+        assert!(run.matrix.is_none() && run.filled == 0);
         if uninterrupted < 16 * WATCH_INTERVAL {
             eprintln!(
                 "the whole run took {uninterrupted:?}, under {:?}: too short to time a stop \

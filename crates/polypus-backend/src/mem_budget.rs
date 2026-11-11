@@ -595,19 +595,20 @@ impl fmt::Display for InsufficientMemoryForResult {
         let total = (self.statevectors as u64)
             .saturating_mul(self.statevector_bytes)
             .saturating_add(self.result_bytes);
+        let (n, statevector) = (self.num_qubits, bytes(self.statevector_bytes));
+        let statevectors = match self.statevectors {
+            1 => format!("{n}-qubit statevector ({statevector})"),
+            k => format!("{k} {n}-qubit statevectors ({statevector} each)"),
+        };
         write!(
             f,
-            "not enough memory for {result} ({result_bytes}) beside the {k} {n}-qubit \
-             statevectors ({statevector} each) it is computed from: together they need \
-             {total} but the memory budget is {budget} ({source}). Refusing to start rather \
-             than be killed by the out-of-memory killer. Compute less at a time, or, if more \
-             memory really is available, set {MEM_BUDGET_ENV} (e.g. {MEM_BUDGET_ENV}=64G) to \
-             override the budget.",
+            "not enough memory for {result} ({result_bytes}) beside the {statevectors} it is \
+             computed from: together they need {total} but the memory budget is {budget} \
+             ({source}). Refusing to start rather than be killed by the out-of-memory killer. \
+             Compute less at a time, or, if more memory really is available, set \
+             {MEM_BUDGET_ENV} (e.g. {MEM_BUDGET_ENV}=64G) to override the budget.",
             result = self.result,
             result_bytes = bytes(self.result_bytes),
-            k = self.statevectors,
-            n = self.num_qubits,
-            statevector = bytes(self.statevector_bytes),
             total = bytes(total),
             budget = format_bytes(self.budget_bytes),
             source = self.source,

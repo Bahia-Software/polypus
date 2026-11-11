@@ -427,6 +427,19 @@ impl FidelityKernel {
                 got: values.len(),
             });
         }
+        let mut matrix = self.zero_matrix()?;
+        self.place(&mut matrix, 0, values)?;
+        Ok(matrix)
+    }
+
+    /// The `rows × columns` matrix, row-major, with every entry `0.0`: what
+    /// [`place`](Self::place) fills block by block, so that a caller never
+    /// holds the pairs' values and the matrix at once.
+    ///
+    /// # Errors
+    ///
+    /// [`QmlError::KernelTooLarge`] if the matrix cannot be allocated.
+    pub fn zero_matrix(&self) -> Result<Vec<f64>, QmlError> {
         let (n1, n2) = (self.num_rows(), self.num_columns());
         let entries = n1 * n2; // checked at construction
         let mut matrix = Vec::new();
@@ -436,23 +449,49 @@ impl FidelityKernel {
                 rows: n1,
                 columns: n2,
             })?;
-        if self.columns.is_some() {
-            matrix.extend_from_slice(values);
-            return Ok(matrix);
-        }
         matrix.resize(entries, 0.0);
-        let mut next = values.iter();
-        for i in 0..n1 {
-            for j in i..n2 {
-                let value = *next.next().ok_or(QmlError::CountsLengthMismatch {
-                    expected: self.num_pairs,
-                    got: values.len(),
-                })?;
-                matrix[i * n2 + j] = value;
-                matrix[j * n2 + i] = value;
-            }
-        }
         Ok(matrix)
+    }
+
+    /// Write the values of the pairs `first..first + values.len()`, in pair
+    /// order, at their entries of `matrix` (row-major, `rows × columns`, as
+    /// [`zero_matrix`](Self::zero_matrix) gives it), and for a symmetric
+    /// kernel at their mirrors too, the same `f64`. Every pair placed once, in
+    /// blocks of any size, gives [`matrix`](Self::matrix) of all the values,
+    /// bit for bit.
+    ///
+    /// # Errors
+    ///
+    /// [`QmlError::CountsLengthMismatch`] if `matrix` does not have
+    /// `rows × columns` entries, or if the pairs reach past
+    /// [`num_pairs`](Self::num_pairs) (`got` is then the end they reach).
+    pub fn place(&self, matrix: &mut [f64], first: usize, values: &[f64]) -> Result<(), QmlError> {
+        let (n1, n2) = (self.num_rows(), self.num_columns());
+        if matrix.len() != n1 * n2 {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: n1 * n2,
+                got: matrix.len(),
+            });
+        }
+        let past = QmlError::CountsLengthMismatch {
+            expected: self.num_pairs,
+            got: first.saturating_add(values.len()),
+        };
+        let end = first
+            .checked_add(values.len())
+            .filter(|&end| end <= self.num_pairs)
+            .ok_or_else(|| past.clone())?;
+        if self.columns.is_some() {
+            // The pairs of a full kernel are its entries, in order.
+            matrix[first..end].copy_from_slice(values);
+            return Ok(());
+        }
+        let pairs = self.pairs(first..end).ok_or(past)?;
+        for (&(i, j), &value) in pairs.iter().zip(values) {
+            matrix[i * n2 + j] = value;
+            matrix[j * n2 + i] = value;
+        }
+        Ok(())
     }
 }
 
@@ -747,6 +786,53 @@ mod tests {
         let full = FidelityKernel::new(&map, &rows(2), Some(&rows(3))).unwrap();
         let values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
         assert_eq!(full.matrix(&values).unwrap(), values);
+    }
+
+    /// Placing the values block by block, in blocks of any size, fills the
+    /// same matrix as `matrix` of them all, bit for bit, a symmetric one
+    /// mirrored; and a block past the pairs, or a matrix of another size, is
+    /// refused.
+    #[test]
+    fn placing_blocks_fills_the_matrix_of_all_the_values() {
+        let map = angle_map(1, 1);
+        let symmetric = FidelityKernel::new(&map, &rows(4), None).unwrap();
+        let full = FidelityKernel::new(&map, &rows(3), Some(&rows(4))).unwrap();
+        for kernel in [&symmetric, &full] {
+            let values: Vec<f64> = (0..kernel.num_pairs())
+                .map(|k| 0.05 + 0.07 * k as f64)
+                .collect();
+            let whole = kernel.matrix(&values).unwrap();
+            for block in [1, 2, 3, 5, kernel.num_pairs()] {
+                let mut matrix = kernel.zero_matrix().unwrap();
+                for (b, chunk) in values.chunks(block).enumerate() {
+                    kernel.place(&mut matrix, b * block, chunk).unwrap();
+                }
+                assert!(
+                    matrix
+                        .iter()
+                        .zip(&whole)
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "block {block}"
+                );
+            }
+            let mut matrix = kernel.zero_matrix().unwrap();
+            let n = kernel.num_pairs();
+            assert_eq!(
+                kernel.place(&mut matrix, n - 1, &[0.5, 0.5]),
+                Err(QmlError::CountsLengthMismatch {
+                    expected: n,
+                    got: n + 1
+                })
+            );
+            assert_eq!(
+                kernel.place(&mut matrix[1..], 0, &[0.5]),
+                Err(QmlError::CountsLengthMismatch {
+                    expected: matrix.len(),
+                    got: matrix.len() - 1
+                })
+            );
+            assert!(kernel.place(&mut matrix, n, &[]).is_ok());
+        }
     }
 
     #[test]

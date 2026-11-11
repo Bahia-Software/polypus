@@ -93,11 +93,11 @@ def test_a_circuit_over_an_explicit_budget_is_refused_with_a_typed_error(tmp_pat
 
 
 def test_a_result_that_leaves_no_room_for_its_statevectors_is_refused_alike(tmp_path):
-    # The exact quantum kernel keeps its matrix beside the statevectors whose
-    # inner products fill it, and counts it against the same budget: 1-qubit
-    # states take 32 B, so in 1 KiB a 12 x 12 matrix (1152 B) leaves no room
-    # for the two it needs. The same exception as a statevector that does not
-    # fit, with the same override.
+    # The exact quantum kernel keeps its matrix beside the statevectors that
+    # fill it, and counts it against the same budget: 1-qubit states take 32 B,
+    # so in 1 KiB a 12 x 12 matrix (1152 B) leaves no room even for one. The
+    # same exception as a statevector that does not fit, with the same
+    # override.
     code = """
     import polypus
     from polypus import qml
@@ -108,7 +108,7 @@ def test_a_result_that_leaves_no_room_for_its_statevectors_is_refused_alike(tmp_
     except polypus.PolypusError as exc:  # C-1: catchable at the base class
         assert type(exc) is polypus.InsufficientMemoryError, type(exc)
         message = str(exc)
-        for needle in ("12 x 12 fidelity matrix", "2 1-qubit statevectors", "1.00 KiB",
+        for needle in ("12 x 12 fidelity matrix", "the 1-qubit statevector (32 B)", "1.00 KiB",
                        "set by POLYPUS_MEM_BUDGET", "POLYPUS_MEM_BUDGET=64G"):
             assert needle in message, (needle, message)
         print("refused: kernel")
