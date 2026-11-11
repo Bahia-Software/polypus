@@ -50,7 +50,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends llvm
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-llvm-cov@0.9.1
       - name: Test with coverage
@@ -113,7 +113,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: llvm-cov
-      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-llvm-cov@0.9.1
       - name: Install dev dependencies
@@ -194,7 +194,7 @@ jobs:
             awk -F, -v OFS=, '/^DA:/ && $2 > 2147483647 { $2 = 2147483647 } 1' "$report" > "$report.tmp"
             mv "$report.tmp" "$report"
           done
-      - uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
+      - uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
         if: env.SONAR_TOKEN != ''
         with:
           args: -Dsonar.qualitygate.wait=${{ github.event_name == 'pull_request' }}
