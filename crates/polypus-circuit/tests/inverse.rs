@@ -294,9 +294,37 @@ fn u2_becomes_the_u3_of_its_inverse() {
 }
 
 #[test]
-fn order_four_gates_without_an_inverse_instruction_repeat_three_times() {
-    for gate in [G::Csx(0, 1), G::Rc3x(0, 1, 2, 3), G::C3sqrtx(4, 3, 2, 1)] {
-        assert_eq!(inverse_of(gate.clone()), [gate.clone(), gate.clone(), gate]);
+fn csx_is_undone_by_h_cp_h_on_its_target() {
+    assert_eq!(
+        inverse_of(G::Csx(3, 1)),
+        [
+            G::H(1),
+            G::Cp {
+                q0: 3,
+                q1: 1,
+                theta: fixed(-FRAC_PI_2),
+            },
+            G::H(1),
+        ]
+    );
+}
+
+/// `rc3x` and `c3sqrtx` have no inverse instruction: their inverse is that of
+/// their lowering, instruction by instruction from the last, as many
+/// instructions as the lowering has (not the gate three times).
+#[test]
+fn composite_gates_without_an_inverse_instruction_invert_their_lowering() {
+    for gate in [G::Rc3x(0, 1, 2, 3), G::C3sqrtx(4, 3, 2, 1)] {
+        let lowering = gate.lowering().expect("a composite gate");
+        let mut expected = Vec::new();
+        for (position, part) in lowering.iter().enumerate().rev() {
+            part.push_inverse(position, &mut expected)
+                .expect("the lowering is invertible");
+        }
+        let inverse = inverse_of(gate.clone());
+        assert_eq!(inverse, expected, "{gate:?}");
+        assert_eq!(inverse.len(), lowering.len(), "{gate:?}");
+        assert!(!inverse.contains(&gate), "{gate:?}");
     }
 }
 
@@ -316,9 +344,13 @@ fn the_inverse_runs_the_inverses_in_reverse_order() {
         inverse.gates(),
         [
             G::Tdg(2),
-            G::Csx(1, 2),
-            G::Csx(1, 2),
-            G::Csx(1, 2),
+            G::H(2),
+            G::Cp {
+                q0: 1,
+                q1: 2,
+                theta: fixed(-FRAC_PI_2),
+            },
+            G::H(2),
             G::Cx(0, 1),
             G::Rx {
                 qubit: 2,
@@ -328,6 +360,28 @@ fn the_inverse_runs_the_inverses_in_reverse_order() {
             G::H(0),
         ]
     );
+}
+
+/// An instruction undone by several keeps them in their own order inside the
+/// reversed circuit: only the circuit's order is reversed.
+#[test]
+fn a_several_instruction_inverse_keeps_its_order_in_the_reversed_circuit() {
+    let circuit = Pc::new(4)
+        .h(0)
+        .rc3x(0, 1, 2, 3)
+        .s(3)
+        .assign_parameters(&[])
+        .unwrap();
+    let rc3x = inverse_of(G::Rc3x(0, 1, 2, 3));
+    assert_ne!(
+        rc3x.iter().rev().cloned().collect::<Vec<_>>(),
+        rc3x,
+        "the check needs an inverse that is not a palindrome"
+    );
+    let mut expected = vec![G::Sdg(3)];
+    expected.extend(rc3x);
+    expected.push(G::H(0));
+    assert_eq!(circuit.inverse().unwrap().gates(), expected);
 }
 
 #[test]

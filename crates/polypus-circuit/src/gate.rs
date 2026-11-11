@@ -784,11 +784,15 @@ impl GateInstruction {
         }
     }
 
-    /// Append to `out` the inverse `U†` of this instruction, the instruction at
-    /// `position` of a [`ConcreteCircuit`](crate::ConcreteCircuit), as
-    /// instructions of the vocabulary (what
-    /// [`ConcreteCircuit::inverse`](crate::ConcreteCircuit::inverse) builds
-    /// on). Exact, global phase included:
+    /// Append to `out` the inverse `U†` of this instruction as instructions of
+    /// the vocabulary, in the order they are applied. `position` is where the
+    /// instruction stands in its circuit, which [`CircuitError::NotInvertible`]
+    /// reports.
+    ///
+    /// The one inverse table of the workspace: what
+    /// [`ConcreteCircuit::inverse`](crate::ConcreteCircuit::inverse) builds on,
+    /// and what the native simulator's adjoint gradient steps back through.
+    /// Exact, global phase included:
     ///
     /// - a gate that is its own inverse (`h`, `x`, `cx`, `swap`, `ccx`, `rccx`,
     ///   `c4x`, …, and the identities `id` and `u0`) is copied;
@@ -796,12 +800,29 @@ impl GateInstruction {
     /// - a rotation or phase by `−θ`; `u3(θ, φ, λ)† = u3(−θ, −λ, −φ)` under each
     ///   spelling (`u`, `u3`, `cu3`, and `cu` with its phase `γ` negated too), and
     ///   `u2(φ, λ)† = u3(−π/2, −λ, −φ)`, which no `u2` spells;
-    /// - `csx`, `rc3x` and `c3sqrtx`, of order 4 and with no inverse among the
-    ///   instructions, are applied three times (`U³ = U†`);
+    /// - `csx`, which has no inverse among the instructions, becomes `h`,
+    ///   `cp(−π/2)`, `h` on its target (`H·P(−π/2)·H = SX†`, controlled);
+    /// - `rc3x` and `c3sqrtx`, which have none either, become the inverse of
+    ///   their [`lowering`](Self::lowering): its instructions in reverse order,
+    ///   each inverted;
     /// - a barrier is copied.
     ///
     /// The match is exhaustive, with no wildcard: a new instruction does not
     /// compile until it says how it is inverted.
+    ///
+    /// ```
+    /// use polypus_circuit::{GateInstruction as G, GateParam};
+    ///
+    /// let mut out = Vec::new();
+    /// G::S(0).push_inverse(0, &mut out).unwrap();
+    /// G::Csx(0, 1).push_inverse(1, &mut out).unwrap();
+    /// let cp = G::Cp {
+    ///     q0: 0,
+    ///     q1: 1,
+    ///     theta: GateParam::Fixed(-std::f64::consts::FRAC_PI_2),
+    /// };
+    /// assert_eq!(out, [G::Sdg(0), G::H(1), cp, G::H(1)]);
+    /// ```
     ///
     /// # Errors
     ///
@@ -811,7 +832,9 @@ impl GateInstruction {
     /// - [`CircuitError::ParamIndexOutOfBounds`] / [`CircuitError::UnknownExpression`]
     ///   for an angle that is a free parameter or an expression, which a
     ///   concrete circuit cannot hold and which cannot be negated.
-    pub(crate) fn push_inverse(
+    ///
+    /// On an error, `out` may already hold part of the inverse; discard it.
+    pub fn push_inverse(
         &self,
         position: usize,
         out: &mut Vec<GateInstruction>,
@@ -976,8 +999,22 @@ impl GateInstruction {
                 lam: neg(phi)?,
                 gamma: neg(gamma)?,
             },
-            G::Csx(..) | G::Rc3x(..) | G::C3sqrtx(..) => {
-                out.extend([self.clone(), self.clone(), self.clone()]);
+            G::Csx(control, target) => {
+                out.extend([
+                    G::H(*target),
+                    G::Cp {
+                        q0: *control,
+                        q1: *target,
+                        theta: GateParam::Fixed(-std::f64::consts::FRAC_PI_2),
+                    },
+                    G::H(*target),
+                ]);
+                return Ok(());
+            }
+            G::Rc3x(..) | G::C3sqrtx(..) => {
+                for part in self.lowering().into_iter().flatten().rev() {
+                    part.push_inverse(position, out)?;
+                }
                 return Ok(());
             }
             G::Custom(_) => return Err(not_invertible("a call of a declared gate")),

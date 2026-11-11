@@ -1334,7 +1334,10 @@ impl ConcreteCircuit {
     /// - `u2(φ, λ)` becomes `u3(−π/2, −λ, −φ)`, its inverse having no `u2`
     ///   spelling;
     /// - `csx`, `rc3x` and `c3sqrtx`, whose inverses are not instructions of the
-    ///   vocabulary, are repeated three times (each is of order 4, so `U³ = U†`).
+    ///   vocabulary, become several: `h`, `cp(−π/2)`, `h` for `csx`, and the
+    ///   inverse of the gate's [`lowering`](GateInstruction::lowering) for the
+    ///   other two (see [`GateInstruction::push_inverse`], the table this
+    ///   builds on).
     ///
     /// So `c.inverse()?.inverse()? == c` for a circuit without `u2`, `csx`,
     /// `rc3x` or `c3sqrtx`; for those it is the same operator, not the same
@@ -1361,14 +1364,22 @@ impl ConcreteCircuit {
     ///   `new_unchecked` that it would reject (a free parameter, an
     ///   expression, an operand out of range).
     pub fn inverse(&self) -> Result<Self, CircuitError> {
-        let mut gates = Vec::with_capacity(self.gates.len());
+        // Each instruction's inverse, in its own order of application, in
+        // circuit order, so an error names the first instruction refused.
+        let mut parts = Vec::with_capacity(self.gates.len());
+        let mut starts = Vec::with_capacity(self.gates.len());
         for (position, gate) in self.gates.iter().enumerate() {
-            gate.push_inverse(position, &mut gates)?;
+            starts.push(parts.len());
+            gate.push_inverse(position, &mut parts)?;
         }
-        // Each instruction's inverse is one instruction or three equal ones, so
-        // reversing the whole sequence reverses the circuit's order and leaves
-        // every inverse as it was.
-        gates.reverse();
+        // Then the inverses from the last instruction's to the first's, each
+        // kept as it is: several instructions undo `csx`, `rc3x` or `c3sqrtx`.
+        let mut gates = Vec::with_capacity(parts.len());
+        let mut end = parts.len();
+        for &start in starts.iter().rev() {
+            gates.extend_from_slice(&parts[start..end]);
+            end = start;
+        }
         self.try_with_gates(gates)
     }
 
