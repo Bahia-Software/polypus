@@ -5,8 +5,8 @@
 //! [`protocol`]. This is the productionised form of the Fase-2 subprocess-bridge
 //! spike, and the mechanism by which a `pip install polypus` user reaches a
 //! third-party Python backend **without embedding the interpreter** — this crate is
-//! pyo3-free (verified in CI with `cargo tree`); the interpreter lives entirely in
-//! the child process.
+//! pyo3-free (enforced in CI by `cargo deny`, `deny.toml` `bans`); the interpreter
+//! lives entirely in the child process.
 //!
 //! It registers itself under the name `"subprocess"` (see [`register`]), so the
 //! Polypus factory can build it by name from configuration alone. A Python user
@@ -45,6 +45,8 @@
 //! out-of-band by the planner's watcher thread (see
 //! [`QuantumBackend::wants_cancel_watcher`], which this backend enables) when the
 //! run's `CancelToken` flips mid-wave.
+
+#![warn(missing_docs)]
 
 pub mod protocol;
 
@@ -392,6 +394,8 @@ impl Worker {
                 // optimisation. The body itself is safe: it calls `nix`'s audited
                 // `set_pdeathsig` and `getppid` wrappers, not hand-written FFI.
                 //
+                // The `;` after the block makes it a statement, so this `allow` can apply.
+                #[allow(unsafe_code)] // signed-off exception: docs/ENGINEERING.md §5
                 // SAFETY: `pre_exec` runs in the forked child before `exec`. We call
                 // only the async-signal-safe `prctl(2)` and `getppid(2)` via `nix`
                 // (the closure captures just a `Copy` pid); no alloc, no locks, no
@@ -414,7 +418,7 @@ impl Worker {
                         }
                         Ok(())
                     });
-                }
+                };
             }
             #[cfg(not(target_os = "linux"))]
             log::warn!(
