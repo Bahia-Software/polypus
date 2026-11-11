@@ -1242,9 +1242,61 @@ impl GateInstruction {
     }
 }
 
+/// One angle of one gate of a circuit: a position in its instruction list and
+/// which of that gate's angles. What the native simulator's adjoint gradient
+/// (`polypus_sim::StatevectorSimulator::adjoint_gradient`) differentiates with
+/// respect to.
+///
+/// `angle` counts the gate's angles in the order its fields (and its OpenQASM
+/// arguments) list them:
+///
+/// - `0`, the only one, for `Rx`, `Ry`, `Rz`, `Rxx`, `Rzz`, `Crx`, `Cry`,
+///   `Crz`, `Cp`, `Cu1`, `P`, `U1` and `U0`;
+/// - `θ, φ, λ` (`0, 1, 2`) for `U`, `UGate` and `Cu3`;
+/// - `φ, λ` (`0, 1`) for `U2`, whose `θ` is fixed at `π/2`;
+/// - `θ, φ, λ, γ` (`0, 1, 2, 3`) for `Cu`.
+///
+/// It is only a reference: whether the gate has that angle is checked where it
+/// is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct AngleRef {
+    /// The gate's position in the circuit's instruction list.
+    pub position: usize,
+    /// Which of the gate's angles, in the order above.
+    pub angle: usize,
+}
+
+impl AngleRef {
+    /// Angle `angle` of the gate at `position`.
+    pub const fn new(position: usize, angle: usize) -> Self {
+        AngleRef { position, angle }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An `AngleRef` is its two indices, ordered by position, then angle.
+    #[test]
+    fn an_angle_ref_orders_by_position_then_angle() {
+        let a = AngleRef::new(3, 1);
+        assert_eq!((a.position, a.angle), (3, 1));
+        let mut refs = [
+            AngleRef::new(4, 0),
+            AngleRef::new(3, 2),
+            AngleRef::new(3, 0),
+        ];
+        refs.sort();
+        assert_eq!(
+            refs,
+            [
+                AngleRef::new(3, 0),
+                AngleRef::new(3, 2),
+                AngleRef::new(4, 0)
+            ]
+        );
+    }
 
     /// Resolve a parameter of a circuit that holds no expressions.
     fn resolve(param: &GateParam, params: &[f64]) -> Result<f64, CircuitError> {
