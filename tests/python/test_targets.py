@@ -9,7 +9,9 @@ accepted today can be checked against exactly one typed target, and every
 rejected one against the error the entry points raise.
 """
 
+import inspect
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +21,7 @@ import polypus  # noqa: E402
 from fake_cunqa import FakeCunqa  # noqa: E402
 from qiskit import QuantumCircuit  # noqa: E402
 from qiskit.circuit import Parameter  # noqa: E402
+from qiskit_aer.noise import NoiseModel  # noqa: E402
 
 NOT_COMPILED = (
     "the 'qmio' infrastructure requires compiling polypus with --features qmio"
@@ -37,7 +40,15 @@ def _qmio_compiled():
 
 QMIO_COMPILED = _qmio_compiled()
 NOISE = object()
-COMMAND = {"command": [sys.executable, "worker.py"]}
+NOISE_MODEL = NoiseModel()
+WORKER = (
+    Path(__file__).resolve().parents[2]
+    / "crates"
+    / "polypus-subprocess-backend"
+    / "python"
+    / "worker_template.py"
+)
+COMMAND = {"command": [sys.executable, str(WORKER)]}
 
 # Every combination of strings and provider arguments the entry points accept,
 # with the one typed target it maps to.
@@ -51,8 +62,12 @@ ACCEPTED = [
         polypus.Aer(sim_method="matrix_product_state"),
     ),
     (
-        {"infrastructure": "local", "backend": "AerSimulator", "noise_model": NOISE},
-        polypus.Aer(noise_model=NOISE),
+        {
+            "infrastructure": "local",
+            "backend": "AerSimulator",
+            "noise_model": NOISE_MODEL,
+        },
+        polypus.Aer(noise_model=NOISE_MODEL),
     ),
     ({"infrastructure": "local", "fusion": False}, polypus.Aer()),
     # local ignores the CUNQA allocation, unchecked
@@ -122,32 +137,179 @@ QMIO_ACCEPTED = [
     ]
 ]
 
-# Combinations rejected today; `_target_of` must raise the same error as the
-# entry points.
+# Combinations rejected before targets existed, with the exception type and
+# message `origin/main` raised for each (eec7614). `_target_of` and the entry
+# points must keep both.
+CE = polypus.ConfigurationError
+
+
+def _fusion(backend, infrastructure):
+    return (
+        f'fusion=True applies only to the native backend="polypus"; backend '
+        f'"{backend}" on infrastructure "{infrastructure}" cannot fuse gates. Omit '
+        "fusion, or pass fusion=False for a gate-by-gate run."
+    )
+
+
+def _options(infrastructure):
+    return (
+        f"the '{infrastructure}' infrastructure does not accept 'options' (1 given); "
+        "the 'options' dict applies only to registry-backed backends (\"qmio\", "
+        '"subprocess", or a registered third-party backend)'
+    )
+
+
+def _no_noise_model(infrastructure):
+    return (
+        f"the '{infrastructure}' infrastructure does not accept a noise_model; it "
+        'applies only to Aer (infrastructure="local" with backend="aer")'
+    )
+
+
+def _no_sim_method(infrastructure):
+    return (
+        f"the '{infrastructure}' infrastructure does not accept "
+        'sim_method="statevector"; it applies only to Aer (infrastructure="local" '
+        'or "cunqa")'
+    )
+
+
+def _unknown_cunqa(backend):
+    return f"unknown cunqa backend '{backend}'; CUNQA's QPUs run Aer, expected \"aer\""
+
+
+def _qmio(message):
+    """What a qmio row raises: `message` with the feature, else NOT_COMPILED."""
+    return message if QMIO_COMPILED else NOT_COMPILED
+
+
 REJECTED = [
-    {"infrastructure": "local", "backend": "does-not-exist"},
-    {"infrastructure": "local", "backend": "polypus", "noise_model": NOISE},
-    {"infrastructure": "local", "backend": "statevector", "sim_method": "statevector"},
-    {"infrastructure": "local", "backend": "aer", "fusion": True},
-    {"infrastructure": "local", "options": {"command": "x"}},
-    {"infrastructure": "local", "options": {"k": 1}},
-    {"infrastructure": "cunqa", "backend": "polypus"},
-    {"infrastructure": "cunqa", "backend": "foo"},
-    {"infrastructure": "cunqa", "noise_model": NOISE},
-    {"infrastructure": "cunqa", "nodes": 0},
-    {"infrastructure": "cunqa", "cores_per_qpu": 0},
-    {"infrastructure": "cunqa", "walltime": "1-00:00:00"},
-    {"infrastructure": "cunqa", "fusion": True},
-    {"infrastructure": "cunqa", "options": {"command": "x"}},
-    {"infrastructure": "subprocess", "noise_model": NOISE},
-    {"infrastructure": "subprocess", "sim_method": "statevector"},
-    {"infrastructure": "subprocess", "backend": "polypus"},
-    {"infrastructure": "subprocess", "fusion": True},
-    {"infrastructure": "nowhere"},
-    {"infrastructure": "qmio", "backend": "bogus"},
-    {"infrastructure": "qmio", "noise_model": NOISE},
-    {"infrastructure": "qmio", "sim_method": "statevector"},
-    {"infrastructure": "qmio", "fusion": True},
+    (
+        {"infrastructure": "local", "backend": "does-not-exist"},
+        CE,
+        'unknown local backend \'does-not-exist\'; expected "aer" or "polypus"',
+    ),
+    (
+        {"infrastructure": "local", "backend": "polypus", "noise_model": NOISE},
+        CE,
+        "the native 'polypus' backend is a noiseless statevector simulator and does "
+        'not accept a noise_model; use backend="aer"',
+    ),
+    (
+        {
+            "infrastructure": "local",
+            "backend": "statevector",
+            "sim_method": "statevector",
+        },
+        CE,
+        "the native 'polypus' backend is a statevector simulator and does not accept "
+        'sim_method="statevector"; omit it, or use backend="aer"',
+    ),
+    (
+        {"infrastructure": "local", "backend": "aer", "fusion": True},
+        CE,
+        _fusion("aer", "local"),
+    ),
+    (
+        {"infrastructure": "local", "options": {"command": "x"}},
+        CE,
+        _options("local"),
+    ),
+    (
+        {"infrastructure": "local", "options": {"k": 1}},
+        TypeError,
+        "options['k'] must be a str or a list of str, got int",
+    ),
+    (
+        {"infrastructure": "cunqa", "backend": "polypus"},
+        CE,
+        _unknown_cunqa("polypus"),
+    ),
+    ({"infrastructure": "cunqa", "backend": "foo"}, CE, _unknown_cunqa("foo")),
+    (
+        {"infrastructure": "cunqa", "noise_model": NOISE},
+        CE,
+        "the 'cunqa' infrastructure does not accept a noise_model: its simulated QPUs "
+        "are configured when they are raised, not per run; omit it, or use "
+        'infrastructure="local" with backend="aer"',
+    ),
+    (
+        {"infrastructure": "cunqa", "nodes": 0},
+        CE,
+        "nodes must be >= 1 for the 'cunqa' infrastructure, got 0",
+    ),
+    (
+        {"infrastructure": "cunqa", "cores_per_qpu": 0},
+        CE,
+        "cores_per_qpu must be >= 1 for the 'cunqa' infrastructure, got 0",
+    ),
+    (
+        {"infrastructure": "cunqa", "walltime": "1-00:00:00"},
+        CE,
+        'invalid walltime "1-00:00:00": hours must be one or more digits; expected '
+        '"HH:MM:SS" (hours: one or more digits, minutes and seconds: two digits '
+        'below 60, total above zero), e.g. "48:00:00"',
+    ),
+    (
+        {"infrastructure": "cunqa", "fusion": True},
+        CE,
+        _fusion("aer", "cunqa"),
+    ),
+    (
+        {"infrastructure": "cunqa", "options": {"command": "x"}},
+        CE,
+        _options("cunqa"),
+    ),
+    (
+        {"infrastructure": "subprocess", "noise_model": NOISE},
+        CE,
+        _no_noise_model("subprocess"),
+    ),
+    (
+        {"infrastructure": "subprocess", "sim_method": "statevector"},
+        CE,
+        _no_sim_method("subprocess"),
+    ),
+    (
+        {"infrastructure": "subprocess", "backend": "polypus"},
+        CE,
+        "the registered backend 'subprocess' does not accept backend=\"polypus\"; "
+        "omit it and pass backend-specific settings through 'options'",
+    ),
+    (
+        {"infrastructure": "subprocess", "fusion": True},
+        CE,
+        _fusion("aer", "subprocess"),
+    ),
+    (
+        {"infrastructure": "nowhere"},
+        CE,
+        'unknown infrastructure \'nowhere\'; expected "local", "cunqa", "qmio", '
+        "or a registered backend name (see docs/backends.md)",
+    ),
+    (
+        {"infrastructure": "qmio", "backend": "bogus"},
+        CE,
+        _qmio(
+            'unknown qmio program format \'bogus\'; expected "openqasm", "qir", '
+            'or "qir_bitcode"'
+        ),
+    ),
+    (
+        {"infrastructure": "qmio", "noise_model": NOISE},
+        CE,
+        _qmio(_no_noise_model("qmio")),
+    ),
+    (
+        {"infrastructure": "qmio", "sim_method": "statevector"},
+        CE,
+        _qmio(_no_sim_method("qmio")),
+    ),
+    (
+        {"infrastructure": "qmio", "fusion": True},
+        CE,
+        _fusion("aer", "qmio"),
+    ),
 ]
 
 
@@ -225,11 +387,29 @@ class TestAliasTable:
             with pytest.raises(polypus.ConfigurationError, match="--features qmio"):
                 polypus._target_of(**kwargs)
 
-    @pytest.mark.parametrize("kwargs", REJECTED, ids=repr)
-    def test_a_rejected_combination_raises_what_the_entry_point_raises(self, kwargs):
-        expected = _error_of(lambda: _run(**kwargs))
-        assert _error_of(lambda: polypus._target_of(**kwargs)) == expected
-        assert issubclass(expected[0], (ValueError, TypeError))
+    @pytest.mark.parametrize(
+        ("kwargs", "error", "message"),
+        REJECTED,
+        ids=[repr(kwargs) for kwargs, _, _ in REJECTED],
+    )
+    def test_a_rejected_combination_keeps_its_error(self, kwargs, error, message):
+        assert _error_of(lambda: polypus._target_of(**kwargs)) == (error, message)
+        assert _error_of(lambda: _run(**kwargs)) == (error, message)
+
+    @pytest.mark.parametrize(("kwargs", "expected"), ACCEPTED, ids=repr)
+    def test_every_accepted_combination_runs(self, monkeypatch, kwargs, expected):
+        FakeCunqa().install(monkeypatch)
+        if kwargs["infrastructure"] == "subprocess" and "options" not in kwargs:
+            # Accepted by the edge; the bridge itself needs a worker command.
+            with pytest.raises(polypus.BackendError, match="command"):
+                _run(seed=1, **kwargs)
+            return
+        result = _run(seed=1, **kwargs)
+        assert sum(result.merged_counts.values()) == 128
+        assert (result.infrastructure, result.backend) == (
+            kwargs["infrastructure"],
+            kwargs.get("backend", "aer"),
+        )
 
 
 class TestConstruction:
@@ -298,6 +478,22 @@ class TestConstruction:
         )
         assert repr(polypus.Qmio()) == "Qmio(program_format='openqasm')"
 
+    @pytest.mark.parametrize(
+        "target",
+        [
+            polypus.Aer(),
+            polypus.Native(),
+            polypus.Cunqa(),
+            polypus.Qmio(),
+            polypus.Registered("subprocess"),
+        ],
+        ids=repr,
+    )
+    def test_targets_are_unhashable(self, target):
+        assert type(target).__hash__ is None
+        with pytest.raises(TypeError, match="unhashable"):
+            hash(target)
+
     def test_fields_are_read_only(self):
         with pytest.raises(AttributeError):
             polypus.Native().fusion = True
@@ -350,6 +546,18 @@ class TestRunQuantumCircuit:
             infrastructure="cunqa", nodes=2, cores_per_qpu=3, walltime="01:00:00"
         )
         assert typed == plain
+
+    def test_a_cunqa_sim_method_reaches_the_qpus(self, monkeypatch):
+        def methods(**kwargs):
+            fake = FakeCunqa().install(monkeypatch)
+            _run(seed=5, **kwargs)
+            return [run["options"].get("method") for run in fake.runs]
+
+        typed = methods(target=polypus.Cunqa(sim_method="matrix_product_state"))
+        assert typed == ["matrix_product_state"]
+        assert typed == methods(
+            infrastructure="cunqa", sim_method="matrix_product_state"
+        )
 
     def test_options_reach_a_registered_target(self):
         with pytest.raises(polypus.BackendError, match="'command' option is empty"):
@@ -539,14 +747,30 @@ class TestExclusivity:
             _run(target=polypus.Aer(), infrastructure="local", backend="polypus")
 
     @pytest.mark.parametrize(
-        "defaults",
-        [
-            {"backend": "aer"},
-            {"sim_method": "automatic"},
-            {"nodes": 1, "cores_per_qpu": 2},
-        ],
-        ids=repr,
+        "defaults", [{"backend": "aer"}, {"sim_method": "automatic"}], ids=repr
     )
-    def test_a_default_value_is_not_a_conflict(self, defaults):
+    def test_a_default_string_is_not_a_conflict(self, defaults):
         _run(target=polypus.Aer(), seed=1, **defaults)
         _qml_predict(target=polypus.Aer(), seed=1, **defaults)
+
+    @pytest.mark.parametrize("entry_point", sorted(ENTRY_POINTS))
+    @pytest.mark.parametrize(("name", "value"), [("nodes", 1), ("cores_per_qpu", 2)])
+    def test_an_explicit_allocation_is_a_conflict_even_at_its_default(
+        self, monkeypatch, entry_point, name, value
+    ):
+        """`nodes`/`cores_per_qpu` belong to `Cunqa`: given at all, they conflict
+        in every entry point, as in `train` where they have no default."""
+        FakeCunqa().install(monkeypatch)
+        call, _ = ENTRY_POINTS[entry_point]
+        with pytest.raises(
+            polypus.ConfigurationError, match=f"target= cannot be combined with {name}"
+        ):
+            call(target=polypus.Cunqa(nodes=4), **{name: value})
+
+    @pytest.mark.parametrize(
+        "function", [polypus.run_quantum_circuit, polypus.qml.predict], ids=repr
+    )
+    def test_the_allocation_defaults_are_still_shown(self, function):
+        parameters = inspect.signature(function).parameters
+        assert parameters["nodes"].default == 1
+        assert parameters["cores_per_qpu"].default == 2
