@@ -252,7 +252,8 @@ the coverage figures: it runs as a separate process spawned by the Rust
 integration tests, which no tool instruments. So are the diagnostic binaries
 under `crates/*/src/bin/`, which are run by hand. Sonar still analyses both
 for issues. On pull requests the `SonarQube Cloud scan` job waits for the
-quality gate and fails with it; pushes to `main` only report. Without the
+quality gate and fails with it; pushes to `main` only report, and merge-queue
+runs skip the workflow (the gate already ran on the PR). Without the
 `SONAR_TOKEN` secret (pull requests from forks) the reports are still built
 but not uploaded, and the job passes without a gate. Python coverage locally,
 with the wheel installed:
@@ -354,7 +355,8 @@ The type+scope prefix feeds the changelog; the subject line explains the
 ## Pull requests
 
 All changes land through a PR against `main` — the branch is protected: at
-least one approving review from someone other than the author, and CI green.
+least one approving review from someone other than the author, CI green, and
+the merge queue (see [Merging](#merging)).
 The PR template asks for three declarations that we take seriously:
 
 1. **Scope** — which module(s) the change targets.
@@ -369,6 +371,26 @@ The PR template asks for three declarations that we take seriously:
 Keep PRs small and single-purpose. If your work naturally produced unrelated
 improvements, split them out — small PRs get reviewed in hours, mixed ones sit
 for days.
+
+### Merging
+
+`main` uses GitHub's merge queue. A PR does not need to be up to date with
+`main`: once it is approved and green, press **Merge when ready** (or run
+`gh pr merge <N> --merge`). The queue tests the PR on top of `main` and of the
+PRs queued ahead of it, runs the required checks on that commit, and merges it
+with a merge commit if they pass. Do not press **Update branch** just to
+refresh CI; rebase only to resolve a conflict.
+
+If the queue removes your PR, open the failed `merge_group` run:
+
+- A real failure, usually a clash with a PR merged ahead of yours: fix it on
+  your branch and queue again.
+- A failure that does not reproduce: open an issue for the flaky test,
+  quarantine it in the same or a follow-up PR, and queue again. A flaky test
+  ejects every PR behind it, so it is not left in place.
+
+Admins can bypass the queue; that is for emergencies only (the queue itself
+is broken, or `main` must be fixed now).
 
 ## Adding things that have a defined shape
 
