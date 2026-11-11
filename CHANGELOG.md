@@ -89,6 +89,18 @@ Entries were curated from the Conventional Commits history. Releases before
   `JacobianBlock::vjp_runs`/`num_vjp_runs`/`vjp_from_adjoint` (and
   `ExpectationJacobian`'s), `Vjp` and `DiagonalObservable::weight_bound`.
   `benchmarks/bench_vjp.py` measures it (#559, ADR 0008).
+- A call trace for `polypus.train` and `polypus.run_quantum_circuit`
+  (contract C-12): the keyword-only `trace=` (a path to a new file) or
+  `POLYPUS_CALL_TRACE=<directory>` writes one JSON Lines line per planner
+  batch, backend wave, optimizer iteration and QNG metric call, with sizes and
+  times only, capped by `POLYPUS_CALL_TRACE_MAX_MB` (512 MiB by default). It
+  never changes a result.
+- The call trace in Rust: the `trace` module of `polypus-orchestration`, with
+  `CallTracer`, which writes, caps and closes a trace, the types of its lines
+  (`TraceHeader`, `TraceEvent`, `RunStatus`, …), `DEFAULT_MAX_BYTES`, and four
+  decorators, `TracingPlanner`, `TracingBackend`, `TracingObserver` and
+  `TracingVariance`, which record the calls they forward; and
+  `Method::name()`, the optimizer's name that a trace's header records.
 - Multi-qubit Pauli sums and an exact H₂ Hamiltonian in `polypus-physics`
   (#529), the reference for molecular simulation (#528). In
   `hamiltonians`: `PauliString` (text form `"X0 X1 Y2 Y3"`, product with a
@@ -111,6 +123,10 @@ Entries were curated from the Conventional Commits history. Releases before
   `libm` (`erf` for the Boys function).
 
 ### Changed
+- **BREAKING:** for Rust users, `TrainFlow` and `RunCircuitFlow`
+  (`polypus-orchestration`) have a new public field,
+  `trace: Option<Arc<CallTracer>>`, so a struct literal must set it;
+  `trace: None` keeps today's behaviour.
 - **BREAKING (Rust):** `polypus_qml::ValidationError` has two new variants,
   `StronglyEntanglingRangesLength` and `StronglyEntanglingRangeOutOfBounds`,
   so an exhaustive `match` on it outside its crate must handle them (#505).
@@ -140,6 +156,13 @@ Entries were curated from the Conventional Commits history. Releases before
   `polypus-observable`, CMA-ES and SHADE, and `polypus-backend`'s memory guard
   and planner, and property tests check the OpenQASM round trip and that the
   parallel kernels match the sequential ones on random circuits (#409).
+- For contributors: every workspace crate inherits a `[workspace.lints]` table
+  from the root `Cargo.toml` that denies `unsafe_code` and
+  `clippy::undocumented_unsafe_blocks`, so the three `unsafe` sites
+  `docs/ENGINEERING.md` §5 authorises are the only ones that compile, each with
+  its own block-scoped `allow`. `missing_docs` is on in the crates that are
+  already fully documented, and `cargo deny` keeps `pyo3` out of the pure
+  crates (#408).
 
 ### Fixed
 - `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a

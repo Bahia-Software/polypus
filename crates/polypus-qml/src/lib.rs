@@ -94,6 +94,8 @@
 //! cotangent, a [`Vjp`] ([`Jacobian::vjp`], or by adjoint differentiation as
 //! above).
 
+#![warn(missing_docs)]
+
 mod adjoint;
 mod dataset;
 mod error;
