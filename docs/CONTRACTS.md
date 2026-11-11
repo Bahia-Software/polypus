@@ -251,8 +251,10 @@ The Rust orchestration layer now returns a typed `Result` on every path:
 
   The exact quantum kernel (`qml.kernel_matrix(exact=True)`, C-11 (h)) is
   refused the same way when the matrix it keeps beside its statevectors leaves
-  no room for two of them; its message names the matrix, its bytes and the
-  statevectors instead of a circuit.
+  no room for even one of them (with room for one but not two it computes each
+  entry from one statevector instead, and the matrix counts on that route too);
+  its message names the matrix, its bytes and the statevector instead of a
+  circuit.
 
   The message names the circuit (qubit count, or its index for Aer), the required
   and budgeted sizes, where the budget came from, and how to override it with
@@ -338,8 +340,8 @@ is pinned by `test_local_run_qcs_kwargs_*` in the same file.
 class hierarchy; subprocess runs with `POLYPUS_MEM_BUDGET` set on the native
 backend, `polypus.statevector` and Aer — `statevector`, `automatic` non-Clifford
 and `density_matrix` refused, a 26-qubit Clifford GHZ on `automatic` still run;
-`qml.kernel_matrix(exact=True)` with a matrix that leaves no room for its
-statevectors; `local.py` consuming `max_memory_mb`; and the "insufficient memory"
+`qml.kernel_matrix(exact=True)` with a matrix that leaves no room for a
+statevector; `local.py` consuming `max_memory_mb`; and the "insufficient memory"
 status text of the installed Aer) and by `assert_maps_to` in
 `crates/polypus/src/exceptions.rs` (the Rust → Python class mapping, for both
 refusals).
@@ -452,8 +454,11 @@ classifying it there: `every_instruction_kind_is_classified` fails until it is.
 The native simulator's adjoint gradient
 (`StatevectorSimulator::adjoint_gradient`) differentiates the same five
 rotations and steps back through the inverse of every other instruction
-(`Statevector::apply_inverse`, built from the vocabulary itself: no
-instruction is added for it); `apply_inverse_undoes_every_instruction_kind`
+(`Statevector::push_inverse`, which takes `GateInstruction::push_inverse`'s
+table below, the one table of the workspace, and itself only keeps the
+barriers and measurements, no-ops for the state, and undoes a call of a
+declared gate through its expansion: no instruction is added for it);
+`apply_inverse_undoes_every_instruction_kind`
 and `every_instruction_kind_is_differentiated_through` fail until a new
 instruction has its inverse.
 
@@ -463,9 +468,12 @@ vocabulary, with no new instruction: the instructions in reverse order, each
 replaced by its exact inverse (global phase included) in the vocabulary — a
 self-inverse gate kept, `s`↔`sdg`, `t`↔`tdg`, `sx`↔`sxdg`, every angle negated
 (`u3(θ, φ, λ)† = u3(−θ, −λ, −φ)` under each spelling, `cu`'s `γ` too), `u2(φ,
-λ)` as `u3(−π/2, −λ, −φ)`, and `csx`, `rc3x` and `c3sqrtx`, of order 4 with no
-inverse among the instructions, repeated three times — on the same qubits and
-classical width. A barrier is kept in its reversed place. A measurement
+λ)` as `u3(−π/2, −λ, −φ)`; `csx`, with no inverse among the instructions, as
+`h`, `cp(−π/2)`, `h` on its target, and `rc3x` and `c3sqrtx`, with none either,
+as the inverse of their `lowering` (its instructions in reverse order, each
+inverted) — on the same qubits and classical width. Each instruction's inverse
+is `GateInstruction::push_inverse`, public, in its own order of application
+inside the reversed circuit. A barrier is kept in its reversed place. A measurement
 (`measure`, `measure_all`) and a call of a declared gate are refused with
 `CircuitError::NotInvertible`, naming the first; a free parameter or an
 expression, which a concrete circuit cannot hold, is the error `try_new` gives
@@ -473,9 +481,8 @@ it. Its match is exhaustive, so a new instruction does not build until it is
 inverted; `c2_every_instruction_kind_is_inverted_or_refused` fails until the
 vocabulary list covers it, and `polypus-sim`'s `tests/inverse.rs` checks every
 inverse against the simulator (`U` then `U†`, and `U†` then `U`, leave a
-generic state where it was). The simulator's `apply_inverse` keeps its own
-table for the adjoint (it undoes `csx` and the composite gates part by part
-instead).
+generic state where it was). The simulator's adjoint steps back through the
+same table, so the two cannot drift.
 
 Corollaries:
 
@@ -2496,7 +2503,10 @@ batching and distribution are the oracle's concern.
   another width `QmlError::CountsWidthMismatch`, never `NaN`), or its exact
   probabilities as `P(0…0)` clamped to `[0, 1]`. `matrix(values)` assembles one
   value per pair into the `rows × columns` matrix, a symmetric kernel's lower
-  half the mirror of its upper one, bit for bit. A matrix whose entries are not
+  half the mirror of its upper one, bit for bit; `place(matrix, first, values)`
+  writes a block of pairs into a `zero_matrix()` the same way, so blocks of any
+  size give that matrix bit for bit and a caller never holds the values beside
+  it. A matrix whose entries are not
   addressable is `QmlError::KernelTooLarge`: `FidelityKernel::new` checks it
   before it encodes any sample, `from_states` when it is built, over states
   already encoded (the order `qml.kernel_matrix` keeps, every check of `x1`
@@ -2504,23 +2514,26 @@ batching and distribution are the oracle's concern.
   `QmlError::StateWidthMismatch`. The circuits can be taken in blocks
   (`circuits(range)`), and the states themselves (`row_states`, `column_states`)
   serve a caller that takes inner products instead:
-  `NativeStatevectorBackend::fidelity_matrix` gives `|⟨a_i|b_j⟩|²` from the
-  statevectors, each simulated once when they all fit in the memory budget
-  beside the result (in tiles otherwise), each entry one inner product summed
-  sequentially in basis-state order, so the matrix is the same `f64`s for every
-  budget, tile and thread count, and the compute-uncompute probabilities to
-  rounding. The result counts against the budget: its `rows × columns × 8` bytes
-  come off it before the statevectors are sized, and a known budget (never the
-  blind fallback) that does not leave room for two statevectors beside it is
-  `InsufficientMemoryForResult` (a `BackendError` variant) naming the matrix,
-  the statevectors and the budget, before anything is allocated or simulated. It
-  holds two statevectors at once at least: `fidelity_fits` says whether two fit,
-  one (the caller runs the circuits on `run_circuits_exact` instead, logged at
-  `info` once per backend — a route that, like the other exact paths, does not
-  count its results against the budget), or none (`InsufficientMemory`, the
-  exact path's own refusal). A circuit that measures individual qubits, or
-  states of different widths, are `UnsupportedCircuit`; `should_cancel` stops it
-  with `Aborted`.
+  `NativeStatevectorBackend::fidelity_matrix` gives `|⟨a_i|b_j⟩|²` and picks
+  its route itself, by the memory budget with the result counted: its
+  `rows × columns × 8` bytes come off the budget before the statevectors are
+  sized. With room for two statevectors beside it, from the statevectors, each
+  simulated once when they all fit (in tiles otherwise), each entry one inner
+  product summed sequentially in basis-state order, so the matrix is the same
+  `f64`s for every such budget, tile and thread count, and the compute-uncompute
+  probabilities to rounding. With room for one but not two, each entry is the
+  `P(0…0)` of `U(x_i)` then `U(y_j)†` on one statevector, one entry at a time,
+  logged at `info` once per backend: the inner products' values to rounding,
+  with no result map kept per circuit. A known budget (never the blind
+  fallback, which takes the inner products) that leaves no room for one
+  statevector beside the matrix is `InsufficientMemoryForResult` (a
+  `BackendError` variant) naming the matrix, the statevector and the budget,
+  and one that does not hold one statevector at all is `InsufficientMemory`,
+  the exact path's own refusal, both before anything is allocated or
+  simulated. The circuits it takes are those `ConcreteCircuit::inverse` inverts,
+  whatever the route: one that measures (`measure`, `measure_all`) or calls a
+  declared gate, or states of different widths, are `UnsupportedCircuit`;
+  `should_cancel` stops it with `Aborted` on either route.
 
 ### The Python API (`polypus.qml`)
 
@@ -2765,16 +2778,16 @@ seed=None, exact=False)` exposes (h) to Python:
   `K == K.T` bit for bit. The diagonal is executed like any entry, never set to
   `1`: it is `1` to rounding exactly, and below it under noise. With `x2`, all
   `N·M` entries run, even for an `x2` equal to `x1` (no symmetry is detected).
-- **Exact and shots.** With `exact=True`, the inner products of
-  `fidelity_matrix` ((h)), unless the memory budget holds one statevector of
-  the encoder's width but not two: then the compute-uncompute circuits on
-  `run_circuits_exact`, logged at `info`; the two are the same to rounding.
-  The inner products count the matrix itself against the budget: when its
-  `len(x1) × len(x2) × 8` bytes leave no room for the two statevectors an
-  inner product needs, the call raises `polypus.InsufficientMemoryError` (a
-  `polypus.BackendError`, the class a statevector that does not fit raises,
-  C-1) naming the matrix and the budget, before anything runs; a call on fewer
-  rows of `x1` gives those rows of the whole matrix, bit for bit. The exact
+- **Exact and shots.** With `exact=True`, one call to `fidelity_matrix`
+  ((h)), which counts the matrix itself against the memory budget and picks
+  the route by what its `len(x1) × len(x2) × 8` bytes leave: the inner products
+  with room for two statevectors of the encoder's width, one compute-uncompute
+  circuit per entry on one statevector with room for one (logged at `info`; the
+  two are the same to rounding), and with no room for one the call raises
+  `polypus.InsufficientMemoryError` (a `polypus.BackendError`, the class a
+  statevector that does not fit raises, C-1) naming the matrix and the budget,
+  before anything runs; a call on fewer rows of `x1` gives those rows of the
+  whole matrix, bit for bit while both take the inner products. The exact
   Gram matrix is positive semi-definite to rounding. With shots, each
   entry is the `0…0` frequency of one compute-uncompute circuit, an unbiased
   estimator of `K`; the matrix may not be positive semi-definite, and it is
@@ -2784,13 +2797,16 @@ seed=None, exact=False)` exposes (h) to Python:
   pairs run in sequential blocks sized like `qml.expval`'s rows
   (`candidate_window_size`, one circuit per pair), with the GIL released for
   the whole loop; Ctrl+C raises `KeyboardInterrupt` between blocks and waves.
-  The exact inner products are one call that bounds its own memory (no
-  blocks), watched from the calling thread like an exact `qml.jacobian` block,
-  so Ctrl+C stops it in flight with the same `KeyboardInterrupt`. With shots
+  The exact kernel is one call that bounds its own memory (no blocks), on
+  either of its routes, watched from the calling thread like an exact
+  `qml.jacobian` block, so Ctrl+C stops it in flight with the same
+  `KeyboardInterrupt`. With shots
   and a seed, the result does not depend on the blocks (every circuit's seed is
   its position in the call); exactly, a call on some rows of `x1` equals those
-  rows of the call on all of them, bit for bit (not with shots, whose seeds
-  follow the pairs' global positions).
+  rows of the call on all of them, bit for bit while both take the inner
+  products (not with shots, whose seeds follow the pairs' global positions).
+  With shots, each block's values are written into the matrix as they are
+  read, so the pairs' values are never held beside it.
 - **Checks.** The `TypeError` for `encoder` comes first. Then each of these is
   a `polypus.ConfigurationError` raised before a backend exists, in order:
   `shots` and `n_qpus`, the CUNQA allocation and `exact`; the rows of `x1`

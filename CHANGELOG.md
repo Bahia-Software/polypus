@@ -23,14 +23,18 @@ Entries were curated from the Conventional Commits history. Releases before
   and the matrix is symmetric bit for bit; the diagonal is executed, not set
   to 1. It takes `qml.expval`'s execution arguments and rules, checks
   everything before a backend exists, and runs the pairs in blocks over one
-  backend per call. In `polypus-circuit`: `ConcreteCircuit::inverse` and
-  `CircuitError::NotInvertible`. In `polypus-qml`: `FeatureMap`,
+  backend per call. In `polypus-circuit`: `ConcreteCircuit::inverse`,
+  `CircuitError::NotInvertible`, and `GateInstruction::push_inverse`, public:
+  the one inverse table of the workspace, which the native simulator's
+  adjoint gradient now steps back through too (`csx`, `rc3x` and `c3sqrtx` are
+  inverted through their decomposition). In `polypus-qml`: `FeatureMap`,
   `FeatureStates` and `FidelityKernel`, and the variants
   `ValidationError::TrainableLayerInFeatureMap`, `QmlError::KernelTooLarge`
   and `QmlError::StateWidthMismatch`. In `polypus-infrastructure`:
-  `NativeStatevectorBackend::fidelity_matrix` and `fidelity_fits`; the exact
-  kernel counts its matrix against the memory budget. In `polypus-backend`:
-  `InsufficientMemoryForResult` and the
+  `NativeStatevectorBackend::fidelity_matrix`, which counts its matrix
+  against the memory budget and, with room for one statevector beside it but
+  not two, computes each entry from one statevector instead of refusing. In
+  `polypus-backend`: `InsufficientMemoryForResult` and the
   `BackendError::InsufficientMemoryForResult` variant (`BackendError` is
   `#[non_exhaustive]`), raised in Python as
   `polypus.InsufficientMemoryError` when a result leaves no room for its
