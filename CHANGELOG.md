@@ -102,7 +102,8 @@ Entries were curated from the Conventional Commits history. Releases before
   `n_evaluations` counts the candidates scored as a fitness, as
   `TrainProgress.evaluations` does, plus the re-score of `best_params` on
   the whole training set when a gradient-free optimizer trains on
-  minibatches; the final batch is not counted. In
+  minibatches; the shifted circuits of an exact gradient (`Adam` in
+  `qml.Model.fit`) and the final batch are not counted. In
   Rust: `polypus_optimizers::StopReason`, `OptimizationOutcome::stop_reason`
   and `TrainOutcome::n_evaluations`. Seeded results are unchanged (#431).
 

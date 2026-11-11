@@ -221,11 +221,14 @@ pub struct TrainResult {
     pub fitness_history: Vec<f64>,
     /// What ended the optimizer's loop, the snake_case name of a
     /// [`StopReason`](polypus_optimizers::StopReason): `"iteration_budget"`,
-    /// `"fitness_tolerance"`, `"callback"`, …
+    /// `"fitness_tolerance"`, `"callback"`, … L-SHADE's budget is one of
+    /// evaluations, so it reports `"evaluation_budget"`.
     #[pyo3(get)]
     pub stop_reason: &'static str,
     /// Candidates scored as a fitness, the final batch not included (see
-    /// [`TrainOutcome::n_evaluations`]).
+    /// [`TrainOutcome::n_evaluations`]). The shifted circuits of an exact
+    /// gradient (`Adam` in `qml.Model.fit`) are not counted; the point it
+    /// measures in their batch is.
     #[pyo3(get)]
     pub n_evaluations: u64,
     /// With `final_shots`, the candidate the final batch chose: the best
@@ -268,11 +271,14 @@ impl TrainResult {
             .map_or(String::new(), |params| format!(", final_params={params:?}"));
         format!(
             "TrainResult(id={:?}, best_fitness={}{final_fitness}, iterations_run={}, \
-             converged={}, seed={}, best_params={:?}{final_params})",
+             converged={}, stop_reason={:?}, n_evaluations={}, seed={}, best_params={:?}\
+             {final_params})",
             self.id,
             self.best_fitness,
             self.iterations_run,
             self.converged,
+            self.stop_reason,
+            self.n_evaluations,
             self.seed,
             self.best_params
         )

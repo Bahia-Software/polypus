@@ -172,3 +172,58 @@ def test_model_fit_reports_them_too():
     )
     assert result.stop_reason == "iteration_budget"
     assert result.n_evaluations == 6 * (result.iterations_run + 1)
+
+
+def test_repr_shows_them():
+    import polypus
+
+    result = _train(
+        polypus.DE(generations=3, population_size=6, tolerance=1e-12, patience=100)
+    )
+    text = repr(result)
+    assert 'stop_reason="iteration_budget"' in text
+    assert f"n_evaluations={result.n_evaluations}," in text
+
+
+def _fit_minibatches(method, callback):
+    from polypus.qml import Ansatz, Encoder, Model, Readout, Z
+
+    model = Model(
+        Encoder(2).angle_encoder("ry"), Ansatz(2).hardware_efficient(1), Readout([Z(0)])
+    )
+    return model.fit(
+        [[0.1, 0.2], [0.4, 0.3], [2.9, 2.8], [0.2, 0.1]],
+        method=method,
+        batch_size=2,
+        seed=11,
+        callback=callback,
+    )
+
+
+def test_a_minibatch_rescore_is_counted():
+    import polypus
+
+    # DE scores minibatch estimates, so once it stops best_params is
+    # re-scored on every sample: one candidate more than the callback saw.
+    seen = []
+    result = _fit_minibatches(
+        polypus.DE(generations=3, population_size=6, tolerance=1e-12, patience=100),
+        lambda progress: seen.append(progress.evaluations),
+    )
+    assert seen[-1] == 6 * (result.iterations_run + 1)
+    assert result.n_evaluations == seen[-1] + 1
+
+
+def test_exact_gradient_circuits_are_not_counted():
+    import polypus
+
+    # Adam measures θ with its parameter-shift circuits on every sample and
+    # tracks its best there: θ counts, the shifted circuits and a re-score
+    # do not.
+    seen = []
+    result = _fit_minibatches(
+        polypus.Adam(max_iters=4, patience=100),
+        lambda progress: seen.append(progress.evaluations),
+    )
+    assert seen == [1, 2, 3, 5]
+    assert result.n_evaluations == 5
