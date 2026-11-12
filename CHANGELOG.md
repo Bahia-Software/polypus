@@ -12,6 +12,17 @@ Entries were curated from the Conventional Commits history. Releases before
 ## [Unreleased]
 
 ### Added
+- Typed execution targets: `polypus.Aer`, `Native`, `Cunqa`, `Qmio` and
+  `Registered`, each checking its own fields when built (except `sim_method`,
+  which Aer checks when the run starts), and a `target=`
+  keyword on `run_quantum_circuit`, `train`, `qml.train` and `qml.predict`
+  that replaces `infrastructure`, `backend` and their provider arguments
+  (passing one of those next to it is a `ConfigurationError`, except
+  `backend` or `sim_method` left at its default). Strings stay as shorthand; every accepted
+  `infrastructure`/`backend` spelling now resolves through one alias table
+  with unchanged errors. `infrastructure` (and, for `train`/`qml.train`,
+  `nodes`, `cores_per_qpu` and `id`) now defaults to `None` so a call with
+  `target=` can omit them; without `target=` they are still required (#434).
 - `polypus.qml.Ansatz.strongly_entangling(reps, ranges=None, entangler="cx")`,
   PennyLane's `StronglyEntanglingLayers`: per layer, a general rotation on
   every qubit, emitted as `Rz(φ)`, `Ry(θ)`, `Rz(ω)`, in that order, so the

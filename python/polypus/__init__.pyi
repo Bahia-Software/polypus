@@ -81,6 +81,11 @@ __all__ = [
     "Ising",
     "CachedCost",
     "SampleCost",
+    "Aer",
+    "Native",
+    "Cunqa",
+    "Qmio",
+    "Registered",
     "train",
     "run_quantum_circuit",
     "statevector",
@@ -566,6 +571,69 @@ class SampleCost:
     # targets, so the callback must accept `float` (which includes `int`).
     def __new__(cls, cost_fn: Callable[[_Counts, float], float]) -> SampleCost: ...
 
+# ── Execution targets ───────────────────────────────────────────────────────
+# Each defines `__eq__`, so (as for `Param`) it is unhashable at runtime.
+
+@final
+class Aer:
+    __hash__: ClassVar[None]  # type: ignore[assignment]
+    def __eq__(self, value: object, /) -> bool: ...
+    def __new__(
+        cls, sim_method: str = "automatic", noise_model: Optional[NoiseModel] = None
+    ) -> Aer: ...
+    @property
+    def sim_method(self) -> str: ...
+    @property
+    def noise_model(self) -> Optional[NoiseModel]: ...
+
+@final
+class Native:
+    __hash__: ClassVar[None]  # type: ignore[assignment]
+    def __eq__(self, value: object, /) -> bool: ...
+    def __new__(cls, fusion: Optional[bool] = None) -> Native: ...
+    @property
+    def fusion(self) -> Optional[bool]: ...
+
+@final
+class Cunqa:
+    __hash__: ClassVar[None]  # type: ignore[assignment]
+    def __eq__(self, value: object, /) -> bool: ...
+    def __new__(
+        cls,
+        nodes: int = 1,
+        cores_per_qpu: int = 2,
+        walltime: Optional[str] = None,
+        sim_method: str = "automatic",
+    ) -> Cunqa: ...
+    @property
+    def nodes(self) -> int: ...
+    @property
+    def cores_per_qpu(self) -> int: ...
+    @property
+    def walltime(self) -> Optional[str]: ...
+    @property
+    def sim_method(self) -> str: ...
+
+@final
+class Qmio:
+    __hash__: ClassVar[None]  # type: ignore[assignment]
+    def __eq__(self, value: object, /) -> bool: ...
+    def __new__(cls, program_format: str = "openqasm") -> Qmio: ...
+    @property
+    def program_format(self) -> Literal["openqasm", "qir", "qir_bitcode"]: ...
+
+@final
+class Registered:
+    __hash__: ClassVar[None]  # type: ignore[assignment]
+    def __eq__(self, value: object, /) -> bool: ...
+    def __new__(cls, name: str, options: Optional[_Options] = None) -> Registered: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def options(self) -> dict[str, Union[str, list[str]]]: ...
+
+_Target = Union[Aer, Native, Cunqa, Qmio, Registered]
+
 # ── Entry points ────────────────────────────────────────────────────────────
 
 def train(
@@ -575,10 +643,11 @@ def train(
     n_qpus: int,
     dimensions: int,
     expectation_function: _CostFunction,
-    infrastructure: str,
-    nodes: int,
-    cores_per_qpu: int,
-    id: str,
+    # Required unless `target` is given; `id` is always required.
+    infrastructure: Optional[str] = None,
+    nodes: Optional[int] = None,
+    cores_per_qpu: Optional[int] = None,
+    id: Optional[str] = None,
     sim_method: str = "automatic",
     noise_model: Optional[NoiseModel] = None,
     backend: str = "aer",
@@ -591,11 +660,12 @@ def train(
     *,
     callback: Optional[_TrainCallback] = None,
     trace: Optional[Union[str, PathLike[str]]] = None,
+    target: Optional[_Target] = None,
 ) -> TrainResult: ...
 def run_quantum_circuit(
     qc: Union[QuantumCircuit, Circuit, str],
     shots: int,
-    infrastructure: str,
+    infrastructure: Optional[str] = None,  # required unless `target` is given
     n_qpus: int = 1,
     nodes: int = 1,
     cores_per_qpu: int = 2,
@@ -608,6 +678,7 @@ def run_quantum_circuit(
     walltime: Optional[str] = None,
     *,
     trace: Optional[Union[str, PathLike[str]]] = None,
+    target: Optional[_Target] = None,
 ) -> RunResult: ...
 def statevector(
     qc: Circuit, params: Optional[_FloatVector] = None, fusion: bool = True

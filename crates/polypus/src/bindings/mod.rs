@@ -21,6 +21,7 @@ pub mod qml;
 pub mod qng;
 pub mod rotosolve;
 pub mod spsa;
+mod targets;
 
 use adam::Adam;
 use calibration::calibrate_parallel_threshold;
@@ -36,6 +37,7 @@ use pso::PSO;
 use qng::QNG;
 use rotosolve::Rotosolve;
 use spsa::Spsa;
+use targets::{target_from_strings, ProgramFormat, Selection, Target};
 
 use crate::evaluation::{
     CircuitSource, CostObservable, Label, OracleErrorSlot, PyCallbackObservable, PyLabelledCost,
@@ -881,36 +883,45 @@ impl<'a, 'py> FromPyObject<'a, 'py> for OptionsArg {
     }
 }
 
-/// Map the public `infrastructure` + `backend` strings and provider parameters
-/// into a typed [`BackendConfig`]. Centralising this keeps the string→variant
-/// mapping in one place and guarantees the config matches the selected backend.
-///
-/// `backend` selects the *device* within an infrastructure. For `local`:
-/// `"aer"` (default) runs Qiskit Aer; `"polypus"` runs the pure-Rust native
-/// statevector simulator. CUNQA's QPUs always run Aer, with the simulator fixed
-/// when they are raised (`qraise`), so `cunqa` accepts only `"aer"` (default) or
-/// `"AerSimulator"` and rejects a `noise_model`: both would otherwise be dropped
-/// silently. For the same reason the native backend, `qmio` and
-/// registry-dispatched backends reject a `noise_model` and a non-default
-/// `sim_method` ([`reject_aer_only_args`] for the last two), and registry
-/// backends a non-default `backend`.
-///
-/// `fusion` only applies to the native `"polypus"` backend (see
-/// [`BackendConfig::LocalNative`]), the only one that fuses gates. It is an
-/// `Option` so the three cases stay distinct:
-///
-/// * omitted (`None`): no opinion — the native backend uses its default
-///   (`true`); every other backend ignores it, so sweeping the same kwargs
-///   across backends needs no per-call special-casing (as with
-///   `nodes`/`cores_per_qpu`, which `local`/`qmio` also ignore).
-/// * `Some(false)`: "do not fuse". Every backend can honour this — the
-///   non-native ones never fuse anyway — so it is always accepted; on the
-///   native backend it forces a strictly gate-by-gate run.
-/// * `Some(true)`: "fuse". Only the native backend can. Asking for it on a
-///   backend that cannot fuse is a request that cannot be met, so it is
-///   rejected here rather than silently ignored (which would mislead the
-///   caller into believing fusion was in effect).
-fn build_backend_config(
+/// The [`BackendConfig`] a [`Target`] runs on. Every check lives where the
+/// target is built ([`targets::target_from_strings`] or the target classes),
+/// so this only maps fields; QMIO alone can still fail, in a build without
+/// the `qmio` feature.
+fn build_backend_config(target: Target) -> PyResult<BackendConfig> {
+    Ok(match target {
+        Target::Aer {
+            sim_method,
+            noise_model,
+        } => BackendConfig::Local {
+            sim_method,
+            noise_model,
+        },
+        Target::Native { fusion } => BackendConfig::LocalNative {
+            fusion: fusion.unwrap_or(true),
+        },
+        Target::Cunqa {
+            nodes,
+            cores_per_qpu,
+            walltime,
+            sim_method,
+        } => BackendConfig::Cunqa {
+            sim_method,
+            nodes,
+            cores_per_qpu,
+            walltime: walltime.unwrap_or_else(|| DEFAULT_WALLTIME.to_string()),
+        },
+        Target::Qmio {
+            program_format,
+            options,
+        } => build_qmio_registered(program_format, options)?,
+        Target::Registered { name, options } => BackendConfig::Registered { name, options },
+    })
+}
+
+/// The [`BackendConfig`] the `infrastructure`/`backend` strings select:
+/// [`target_from_strings`], then [`build_backend_config`]. For callers that
+/// take only the strings (the native QML model).
+fn config_from_strings(
     infrastructure: &str,
     backend: &str,
     sim_method: &str,
@@ -921,126 +932,18 @@ fn build_backend_config(
     fusion: Option<bool>,
     options: Option<HashMap<String, OptionValue>>,
 ) -> PyResult<BackendConfig> {
-    // Only the native statevector backend fuses gates. An explicit `Some(true)`
-    // anywhere else is an unmeetable request (see the doc above) — reject it
-    // before building anything, so it never looks like it took effect. `None`
-    // and `Some(false)` pass through: both are honourable everywhere.
-    let is_native = infrastructure == "local"
-        && matches!(backend, "polypus" | "statevector" | "polypus_statevector");
-    if fusion == Some(true) && !is_native {
-        return Err(crate::exceptions::configuration_error(format!(
-            "fusion=True applies only to the native backend=\"polypus\"; backend \"{backend}\" \
-             on infrastructure \"{infrastructure}\" cannot fuse gates. Omit fusion, or pass \
-             fusion=False for a gate-by-gate run."
-        )));
-    }
-    // `options` is consumed only by registry-dispatched backends (qmio, subprocess,
-    // any third-party). The typed built-ins would silently ignore it, so a non-empty
-    // `options` there is rejected rather than left looking like it took effect — the
-    // same spirit as the `fusion=True` rejection above.
-    if matches!(infrastructure, "local" | "cunqa") {
-        if let Some(opts) = &options {
-            if !opts.is_empty() {
-                return Err(crate::exceptions::configuration_error(format!(
-                    "the '{infrastructure}' infrastructure does not accept 'options' ({} given); \
-                     the 'options' dict applies only to registry-backed backends (\"qmio\", \
-                     \"subprocess\", or a registered third-party backend)",
-                    opts.len()
-                )));
-            }
-        }
-    }
-    // CUNQA's QPUs run Aer with a simulator fixed at `qraise`, and its run takes
-    // no noise model, so `BackendConfig::Cunqa` has nowhere to carry either: a
-    // non-Aer `backend` or a `noise_model` would be dropped while the manifest
-    // echoed the caller's `backend`. Reject both here, before any QPU is raised.
-    if infrastructure == "cunqa" {
-        if !matches!(backend, "aer" | "AerSimulator") {
-            return Err(crate::exceptions::configuration_error(format!(
-                "unknown cunqa backend '{backend}'; CUNQA's QPUs run Aer, expected \"aer\""
-            )));
-        }
-        if noise_model.is_some() {
-            return Err(crate::exceptions::configuration_error(
-                "the 'cunqa' infrastructure does not accept a noise_model: its simulated QPUs \
-                 are configured when they are raised, not per run; omit it, or use \
-                 infrastructure=\"local\" with backend=\"aer\"",
-            ));
-        }
-    }
-    match infrastructure {
-        "local" => match backend {
-            "aer" | "AerSimulator" => Ok(BackendConfig::Local {
-                sim_method: sim_method.to_string(),
-                noise_model,
-            }),
-            "polypus" | "statevector" | "polypus_statevector" => {
-                if noise_model.is_some() {
-                    return Err(crate::exceptions::configuration_error(
-                        "the native 'polypus' backend is a noiseless statevector simulator \
-                         and does not accept a noise_model; use backend=\"aer\"",
-                    ));
-                }
-                // `LocalNative` has no simulation method to choose, so a
-                // non-default `sim_method` would be dropped silently (#334).
-                if sim_method != "automatic" {
-                    return Err(crate::exceptions::configuration_error(format!(
-                        "the native 'polypus' backend is a statevector simulator and does \
-                         not accept sim_method=\"{sim_method}\"; omit it, or use \
-                         backend=\"aer\""
-                    )));
-                }
-                Ok(BackendConfig::LocalNative {
-                    fusion: fusion.unwrap_or(true),
-                })
-            }
-            other => Err(crate::exceptions::configuration_error(format!(
-                "unknown local backend '{other}'; expected \"aer\" or \"polypus\""
-            ))),
-        },
-        "cunqa" => Ok(BackendConfig::Cunqa {
-            sim_method: sim_method.to_string(),
-            nodes,
-            cores_per_qpu,
-            walltime: walltime.unwrap_or(DEFAULT_WALLTIME).to_string(),
-        }),
-        // QMIO is now dispatched through the runtime registry (it registers a
-        // factory), so its config is a `Registered { name: "qmio", options }`.
-        // `backend` picks its program format, so only the Aer arguments are
-        // checked.
-        "qmio" => {
-            let config = build_qmio_registered(backend, options)?;
-            reject_aer_only_args(infrastructure, sim_method, noise_model.as_ref())?;
-            Ok(config)
-        }
-        // Any other name is dispatched through the runtime backend registry: the
-        // built-in `"subprocess"` bridge, or a backend a Rust embedder registered
-        // before this call. The caller-supplied `options` reach the factory via the
-        // `BackendBuildContext`. Registration of the built-ins is ensured here.
-        other => {
-            crate::infrastructure::register_builtin_backends();
-            if crate::infrastructure::is_registered(other) {
-                reject_aer_only_args(other, sim_method, noise_model.as_ref())?;
-                // `Registered` carries only `options`, so `backend` would be
-                // dropped while `RunResult.backend` echoed it.
-                if backend != "aer" {
-                    return Err(crate::exceptions::configuration_error(format!(
-                        "the registered backend '{other}' does not accept backend=\"{backend}\"; \
-                         omit it and pass backend-specific settings through 'options'"
-                    )));
-                }
-                Ok(BackendConfig::Registered {
-                    name: other.to_string(),
-                    options: options.unwrap_or_default(),
-                })
-            } else {
-                Err(crate::exceptions::configuration_error(format!(
-                    "unknown infrastructure '{other}'; expected \"local\", \"cunqa\", \"qmio\", \
-                     or a registered backend name (see docs/backends.md)"
-                )))
-            }
-        }
-    }
+    let target = target_from_strings(
+        infrastructure,
+        backend,
+        sim_method,
+        noise_model,
+        nodes,
+        cores_per_qpu,
+        walltime,
+        fusion,
+        options,
+    )?;
+    build_backend_config(target)
 }
 
 /// Reject the Aer-only arguments on an infrastructure that cannot honour them:
@@ -1073,52 +976,38 @@ fn reject_aer_only_args(
 /// The endpoint is read from the `ZMQ_SERVER` environment variable (the same
 /// variable the reference `qmio` Python client uses); there is no default, so with
 /// neither `ZMQ_SERVER` nor an `endpoint` option the backend fails to build with
-/// `polypus.QmioError`. The public `backend` argument selects the program
-/// representation submitted to the QPU. Caller-supplied `options` override the
+/// `polypus.QmioError`. `program_format` is the program representation
+/// submitted to the QPU. Caller-supplied `options` override the
 /// computed defaults (e.g. `optimization`, `repetition_period`, `res_format`, a
 /// custom `endpoint`). Only available with `--features qmio`; otherwise it returns
 /// an actionable error instead of silently degrading.
 #[cfg(feature = "qmio")]
 fn build_qmio_registered(
-    backend: &str,
-    options: Option<HashMap<String, OptionValue>>,
+    program_format: ProgramFormat,
+    options: HashMap<String, OptionValue>,
 ) -> PyResult<BackendConfig> {
-    qmio_registered_config(backend, std::env::var("ZMQ_SERVER").ok(), options)
+    qmio_registered_config(program_format, std::env::var("ZMQ_SERVER").ok(), options)
 }
 
 /// [`build_qmio_registered`] with the `ZMQ_SERVER` value passed in, so tests do not
 /// depend on the process environment.
 #[cfg(feature = "qmio")]
 fn qmio_registered_config(
-    backend: &str,
+    program_format: ProgramFormat,
     zmq_server: Option<String>,
-    options: Option<HashMap<String, OptionValue>>,
+    options: HashMap<String, OptionValue>,
 ) -> PyResult<BackendConfig> {
-    let program_format = match backend {
-        // `"aer"` is the entry-point default, so treat it (and the explicit
-        // aliases) as OpenQASM for the QMIO path.
-        "aer" | "qmio" | "openqasm" | "qasm" => "openqasm",
-        "qir" | "qir_text" => "qir_text",
-        "qir_bitcode" | "qir_compiled" => "qir_bitcode",
-        other => {
-            return Err(crate::exceptions::configuration_error(format!(
-                "unknown qmio program format '{other}'; expected \"openqasm\", \"qir\", or \"qir_bitcode\""
-            )))
-        }
-    };
     let mut opts: HashMap<String, OptionValue> = HashMap::new();
     if let Some(endpoint) = zmq_server {
         opts.insert("endpoint".to_string(), OptionValue::from(endpoint));
     }
     opts.insert(
         "program_format".to_string(),
-        OptionValue::from(program_format),
+        OptionValue::from(program_format.option_value()),
     );
     opts.insert("optimization".to_string(), OptionValue::from("0"));
     opts.insert("res_format".to_string(), OptionValue::from("binary_count"));
-    if let Some(user) = options {
-        opts.extend(user);
-    }
+    opts.extend(options);
     Ok(BackendConfig::Registered {
         name: "qmio".to_string(),
         options: opts,
@@ -1129,8 +1018,8 @@ fn qmio_registered_config(
 /// clear, actionable message instead of pulling a ZeroMQ stack into every build.
 #[cfg(not(feature = "qmio"))]
 fn build_qmio_registered(
-    _backend: &str,
-    _options: Option<HashMap<String, OptionValue>>,
+    _program_format: ProgramFormat,
+    _options: HashMap<String, OptionValue>,
 ) -> PyResult<BackendConfig> {
     Err(crate::exceptions::configuration_error(QMIO_NOT_COMPILED))
 }
@@ -1138,7 +1027,7 @@ fn build_qmio_registered(
 /// Why `infrastructure="qmio"` fails in a build without the `qmio` feature;
 /// `backend_compatibility` reports the same text.
 #[cfg(not(feature = "qmio"))]
-const QMIO_NOT_COMPILED: &str =
+pub(crate) const QMIO_NOT_COMPILED: &str =
     "the 'qmio' infrastructure requires compiling polypus with --features qmio";
 
 /// Why `run_quantum_circuit(..., infrastructure="qmio")` rejects a Qiskit
@@ -1158,12 +1047,6 @@ const QMIO_REJECTS_QML: &str =
 const NATIVE_REJECTS_QISKIT: &str =
     "the native 'polypus' backend cannot execute a Qiskit QuantumCircuit; \
      pass a polypus.Circuit or an OpenQASM 2.0 string, or use backend=\"aer\"";
-
-/// Whether `backend` selects the pure-Rust native statevector simulator, which
-/// (unlike Aer) cannot consume a Qiskit `QuantumCircuit`.
-fn is_native_backend(backend: &str) -> bool {
-    matches!(backend, "polypus" | "statevector" | "polypus_statevector")
-}
 
 /// Validate the shot/QPU parameters at the Python-facing boundary, so the
 /// orchestration layer can assume `shots >= 1` and `n_qpus >= 1` (contract
@@ -1187,7 +1070,7 @@ fn validate_shots_and_qpus(shots: u32, n_qpus: u32) -> PyResult<()> {
 /// Validate the CUNQA allocation parameters at the Python-facing boundary. Only
 /// the `"cunqa"` infrastructure consumes `nodes`/`cores_per_qpu`/`walltime` (they
 /// flow to SLURM's `qraise` as the C-1 kwargs `n_nodes`/`cores_per_qpu`/`t` via
-/// `CunqaBackend`); the `local` and `qmio` match arms of `build_backend_config`
+/// `CunqaBackend`); the `local` and `qmio` arms of [`target_from_strings`]
 /// ignore them, so validating unconditionally would reject harmless non-cunqa
 /// calls. A zero for either count has no sane meaning once it reaches SLURM, and
 /// a `walltime` that is not `HH:MM:SS` would only fail inside `qraise`, so
@@ -1573,14 +1456,23 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// the number of traces the variable named before in the process; the
 /// directory must exist. `POLYPUS_CALL_TRACE_MAX_MB` caps a trace, in whole
 /// MiB (512 MiB by default).
-#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, *, trace=None))]
+///
+/// `target` (keyword-only, default `None`) is a typed target, `polypus.Aer`,
+/// `Native`, `Cunqa`, `Qmio` or `Registered`, used instead of `infrastructure`,
+/// `backend` and the provider arguments. Next to it, `infrastructure`,
+/// `noise_model`, `fusion`, `nodes`, `cores_per_qpu` or `walltime` given at
+/// all, or `backend` or `sim_method` with a non-default value, raises
+/// `ConfigurationError`. Without `target`, `infrastructure` is required.
+// `nodes`/`cores_per_qpu` are `None` at runtime so an explicit value next to
+// `target=` is seen; `text_signature` keeps showing their defaults.
+#[pyfunction(signature=(qc, shots, infrastructure=None, n_qpus=1, nodes=None, cores_per_qpu=None, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, *, trace=None, target=None), text_signature = "(qc, shots, infrastructure=None, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method=\"automatic\", noise_model=None, backend=\"aer\", seed=None, fusion=None, options=None, walltime=None, *, trace=None, target=None)")]
 pub fn run_quantum_circuit<'py>(
     qc: Bound<'py, PyAny>,
     shots: u32,
-    infrastructure: String,
+    infrastructure: Option<String>,
     n_qpus: u32,
-    nodes: u32,
-    cores_per_qpu: u32,
+    nodes: Option<u32>,
+    cores_per_qpu: Option<u32>,
     sim_method: &str,
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
@@ -1589,8 +1481,22 @@ pub fn run_quantum_circuit<'py>(
     options: Option<OptionsArg>,
     walltime: Option<String>,
     trace: Option<PathBuf>,
+    target: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
+    let selection = Selection::new(
+        "run_quantum_circuit",
+        target.as_ref(),
+        infrastructure,
+        backend,
+        sim_method,
+        noise_model,
+        fusion,
+        nodes,
+        cores_per_qpu,
+        walltime,
+    )?;
+    let (infrastructure, backend) = (selection.infrastructure.clone(), selection.backend.clone());
     // Entry-point trace carrying the full circuit `Debug` repr on every call:
     // large and high-volume, so it stays at `debug` rather than the default log.
     log::debug!(
@@ -1598,9 +1504,9 @@ pub fn run_quantum_circuit<'py>(
          infrastructure: {infrastructure}, n_qpus: {n_qpus}, backend: {backend}, seed: {seed:?}"
     );
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
+    selection.validate_allocation()?;
     let bound_qc = extract_bound_circuit(&qc)?;
-    if is_native_backend(backend) && bound_qc.is_foreign() {
+    if selection.is_native() && bound_qc.is_foreign() {
         return Err(crate::exceptions::configuration_error(
             NATIVE_REJECTS_QISKIT,
         ));
@@ -1633,17 +1539,8 @@ pub fn run_quantum_circuit<'py>(
     // id across runs is a real hazard, not a cosmetic one. The `run_{n}_{infra}`
     // prefix is kept for human-readable debuggability.
     let id = unique_id(&format!("run_{}_{}", n_qpus, infrastructure))?;
-    let backend_config = build_backend_config(
-        &infrastructure,
-        backend,
-        sim_method,
-        noise_model.map(|nm| nm.unbind()),
-        nodes,
-        cores_per_qpu,
-        walltime.as_deref(),
-        fusion,
-        options.map(OptionsArg::into_inner),
-    )?;
+    let target = selection.resolve(options.map(OptionsArg::into_inner))?;
+    let backend_config = build_backend_config(target)?;
     // Only the native statevector backend consults the gate-parallel threshold,
     // so calibrate it lazily (#351) and surface the one-time default-visible
     // warning only when this run actually resolves to it — never for
@@ -1898,7 +1795,15 @@ pub fn run_quantum_circuit<'py>(
 ///         infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
 ///     )
 /// ```
-#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, initial_point=None, final_shots=None, *, callback=None, trace=None))]
+///
+/// `target` (keyword-only, default `None`) is a typed target, `polypus.Aer`,
+/// `Native`, `Cunqa`, `Qmio` or `Registered`, used instead of `infrastructure`,
+/// `backend` and the provider arguments. Next to it, `infrastructure`,
+/// `noise_model`, `fusion`, `nodes`, `cores_per_qpu` or `walltime` given at
+/// all, or `backend` or `sim_method` with a non-default value, raises
+/// `ConfigurationError`. Without `target`, `infrastructure` (with `nodes` and
+/// `cores_per_qpu`) is required.
+#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure=None, nodes=None, cores_per_qpu=None, id=None, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, initial_point=None, final_shots=None, *, callback=None, trace=None, target=None))]
 pub fn train<'py>(
     qc: Bound<'py, PyAny>,
     method: Bound<'py, PyAny>,
@@ -1906,10 +1811,10 @@ pub fn train<'py>(
     n_qpus: u32,
     dimensions: u32,
     expectation_function: Bound<'py, PyAny>,
-    infrastructure: String,
-    nodes: u32,
-    cores_per_qpu: u32,
-    id: String,
+    infrastructure: Option<String>,
+    nodes: Option<u32>,
+    cores_per_qpu: Option<u32>,
+    id: Option<String>,
     sim_method: &str,
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
@@ -1921,10 +1826,26 @@ pub fn train<'py>(
     final_shots: Option<Bound<'py, PyAny>>,
     callback: Option<Bound<'py, PyAny>>,
     trace: Option<PathBuf>,
+    target: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
+    let selection = Selection::new(
+        "train",
+        target.as_ref(),
+        infrastructure,
+        backend,
+        sim_method,
+        noise_model,
+        fusion,
+        nodes,
+        cores_per_qpu,
+        walltime,
+    )?;
+    selection.require_allocation("train")?;
+    let id = targets::require_arg("train", "id", id)?;
+    let (infrastructure, backend) = (selection.infrastructure.clone(), selection.backend.clone());
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
+    selection.validate_allocation()?;
     validate_id(&id)?;
     // Resolve the seed that drives the optimizer's RNG (contract C-7): explicit
     // kwarg > optimizer object's `seed` field > fresh OS entropy. Unlike
@@ -1948,7 +1869,7 @@ pub fn train<'py>(
     let callback = validate_callback(callback.as_ref())?;
     // The native statevector backend runs pure-Rust circuits only; a Qiskit
     // template can't be simulated without the interpreter.
-    if is_native_backend(backend) {
+    if selection.is_native() {
         if let CircuitSource::Qiskit(_) = &circuit_source {
             return Err(crate::exceptions::configuration_error(
                 "the native 'polypus' backend requires a native polypus.Circuit; \
@@ -1971,17 +1892,8 @@ pub fn train<'py>(
     if is_rotosolve(&method) {
         check_rotosolve_circuit(&qc, Some(&circuit_source), None)?;
     }
-    let backend_config = build_backend_config(
-        &infrastructure,
-        backend,
-        sim_method,
-        noise_model.map(|nm| nm.unbind()),
-        nodes,
-        cores_per_qpu,
-        walltime.as_deref(),
-        fusion,
-        options.map(OptionsArg::into_inner),
-    )?;
+    let target = selection.resolve(options.map(OptionsArg::into_inner))?;
+    let backend_config = build_backend_config(target)?;
     // As in `run_quantum_circuit`: the native backend's simulator resolves the
     // gate-parallel threshold, so calibrate it lazily before building it (#351).
     if matches!(backend_config, BackendConfig::LocalNative { .. }) {
@@ -2020,7 +1932,7 @@ pub fn train<'py>(
     log_training_start(
         &effective_id,
         &infrastructure,
-        backend,
+        &backend,
         n_qpus,
         shots,
         effective_seed,
@@ -2257,7 +2169,15 @@ fn bind_feature_rows<'py>(
 ///         y_train=y_train,
 ///     )
 /// ```
-#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, walltime=None, *, y_train=None, initial_point=None, final_shots=None, callback=None))]
+///
+/// `target` (keyword-only, default `None`) is a typed target, `polypus.Aer`,
+/// `Native`, `Cunqa`, `Qmio` or `Registered`, used instead of `infrastructure`,
+/// `backend` and the provider arguments. Next to it, `infrastructure`,
+/// `noise_model`, `nodes`, `cores_per_qpu` or `walltime` given at all, or
+/// `backend` or `sim_method` with a non-default value, raises
+/// `ConfigurationError`. Without `target`, `infrastructure` (with `nodes` and
+/// `cores_per_qpu`) is required.
+#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure=None, nodes=None, cores_per_qpu=None, id=None, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, walltime=None, *, y_train=None, initial_point=None, final_shots=None, callback=None, target=None))]
 pub fn qml_train<'py>(
     feature_map: Bound<'py, PyAny>,
     ansatz: Bound<'py, PyAny>,
@@ -2267,10 +2187,10 @@ pub fn qml_train<'py>(
     n_qpus: u32,
     dimensions: u32,
     expectation_function: Bound<'py, PyAny>,
-    infrastructure: String,
-    nodes: u32,
-    cores_per_qpu: u32,
-    id: String,
+    infrastructure: Option<String>,
+    nodes: Option<u32>,
+    cores_per_qpu: Option<u32>,
+    id: Option<String>,
     sim_method: &str,
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
@@ -2281,10 +2201,26 @@ pub fn qml_train<'py>(
     initial_point: Option<Vec<f64>>,
     final_shots: Option<Bound<'py, PyAny>>,
     callback: Option<Bound<'py, PyAny>>,
+    target: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
+    let selection = Selection::new(
+        "train",
+        target.as_ref(),
+        infrastructure,
+        backend,
+        sim_method,
+        noise_model,
+        None,
+        nodes,
+        cores_per_qpu,
+        walltime,
+    )?;
+    selection.require_allocation("train")?;
+    let id = targets::require_arg("train", "id", id)?;
+    let (infrastructure, backend) = (selection.infrastructure.clone(), selection.backend.clone());
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
+    selection.validate_allocation()?;
     validate_id(&id)?;
     // Native models have their own entry point (plan D4-R).
     qml::reject_native_pieces("train", &feature_map, &ansatz)?;
@@ -2296,7 +2232,7 @@ pub fn qml_train<'py>(
     // QML composes Qiskit feature maps and ansätze, so it is inherently a
     // Qiskit path; the native statevector backend cannot consume a Qiskit
     // `QuantumCircuit`. Accept `backend` for API symmetry but reject native.
-    if is_native_backend(backend) {
+    if selection.is_native() {
         return Err(crate::exceptions::configuration_error(
             "the native 'polypus' backend is not supported for qml.train (feature maps \
              and ansätze are Qiskit circuits); use backend=\"aer\"",
@@ -2377,20 +2313,10 @@ pub fn qml_train<'py>(
     // QML composes Qiskit feature maps and ansätze, so it is inherently a
     // Qiskit path (native backend already rejected above): `backend` can only be
     // an Aer variant here, which never fuses. Pass `None` (no fusion opinion)
-    // rather than `Some(true)` — the latter would trip build_backend_config's
-    // "fusion=True on a non-fusing backend" rejection for a value the caller
-    // never chose.
-    let backend_config = build_backend_config(
-        &infrastructure,
-        backend,
-        sim_method,
-        noise_model.map(|nm| nm.unbind()),
-        nodes,
-        cores_per_qpu,
-        walltime.as_deref(),
-        None,
-        options.map(OptionsArg::into_inner),
-    )?;
+    // rather than `Some(true)` — the latter would trip the "fusion=True on a
+    // non-fusing backend" rejection for a value the caller never chose.
+    let target = selection.resolve(options.map(OptionsArg::into_inner))?;
+    let backend_config = build_backend_config(target)?;
     // Suffix the caller-supplied `id` with a UUID v4 (see `train` and #75) so
     // concurrent qml.train runs sharing the same `id` never collide on the
     // SLURM family/allocation, temp files or log streams named by
@@ -2422,7 +2348,7 @@ pub fn qml_train<'py>(
     log_training_start(
         &effective_id,
         &infrastructure,
-        backend,
+        &backend,
         n_qpus,
         shots,
         effective_seed,
@@ -2489,29 +2415,51 @@ pub fn qml_train<'py>(
 ///     )
 ///     predictions = [readout(counts) for counts in run.counts]
 /// ```
-#[pyfunction(name = "predict", signature = (feature_map, ansatz, x, params, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, walltime=None))]
+///
+/// `target` (keyword-only, default `None`) is a typed target, `polypus.Aer`,
+/// `Native`, `Cunqa`, `Qmio` or `Registered`, used instead of `infrastructure`,
+/// `backend` and the provider arguments. Next to it, `infrastructure`,
+/// `noise_model`, `nodes`, `cores_per_qpu` or `walltime` given at all, or
+/// `backend` or `sim_method` with a non-default value, raises
+/// `ConfigurationError`. Without `target`, `infrastructure` is required.
+// `nodes`/`cores_per_qpu`: see `run_quantum_circuit`.
+#[pyfunction(name = "predict", signature = (feature_map, ansatz, x, params, shots, infrastructure=None, n_qpus=1, nodes=None, cores_per_qpu=None, sim_method="automatic", noise_model=None, backend="aer", seed=None, walltime=None, *, target=None), text_signature = "(feature_map, ansatz, x, params, shots, infrastructure=None, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method=\"automatic\", noise_model=None, backend=\"aer\", seed=None, walltime=None, *, target=None)")]
 pub fn qml_predict<'py>(
     feature_map: Bound<'py, PyAny>,
     ansatz: Bound<'py, PyAny>,
     x: Bound<'py, PyAny>,
     params: Vec<f64>,
     shots: u32,
-    infrastructure: String,
+    infrastructure: Option<String>,
     n_qpus: u32,
-    nodes: u32,
-    cores_per_qpu: u32,
+    nodes: Option<u32>,
+    cores_per_qpu: Option<u32>,
     sim_method: &str,
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
     seed: Option<u64>,
     walltime: Option<String>,
+    target: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
+    let selection = Selection::new(
+        "predict",
+        target.as_ref(),
+        infrastructure,
+        backend,
+        sim_method,
+        noise_model,
+        None,
+        nodes,
+        cores_per_qpu,
+        walltime,
+    )?;
+    let (infrastructure, backend) = (selection.infrastructure.clone(), selection.backend.clone());
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
+    selection.validate_allocation()?;
     qml::reject_native_pieces("predict", &feature_map, &ansatz)?;
     // The model is a Qiskit circuit: neither the native backend nor QMIO runs it.
-    if is_native_backend(backend) {
+    if selection.is_native() {
         return Err(crate::exceptions::configuration_error(
             "the native 'polypus' backend is not supported for qml.predict (feature maps \
              and ansätze are Qiskit circuits); use backend=\"aer\"",
@@ -2560,19 +2508,9 @@ pub fn qml_predict<'py>(
     // Always simulated (qmio is rejected), so a seed always applies (contract C-7).
     let effective_seed = seed_or_entropy(seed, random_seed)?;
     let id = unique_id(&format!("predict_{}_{}", n_qpus, infrastructure))?;
-    let backend_config = build_backend_config(
-        &infrastructure,
-        backend,
-        sim_method,
-        noise_model.map(|nm| nm.unbind()),
-        nodes,
-        cores_per_qpu,
-        walltime.as_deref(),
-        None,
-        // predict runs on aer/local only (qmio rejected above), so there is no
-        // registered/provider backend to pass options to.
-        None,
-    )?;
+    // predict has no `options=`; a `Registered` target brings its own.
+    let target = selection.resolve(None)?;
+    let backend_config = build_backend_config(target)?;
     let config = ExecutionConfig {
         id: id.clone(),
         shots,
@@ -2675,6 +2613,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Ising>()?;
     m.add_class::<CachedCost>()?;
     m.add_class::<SampleCost>()?;
+    targets::register(m)?;
     m.add_function(wrap_pyfunction!(train, m)?)?;
     m.add_function(wrap_pyfunction!(run_quantum_circuit, m)?)?;
     m.add_function(wrap_pyfunction!(statevector, m)?)?;
@@ -2884,14 +2823,15 @@ mod tests {
         let result = run_quantum_circuit(
             qc,
             500,
-            "local".to_string(),
+            Some("local".to_string()),
             1,
-            1,
-            2,
+            Some(1),
+            Some(2),
             "automatic",
             None,
             "polypus",
             seed,
+            None,
             None,
             None,
             None,
@@ -2955,14 +2895,15 @@ mod tests {
             let result = run_quantum_circuit(
                 qc,
                 100,
-                "local".to_string(),
+                Some("local".to_string()),
                 1,
-                1,
-                2,
+                Some(1),
+                Some(2),
                 "automatic",
                 None,
                 "polypus",
                 Some(7),
+                None,
                 None,
                 None,
                 None,
@@ -3007,14 +2948,15 @@ mod tests {
                 let result = run_quantum_circuit(
                     qc,
                     100,
-                    "local".to_string(),
+                    Some("local".to_string()),
                     1,
-                    1,
-                    2,
+                    Some(1),
+                    Some(2),
                     "automatic",
                     None,
                     "polypus",
                     Some(7),
+                    None,
                     None,
                     None,
                     None,
@@ -3087,14 +3029,15 @@ mod tests {
             let result = run_quantum_circuit(
                 qc,
                 100,
-                "qmio".to_string(),
+                Some("qmio".to_string()),
                 1,
-                1,
-                2,
+                Some(1),
+                Some(2),
                 "automatic",
                 None,
                 "aer",
                 Some(3),
+                None,
                 None,
                 None,
                 None,
@@ -3394,7 +3337,7 @@ mod tests {
 
     #[test]
     fn build_backend_config_selects_the_local_variants() {
-        let aer = build_backend_config("local", "aer", "automatic", None, 1, 2, None, None, None)
+        let aer = config_from_strings("local", "aer", "automatic", None, 1, 2, None, None, None)
             .expect("aer is a valid local backend");
         assert!(matches!(
             aer,
@@ -3405,7 +3348,7 @@ mod tests {
         ));
 
         for name in ["polypus", "statevector", "polypus_statevector"] {
-            let native = build_backend_config(
+            let native = config_from_strings(
                 "local",
                 name,
                 "automatic",
@@ -3428,7 +3371,7 @@ mod tests {
     /// both directions — it is not silently forced to `true`.
     #[test]
     fn build_backend_config_forwards_fusion_for_the_native_backend() {
-        let with_fusion = build_backend_config(
+        let with_fusion = config_from_strings(
             "local",
             "polypus",
             "automatic",
@@ -3445,7 +3388,7 @@ mod tests {
             BackendConfig::LocalNative { fusion: true }
         ));
 
-        let without_fusion = build_backend_config(
+        let without_fusion = config_from_strings(
             "local",
             "polypus",
             "automatic",
@@ -3467,7 +3410,7 @@ mod tests {
     /// (`true`) — the crate-wide `StatevectorSimulator::default().fusion`.
     #[test]
     fn build_backend_config_defaults_fusion_to_enabled_when_omitted() {
-        let native = build_backend_config(
+        let native = config_from_strings(
             "local",
             "polypus",
             "automatic",
@@ -3493,7 +3436,7 @@ mod tests {
     fn build_backend_config_rejects_fusion_true_on_non_fusing_backends() {
         pyo3::Python::initialize();
         for (infra, backend) in [("local", "aer"), ("cunqa", "aer")] {
-            let err = build_backend_config(
+            let err = config_from_strings(
                 infra,
                 backend,
                 "automatic",
@@ -3514,7 +3457,7 @@ mod tests {
             });
 
             // fusion=False and an omitted fusion must build a config, not error.
-            build_backend_config(
+            config_from_strings(
                 infra,
                 backend,
                 "automatic",
@@ -3526,14 +3469,14 @@ mod tests {
                 None,
             )
             .expect("fusion=False is accepted everywhere");
-            build_backend_config(infra, backend, "automatic", None, 1, 2, None, None, None)
+            config_from_strings(infra, backend, "automatic", None, 1, 2, None, None, None)
                 .expect("omitted fusion is accepted everywhere");
         }
     }
 
     #[test]
     fn build_backend_config_rejects_an_unknown_local_backend() {
-        let err = build_backend_config(
+        let err = config_from_strings(
             "local",
             "does-not-exist",
             "automatic",
@@ -3559,7 +3502,7 @@ mod tests {
         pyo3::Python::initialize();
         for backend in ["polypus", "statevector", "polypus_statevector", "foo"] {
             let err =
-                build_backend_config("cunqa", backend, "automatic", None, 1, 2, None, None, None)
+                config_from_strings("cunqa", backend, "automatic", None, 1, 2, None, None, None)
                     .expect_err("a non-Aer cunqa backend must be rejected");
             Python::attach(|py| {
                 assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
@@ -3571,7 +3514,7 @@ mod tests {
         }
         for backend in ["aer", "AerSimulator"] {
             let config =
-                build_backend_config("cunqa", backend, "automatic", None, 1, 2, None, None, None)
+                config_from_strings("cunqa", backend, "automatic", None, 1, 2, None, None, None)
                     .expect("cunqa accepts the Aer backend names");
             assert!(matches!(config, BackendConfig::Cunqa { .. }));
         }
@@ -3584,7 +3527,7 @@ mod tests {
         // any Python object will do — the check is `Option::is_some`.
         pyo3::Python::initialize();
         let noise_model = Python::attach(|py| py.None());
-        let err = build_backend_config(
+        let err = config_from_strings(
             "cunqa",
             "aer",
             "automatic",
@@ -3604,7 +3547,7 @@ mod tests {
             );
         });
         assert!(matches!(
-            build_backend_config("cunqa", "aer", "automatic", None, 1, 2, None, None, None),
+            config_from_strings("cunqa", "aer", "automatic", None, 1, 2, None, None, None),
             Ok(BackendConfig::Cunqa { .. })
         ));
     }
@@ -3616,7 +3559,7 @@ mod tests {
         pyo3::Python::initialize();
         let build = |backend: &str, sim_method: &str, noise: bool| {
             let noise_model = noise.then(|| Python::attach(|py| py.None()));
-            build_backend_config(
+            config_from_strings(
                 "subprocess",
                 backend,
                 sim_method,
@@ -3651,7 +3594,7 @@ mod tests {
         pyo3::Python::initialize();
         let build = |sim_method: &str, noise: bool| {
             let noise_model = noise.then(|| Python::attach(|py| py.None()));
-            build_backend_config(
+            config_from_strings(
                 "qmio",
                 "qir",
                 sim_method,
@@ -3683,7 +3626,7 @@ mod tests {
         // do — the check is `Option::is_some`, not a Qiskit type check.
         pyo3::Python::initialize();
         let noise_model = Python::attach(|py| py.None());
-        let err = build_backend_config(
+        let err = config_from_strings(
             "local",
             "polypus",
             "automatic",
@@ -3711,7 +3654,7 @@ mod tests {
         // every name of the native backend.
         pyo3::Python::initialize();
         for backend in ["polypus", "statevector", "polypus_statevector"] {
-            let err = build_backend_config(
+            let err = config_from_strings(
                 "local",
                 backend,
                 "statevector",
@@ -3737,7 +3680,7 @@ mod tests {
     fn build_backend_config_keeps_a_noise_model_for_aer() {
         pyo3::Python::initialize();
         let noise_model = Python::attach(|py| py.None());
-        let config = build_backend_config(
+        let config = config_from_strings(
             "local",
             "aer",
             "density_matrix",
@@ -3762,7 +3705,7 @@ mod tests {
     #[test]
     fn build_backend_config_forwards_the_cunqa_allocation() {
         let config =
-            build_backend_config("cunqa", "aer", "statevector", None, 3, 4, None, None, None)
+            config_from_strings("cunqa", "aer", "statevector", None, 3, 4, None, None, None)
                 .expect("cunqa is a valid infrastructure");
         assert!(matches!(
             config,
@@ -3778,7 +3721,7 @@ mod tests {
 
     #[test]
     fn build_backend_config_forwards_an_explicit_cunqa_walltime() {
-        let config = build_backend_config(
+        let config = config_from_strings(
             "cunqa",
             "aer",
             "statevector",
@@ -3812,7 +3755,7 @@ mod tests {
 
     #[test]
     fn build_backend_config_rejects_an_unknown_infrastructure() {
-        let err = build_backend_config(
+        let err = config_from_strings(
             "quantum-cloud",
             "aer",
             "automatic",
@@ -3853,7 +3796,7 @@ mod tests {
                 OptionValue::from(vec!["python3".to_string(), "/a b/w.py".to_string()]),
             ),
         ]);
-        let config = build_backend_config(
+        let config = config_from_strings(
             "edge-registered-test",
             "aer",
             "automatic",
@@ -3902,7 +3845,7 @@ mod tests {
             ("local", &list_opts),
             ("cunqa", &list_opts),
         ] {
-            let err = build_backend_config(
+            let err = config_from_strings(
                 infra,
                 "aer",
                 "automatic",
@@ -3923,7 +3866,7 @@ mod tests {
             });
         }
         // An empty options dict is fine (nothing to ignore).
-        assert!(build_backend_config(
+        assert!(config_from_strings(
             "local",
             "aer",
             "automatic",
@@ -3955,9 +3898,9 @@ mod tests {
             ),
         ]);
         let config = qmio_registered_config(
-            "qir",
+            ProgramFormat::QirText,
             Some("tcp://qmio.example:5556".to_string()),
-            Some(user),
+            user,
         )
         .expect("qir is a qmio format");
         let BackendConfig::Registered { name, options } = config else {
@@ -3992,7 +3935,8 @@ mod tests {
     #[test]
     fn qmio_registered_config_has_no_default_endpoint() {
         let BackendConfig::Registered { options, .. } =
-            qmio_registered_config("qmio", None, None).expect("qmio is a qmio format")
+            qmio_registered_config(ProgramFormat::OpenQasm, None, HashMap::new())
+                .expect("qmio is a qmio format")
         else {
             panic!("qmio must build a Registered config");
         };
@@ -4003,7 +3947,8 @@ mod tests {
             OptionValue::from("tcp://qmio.example:5556"),
         )]);
         let BackendConfig::Registered { options, .. } =
-            qmio_registered_config("qmio", None, Some(user)).expect("qmio is a qmio format")
+            qmio_registered_config(ProgramFormat::OpenQasm, None, user)
+                .expect("qmio is a qmio format")
         else {
             panic!("qmio must build a Registered config");
         };
@@ -4785,10 +4730,10 @@ mod tests {
             1,
             1,
             expectation_function,
-            infrastructure.to_string(),
-            1,
-            1,
-            "edge".to_string(),
+            Some(infrastructure.to_string()),
+            Some(1),
+            Some(1),
+            Some("edge".to_string()),
             "automatic",
             None,
             "aer",
@@ -4799,6 +4744,7 @@ mod tests {
             None,
             final_shots,
             callback,
+            None,
             None,
         )
     }
@@ -4860,10 +4806,10 @@ mod tests {
             1,
             1,
             expectation_function,
-            infrastructure.to_string(),
-            1,
-            1,
-            "edge".to_string(),
+            Some(infrastructure.to_string()),
+            Some(1),
+            Some(1),
+            Some("edge".to_string()),
             "automatic",
             None,
             "aer",
@@ -4874,6 +4820,7 @@ mod tests {
             None,
             final_shots,
             callback,
+            None,
         )
     }
 
@@ -5045,13 +4992,14 @@ mod tests {
                 1,
                 1,
                 cost,
-                "qmio".to_string(),
-                1,
-                1,
-                "edge".to_string(),
+                Some("qmio".to_string()),
+                Some(1),
+                Some(1),
+                Some("edge".to_string()),
                 "automatic",
                 None,
                 "aer",
+                None,
                 None,
                 None,
                 None,
@@ -5067,13 +5015,14 @@ mod tests {
                 none(),
                 vec![0.0],
                 16,
-                "qmio".to_string(),
+                Some("qmio".to_string()),
                 1,
-                1,
-                1,
+                Some(1),
+                Some(1),
                 "automatic",
                 None,
                 "aer",
+                None,
                 None,
                 None,
             )
