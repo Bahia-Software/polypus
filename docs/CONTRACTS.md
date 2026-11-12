@@ -2861,6 +2861,7 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     shift and sampled routes, a non-finite cotangent, or a finite one that
     overflows the weight, through the Jacobian's runs for that row only, the
     route decided per row so the block size changes nothing bit for bit, a
+    row of derivatives too many or too few refused as a bookkeeping error, a
     cancellation between blocks and a Ctrl+C inside one), with the window
     tests in `crates/polypus-evaluation/src/qml_oracle.rs`
     (`a_backend_*`, `the_lift_*`, `many_circuits_per_item_*`,

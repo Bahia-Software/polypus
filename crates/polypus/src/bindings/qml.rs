@@ -2075,6 +2075,14 @@ impl PrimitiveError {
             "block {samples:?} lies outside the {num_samples} sample(s)"
         ))
     }
+
+    /// Adjoint derivatives that do not answer the runs they were asked for,
+    /// one row per run: a bookkeeping bug, never the caller's.
+    fn derivative_rows_mismatch(expected: usize, got: usize) -> Self {
+        PrimitiveError::Internal(format!(
+            "the adjoint runs gave {got} row(s) of derivatives for {expected} run(s)"
+        ))
+    }
 }
 
 /// One primitive call's state: its circuits block by block, and what it keeps
@@ -2501,7 +2509,9 @@ impl VjpRun {
     /// Each sample's product, in order, from the derivatives of
     /// [`exact_runs`](Self::exact_runs)' runs: its one row through the
     /// combined observable, or its `num_observables` rows read as its
-    /// Jacobian and contracted with its cotangent.
+    /// Jacobian and contracted with its cotangent. One row of `derivatives`
+    /// per run, no more and no fewer, or a bookkeeping error before any is
+    /// read: a row too many or too few would shift every sample after it.
     fn read_exact(
         &self,
         samples: Range<usize>,
@@ -2509,6 +2519,13 @@ impl VjpRun {
         derivatives: &[Vec<f64>],
     ) -> Result<Vec<polypus_qml::Vjp>, PrimitiveError> {
         let k = self.plan.num_observables();
+        let expected: usize = combined.iter().map(|&c| if c { 1 } else { k }).sum();
+        if derivatives.len() != expected {
+            return Err(PrimitiveError::derivative_rows_mismatch(
+                expected,
+                derivatives.len(),
+            ));
+        }
         let mut rest = derivatives;
         samples
             .zip(combined)
@@ -4346,6 +4363,38 @@ mod tests {
                     bits(&finite.by_inputs[r * f..(r + 1) * f]),
                     "row {r}"
                 );
+            }
+        }
+    }
+
+    /// `read_exact` takes one row of derivatives per run, no more and no
+    /// fewer: a row too many or too few is a bookkeeping error before any
+    /// sample is read, rather than a product read from rows shifted by one.
+    #[test]
+    fn reading_the_exact_product_takes_exactly_one_row_per_run() {
+        let k = 3;
+        let compiled = model_with_observables(k);
+        let mut v = cotangent(5, k);
+        v[0] = f64::NAN; // row 0 takes k runs, the others one each
+        let run = vjp_run(&compiled, JacobianWrt::Both, v);
+        let (runs, combined) = run.exact_runs(0..5).unwrap();
+        assert_eq!(runs.len(), 4 + k);
+        let rows: Vec<Vec<f64>> = runs.iter().map(|r| vec![0.0; r.wrt.len()]).collect();
+        assert_eq!(run.read_exact(0..5, &combined, &rows).unwrap().len(), 5);
+        let mut extra = rows.clone();
+        extra.push(rows[0].clone());
+        let missing = &rows[..rows.len() - 1];
+        for (what, derivatives) in [("one too many", extra.as_slice()), ("one too few", missing)] {
+            let expected = format!(
+                "{} row(s) of derivatives for {} run(s)",
+                derivatives.len(),
+                runs.len()
+            );
+            match run.read_exact(0..5, &combined, derivatives) {
+                Err(PrimitiveError::Internal(message)) => {
+                    assert!(message.contains(&expected), "{what}: {message}")
+                }
+                other => panic!("{what}: {other:?}"),
             }
         }
     }
