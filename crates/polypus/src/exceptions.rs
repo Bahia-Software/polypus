@@ -1069,7 +1069,7 @@ mod evaluation_mapping_tests {
             EvalErr::Qml(crate::evaluation::QmlError::NoExactGradient {
                 reason: "a Qiskit source".to_string(),
             }),
-            "no exact parameter-shift gradient",
+            "no exact gradient for this model",
         );
     }
 

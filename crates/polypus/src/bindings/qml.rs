@@ -50,7 +50,7 @@ use crate::evaluation::{
 use crate::exceptions::configuration_error;
 use crate::infrastructure::execution_config::random_seed;
 use crate::infrastructure::{
-    AdjointTask, BoundCircuit, CancelToken, Counts, ExecutionConfig, Infrastructure,
+    AdjointTask, BackendError, BoundCircuit, CancelToken, Counts, ExecutionConfig, Infrastructure,
     InfrastructureError, NativeStatevectorBackend, OptLevel, QuantumBackend, RunParams,
 };
 use crate::orchestration::{Resources, RunCircuitFlow, Scheduler, TrainFlow};
@@ -2272,12 +2272,32 @@ impl Primitive for JacobianRun {
     /// and observable, two statevectors each, instead of `2 · shifts` circuits
     /// per sample. When the memory budget holds one statevector of the width
     /// but not two, `None`: the shifted circuits run instead (the backend logs
-    /// it). A Ctrl+C or a cancellation stops a run in flight ([`watched`]).
+    /// it) — unless the model has none, being one only the adjoint
+    /// differentiates (#561): then the memory's `NoExactGradient`, before
+    /// anything runs. A Ctrl+C or a cancellation stops a run in flight
+    /// ([`watched`]).
     fn run_exact_block(
         &mut self,
         native: &NativeStatevectorBackend,
         samples: Range<usize>,
         cancel: &CancelToken,
+    ) -> Option<Result<(), PrimitiveError>> {
+        self.run_exact_block_with(native, samples, cancel, |width| native.adjoint_fits(width))
+    }
+}
+
+impl JacobianRun {
+    /// [`run_exact_block`](Primitive::run_exact_block) with `adjoint_fits`
+    /// answering whether the adjoint's two statevectors of a width fit the
+    /// memory budget: the backend's
+    /// [`adjoint_fits`](NativeStatevectorBackend::adjoint_fits), or a test's
+    /// answer (the budget is the process's, which a test must not set).
+    fn run_exact_block_with(
+        &mut self,
+        native: &NativeStatevectorBackend,
+        samples: Range<usize>,
+        cancel: &CancelToken,
+        adjoint_fits: impl FnOnce(usize) -> Result<bool, BackendError>,
     ) -> Option<Result<(), PrimitiveError>> {
         let Some(block) = self.plan.block(samples.clone()) else {
             return Some(Err(PrimitiveError::block_out_of_range(
@@ -2294,9 +2314,16 @@ impl Primitive for JacobianRun {
             .map(|run| run.circuit.num_qubits())
             .max()
             .unwrap_or(0);
-        match native.adjoint_fits(width) {
+        match adjoint_fits(width) {
             Ok(true) => {}
-            Ok(false) => return None,
+            // The shifted circuits instead, if the model has them.
+            Ok(false) => {
+                return self
+                    .plan
+                    .check_shift_fallback(width)
+                    .err()
+                    .map(|e| Err(e.into()))
+            }
             Err(e) => return Some(Err(PrimitiveError::Infrastructure(e.into()))),
         }
         let tasks: Vec<AdjointTask<'_, _>> = runs
@@ -2322,9 +2349,7 @@ impl Primitive for JacobianRun {
                 .map_err(PrimitiveError::from),
         )
     }
-}
 
-impl JacobianRun {
     /// Append a block's Jacobian, in sample order.
     fn keep(&mut self, jacobian: polypus_qml::Jacobian) {
         let (by_params, by_inputs) = jacobian.into_parts();
@@ -3494,6 +3519,93 @@ mod tests {
         for (k, (g, s)) in got.iter().zip(shift).enumerate() {
             assert!((g - s).abs() < 1e-9, "entry {k}: {g} vs the shift's {s}");
         }
+    }
+
+    /// #561: `qml.jacobian(exact=True)` on a model only the adjoint
+    /// differentiates (its templates written by hand, `test-support`: no layer
+    /// emits these gates). With room for two statevectors it takes the adjoint;
+    /// without, the block stops with the memory's `NoExactGradient` before
+    /// anything runs or is read — where a model of Pauli rotations falls back
+    /// to its shifted circuits (`None`). The decision is the injected one: the
+    /// budget is the process's, which a test must not set.
+    #[test]
+    fn the_exact_jacobian_of_a_model_only_the_adjoint_differentiates_cannot_fall_back() {
+        use polypus_circuit::{GateInstruction as G, GateParam, ParameterizedCircuit};
+        let (compiled, rows, theta) = primitive_model_and_rows();
+        let mut first = 0;
+        let templates: Vec<ParameterizedCircuit> = rows
+            .iter()
+            .map(|row| {
+                let mut gates = compiled.template_for(row).unwrap().gates().to_vec();
+                assert_eq!(gates.pop(), Some(G::MeasureAll));
+                first = gates.len();
+                gates.extend([
+                    G::Cp {
+                        q0: 0,
+                        q1: 1,
+                        theta: GateParam::Param(0),
+                    },
+                    G::Cu3 {
+                        control: 2,
+                        target: 0,
+                        theta: GateParam::Param(1),
+                        phi: GateParam::Fixed(0.4),
+                        lam: GateParam::Param(0),
+                    },
+                    G::H(0),
+                    G::MeasureAll,
+                ]);
+                let mut template = ParameterizedCircuit::new(3);
+                for gate in gates {
+                    template.try_push(gate).unwrap();
+                }
+                template
+            })
+            .collect();
+        let plan = ExpectationJacobian::from_templates_for_tests(
+            &compiled,
+            templates,
+            JacobianWrt::Params,
+        )
+        .unwrap();
+        let mut run = JacobianRun {
+            plan,
+            params: theta.clone(),
+            by_params: Vec::new(),
+            by_inputs: Vec::new(),
+        };
+        let native = NativeStatevectorBackend::new(0);
+        let cancel = CancelToken::default();
+        let all = 0..rows.len();
+        match run.run_exact_block_with(&native, all.clone(), &cancel, |_| Ok(false)) {
+            Some(Err(PrimitiveError::Qml(QmlError::NoExactGradient { reason }))) => {
+                let instruction = format!("instruction {first} (Cp");
+                for needle in [
+                    instruction.as_str(),
+                    "two statevectors of 3 qubits",
+                    "exact",
+                ] {
+                    assert!(reason.contains(needle), "{needle:?} missing: {reason}");
+                }
+            }
+            other => panic!("expected the memory's NoExactGradient, got {other:?}"),
+        }
+        assert!(run.by_params.is_empty(), "nothing may be read");
+
+        // With room for two statevectors, the adjoint Jacobian.
+        assert!(matches!(
+            run.run_exact_block_with(&native, all, &cancel, |_| Ok(true)),
+            Some(Ok(()))
+        ));
+        let apart = adjoint_jacobian(&run.plan, &theta);
+        assert_eq!(Some(run.by_params.as_slice()), apart.params());
+
+        // A model of Pauli rotations falls back to its shifted circuits.
+        let mut pauli = jacobian_run(JacobianWrt::Params);
+        assert!(pauli
+            .run_exact_block_with(&native, 0..1, &cancel, |_| Ok(false))
+            .is_none());
+        assert!(pauli.by_params.is_empty());
     }
 
     /// `qml.jacobian(exact=True)` takes the adjoint (#503): with both parts,

@@ -591,12 +591,20 @@ pub enum QmlError {
     /// `unreachable!`, so an internal dispatch bug becomes a typed error
     /// instead of a panic crossing the FFI boundary.
     CategoricalLossHasNoScalarForm,
-    /// The model has no exact parameter-shift gradient: one of its instructions
-    /// is not a Pauli rotation yet takes an angle, uses an expression angle, or
-    /// is of a kind the gradient does not know. Raised by the gradient methods
-    /// of [`QmlProblem`](crate::QmlProblem) (and
+    /// The model has no exact gradient of the kind asked for. Either no exact
+    /// gradient differentiates it — an instruction whose angles no gradient
+    /// takes (the call of a declared gate), an expression angle, a gate other
+    /// than a Pauli rotation that reads the sample, or an instruction of a kind
+    /// the gradient does not know — or only adjoint differentiation (exact
+    /// mode) does, and the parameter shift (the gradient with shots, and exact
+    /// mode's fallback when two statevectors do not fit the memory budget) was
+    /// asked for: the controlled rotations, the phase gates and the `u` family
+    /// have no two-term shift rule. Raised by the gradient methods of
+    /// [`QmlProblem`](crate::QmlProblem) (and
     /// [`num_gradient_circuits`](crate::QmlProblem::num_gradient_circuits), so a
-    /// caller can check up front); gradient-free training is unaffected.
+    /// caller can check up front) and of the
+    /// [`ExpectationJacobian`](crate::ExpectationJacobian); gradient-free
+    /// training is unaffected.
     NoExactGradient {
         /// Which instruction (position and gate), and why.
         reason: String,
@@ -658,10 +666,9 @@ impl fmt::Display for QmlError {
                 "internal error: CategoricalCrossEntropy has no scalar evaluate/gradient form; \
                  QmlProblem should always route it through the categorical path instead"
             ),
-            QmlError::NoExactGradient { reason } => write!(
-                f,
-                "no exact parameter-shift gradient for this model: {reason}"
-            ),
+            QmlError::NoExactGradient { reason } => {
+                write!(f, "no exact gradient for this model: {reason}")
+            }
             QmlError::NoInputGradient { encoder } => write!(
                 f,
                 "no Jacobian with respect to the inputs for this model: its {encoder} encoder \
@@ -684,6 +691,51 @@ impl std::error::Error for QmlError {
 impl From<CircuitError> for QmlError {
     fn from(e: CircuitError) -> Self {
         QmlError::Circuit(e)
+    }
+}
+
+/// The first instruction of a model that only adjoint differentiation (exact
+/// mode) differentiates, kept so that each way of asking the parameter shift
+/// for its gradient says why it cannot, in one wording.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AdjointOnlyGate {
+    /// Its position in the template.
+    pub(crate) position: usize,
+    /// Its `Debug` rendering, which names the gate.
+    pub(crate) gate: String,
+}
+
+impl AdjointOnlyGate {
+    /// The parameter shift was asked for: the gradient with shots, or the
+    /// shifted circuits themselves.
+    pub(crate) fn shift_error(&self) -> QmlError {
+        let AdjointOnlyGate { position, gate } = self;
+        QmlError::NoExactGradient {
+            reason: format!(
+                "instruction {position} ({gate}) is a gate the parameter shift has no rule for, \
+                 so this model has neither a gradient with shots nor shifted circuits; only the \
+                 exact gradient (exact=True in Model.fit and qml.jacobian, by adjoint \
+                 differentiation) differentiates it. Train it in exact mode, or with a \
+                 gradient-free optimizer"
+            ),
+        }
+    }
+
+    /// Exact mode was asked for, but the adjoint's two statevectors of
+    /// `num_qubits` qubits do not fit the memory budget, and the parameter
+    /// shift it otherwise falls back to cannot stand in for it.
+    pub(crate) fn memory_error(&self, num_qubits: usize) -> QmlError {
+        let AdjointOnlyGate { position, gate } = self;
+        let qubits = if num_qubits == 1 { "qubit" } else { "qubits" };
+        QmlError::NoExactGradient {
+            reason: format!(
+                "the exact gradient of this model needs adjoint differentiation, which holds \
+                 two statevectors of {num_qubits} {qubits} at once, and the memory budget holds \
+                 only one; exact mode falls back to the parameter shift then, which has no rule \
+                 for instruction {position} ({gate}). Use fewer qubits, raise the memory \
+                 budget, or train with a gradient-free optimizer"
+            ),
+        }
     }
 }
 
@@ -888,7 +940,7 @@ mod tests {
             reason: "instruction 3 (Crx) takes an angle".to_string(),
         }
         .to_string();
-        assert!(s.contains("gradient") && s.contains("instruction 3 (Crx)"));
+        assert!(s.contains("no exact gradient") && s.contains("instruction 3 (Crx)"));
     }
 
     #[test]
@@ -981,5 +1033,50 @@ mod tests {
         // Display forwards the inner message; `source` exposes the cause.
         assert!(err.to_string().contains(&inner.to_string()));
         assert!(std::error::Error::source(&err).is_some());
+    }
+
+    /// #561: what reaches the end user through `Model.fit` and `qml.jacobian`
+    /// names the instruction (position and gate) and points at what does
+    /// differentiate it (exact mode), or, when exact mode itself cannot, says
+    /// why (the memory of two statevectors).
+    #[test]
+    fn adjoint_only_messages_name_the_gate_and_the_way_out() {
+        let gate = AdjointOnlyGate {
+            position: 7,
+            gate: "Cp { q0: 0, q1: 1, theta: Param(2) }".to_string(),
+        };
+        let shift = gate.shift_error().to_string();
+        for needle in [
+            "no exact gradient",
+            "instruction 7",
+            "Cp {",
+            "shots",
+            "exact=True",
+        ] {
+            assert!(shift.contains(needle), "{needle:?} missing: {shift}");
+        }
+        let memory = gate.memory_error(26).to_string();
+        for needle in [
+            "no exact gradient",
+            "instruction 7",
+            "Cp {",
+            "exact",
+            "two statevectors of 26 qubits",
+            "memory budget",
+        ] {
+            assert!(memory.contains(needle), "{needle:?} missing: {memory}");
+        }
+        // One qubit is singular.
+        let one = gate.memory_error(1).to_string();
+        assert!(one.contains("two statevectors of 1 qubit at once"), "{one}");
+        // The shift's text holds for a fixed-angle gate too: it speaks of the
+        // model, not of differentiating a trainable angle of the gate.
+        assert!(
+            shift.contains("is a gate the parameter shift has no rule for"),
+            "{shift}"
+        );
+        // The text says "two": the adjoint's statevector count, which this
+        // crate cannot name (`polypus-sim` is not a dependency of it).
+        assert_eq!(polypus_sim::ADJOINT_STATEVECTORS, 2);
     }
 }

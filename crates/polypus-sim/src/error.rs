@@ -100,13 +100,26 @@ pub enum SimError {
         /// The circuit's instruction count; valid positions are `0..num_gates`.
         num_gates: usize,
     },
-    /// A gate to differentiate is not a Pauli rotation `exp(−iθP/2)` —
-    /// `Rx`, `Ry`, `Rz`, `Rxx` or `Rzz` — the only gates whose derivative
+    /// A gate to differentiate has no angle
     /// [`StatevectorSimulator::adjoint_gradient`](crate::StatevectorSimulator::adjoint_gradient)
-    /// takes.
+    /// takes the derivative with respect to: a gate without angles, or the
+    /// call of a declared gate (whose body may use its angles in any way).
     NotDifferentiable {
         /// The gate's position in the circuit.
         index: usize,
+        /// The gate's `Debug` rendering.
+        instruction: String,
+    },
+    /// An [`AngleRef`](crate::AngleRef) names an angle the gate at its
+    /// position does not have
+    /// ([`StatevectorSimulator::adjoint_gradient`](crate::StatevectorSimulator::adjoint_gradient)).
+    AngleIndexOutOfRange {
+        /// The gate's position in the circuit.
+        index: usize,
+        /// The angle named.
+        angle: usize,
+        /// The gate's angle count; valid angles are `0..num_angles`.
+        num_angles: usize,
         /// The gate's `Debug` rendering.
         instruction: String,
     },
@@ -172,7 +185,16 @@ impl fmt::Display for SimError {
             ),
             SimError::NotDifferentiable { index, instruction } => write!(
                 f,
-                "the gate at position {index} ({instruction}) is not a Pauli rotation (rx, ry, rz, rxx, rzz); the adjoint gradient differentiates only those"
+                "the gate at position {index} ({instruction}) has no angle the adjoint gradient differentiates (it takes none, or it is the call of a declared gate)"
+            ),
+            SimError::AngleIndexOutOfRange {
+                index,
+                angle,
+                num_angles,
+                instruction,
+            } => write!(
+                f,
+                "the gate at position {index} ({instruction}) has {num_angles} angle(s); angle {angle} is out of range (valid angles are 0..{num_angles})"
             ),
             SimError::PartialMeasurement { qubit } => write!(
                 f,
@@ -187,3 +209,30 @@ impl fmt::Display for SimError {
 }
 
 impl std::error::Error for SimError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The adjoint gradient's argument errors name the position, the gate and
+    /// what is wrong with it.
+    #[test]
+    fn adjoint_argument_errors_say_which_gate_and_why() {
+        let s = SimError::NotDifferentiable {
+            index: 4,
+            instruction: "H(0)".to_string(),
+        }
+        .to_string();
+        assert!(s.contains("position 4") && s.contains("H(0)"), "{s}");
+        assert!(s.contains("no angle"), "{s}");
+        let s = SimError::AngleIndexOutOfRange {
+            index: 2,
+            angle: 3,
+            num_angles: 2,
+            instruction: "U2 { .. }".to_string(),
+        }
+        .to_string();
+        assert!(s.contains("position 2") && s.contains("U2 { .. }"), "{s}");
+        assert!(s.contains("angle 3") && s.contains("0..2"), "{s}");
+    }
+}

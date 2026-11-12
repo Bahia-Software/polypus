@@ -19,6 +19,13 @@
 //! `Rz(x_i)` has factor `1` and its `Rzz(x_i·x_j)` factor `x_j` towards `x_i`
 //! and `x_i` towards `x_j`, the gate being shifted once for both.
 //!
+//! The adjoint runs ([`JacobianBlock::adjoint_runs`]) differentiate the same
+//! occurrences, and also the trainable angles of the gates the two-term shift
+//! rule has no rule for (the controlled rotations, the phase gates, the `u`
+//! family; issue #561). A model with one is built like any other; only its
+//! shifted circuits, and reading their results, fail
+//! ([`QmlError::NoExactGradient`]).
+//!
 //! **Cost.** `2 · shifts` circuits per sample, where `shifts` counts the gates
 //! that read a trainable parameter (with `wrt` [`Params`](JacobianWrt::Params)),
 //! the gates that read the sample (with [`Inputs`](JacobianWrt::Inputs)), or both
@@ -28,10 +35,10 @@
 
 use std::collections::HashMap;
 
-use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
+use polypus_circuit::{AngleRef, CircuitError, ConcreteCircuit, ParameterizedCircuit};
 
 use crate::adjoint::{check_rows, AdjointRun};
-use crate::error::QmlError;
+use crate::error::{AdjointOnlyGate, QmlError};
 use crate::model::{CompiledModel, InputTrace};
 use crate::observables::BitstringWeight;
 use crate::problem::{untie_traced, Slot, UntiedTemplate};
@@ -77,8 +84,12 @@ pub struct ExpectationJacobian {
     model: CompiledModel,
     wrt: JacobianWrt,
     samples: Vec<UntiedSample>,
-    /// The slots that are shifted, in gate order: the same for every sample.
+    /// The slots that are shifted (or differentiated by the adjoint), in gate
+    /// order: the same for every sample.
     shifted: Vec<usize>,
+    /// Whether the parameter shift differentiates the model, or the first
+    /// instruction only the adjoint differentiates.
+    shift: Result<(), AdjointOnlyGate>,
 }
 
 /// One sample's untied template and what each of its slots reads.
@@ -86,8 +97,9 @@ pub struct ExpectationJacobian {
 struct UntiedSample {
     template: ParameterizedCircuit,
     slots: Vec<Slot>,
-    /// `positions[j]`: where slot `j`'s gate sits in `template`.
-    positions: Vec<usize>,
+    /// `positions[j]`: where slot `j`'s gate sits in `template`, and which of
+    /// its angles.
+    positions: Vec<AngleRef>,
 }
 
 /// A slot without its sample-dependent values: what must agree across samples.
@@ -134,6 +146,7 @@ impl ExpectationJacobian {
     ) -> Result<Self, QmlError> {
         let mut untied = Vec::with_capacity(traced.len());
         let mut structure: Option<Vec<SlotShape>> = None;
+        let mut shift = Ok(());
         for (index, (template, trace)) in traced.into_iter().enumerate() {
             if wrt.inputs() {
                 if let Some(&encoder) = trace.opaque.first() {
@@ -144,7 +157,11 @@ impl ExpectationJacobian {
                 template,
                 slots,
                 positions,
+                shift: sample_shift,
             } = untie_traced(&template, &trace.gates)?;
+            if shift.is_ok() {
+                shift = sample_shift;
+            }
             let shape: Vec<SlotShape> = slots.iter().map(SlotShape::of).collect();
             match &structure {
                 Some(first) if *first != shape => {
@@ -179,7 +196,50 @@ impl ExpectationJacobian {
             wrt,
             samples: untied,
             shifted,
+            shift,
         })
+    }
+
+    /// A Jacobian over `templates` (one per sample, none reading the sample),
+    /// for the tests of the crates downstream, which cannot build a model
+    /// whose templates hold the gates no layer emits (those only the adjoint
+    /// differentiates). The checks of [`new`](Self::new) that follow building
+    /// the templates still run. Behind the `test-support` feature, which only
+    /// `[dev-dependencies]` enable: no build of the library or of the wheel has
+    /// it.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn from_templates_for_tests(
+        model: &CompiledModel,
+        templates: Vec<ParameterizedCircuit>,
+        wrt: JacobianWrt,
+    ) -> Result<Self, QmlError> {
+        let traced = templates
+            .into_iter()
+            .map(|template| (template, InputTrace::default()))
+            .collect();
+        Self::from_traced(model, traced, wrt)
+    }
+
+    /// Whether the exact Jacobian can fall back to the shifted circuits when
+    /// the adjoint's two statevectors of `num_qubits` qubits do not fit the
+    /// memory budget: `Ok` when the parameter shift differentiates this model
+    /// too, and otherwise [`QmlError::NoExactGradient`] saying so — the memory,
+    /// and the instruction only the adjoint differentiates. A caller about to
+    /// fall back asks this first, so the end user learns why exact mode failed
+    /// rather than being told to use it.
+    pub fn check_shift_fallback(&self, num_qubits: usize) -> Result<(), QmlError> {
+        self.shift
+            .as_ref()
+            .map_err(|gate| gate.memory_error(num_qubits))?;
+        Ok(())
+    }
+
+    /// The parameter shift's own check: the shifted circuits, and reading
+    /// their results, need a model the shift differentiates.
+    fn check_shift(&self) -> Result<(), QmlError> {
+        self.shift.as_ref().map_err(AdjointOnlyGate::shift_error)?;
+        Ok(())
     }
 
     /// What this Jacobian differentiates with respect to.
@@ -307,10 +367,12 @@ impl JacobianBlock<'_> {
     }
 
     /// The block's shifted circuits at `theta`, in the
-    /// [order](ExpectationJacobian#circuit-order) the readers expect. A `theta`
-    /// of the wrong length is
+    /// [order](ExpectationJacobian#circuit-order) the readers expect. A model
+    /// only the adjoint differentiates has none: [`QmlError::NoExactGradient`].
+    /// A `theta` of the wrong length is
     /// [`QmlError::Circuit`]`(`[`CircuitError::WrongNumberOfParams`]`)`.
     pub fn circuits(&self, theta: &[f64]) -> Result<Vec<ConcreteCircuit>, QmlError> {
+        self.jacobian.check_shift()?;
         let num_params = self.jacobian.num_params();
         if theta.len() != num_params {
             return Err(QmlError::Circuit(CircuitError::WrongNumberOfParams {
@@ -345,7 +407,8 @@ impl JacobianBlock<'_> {
 
     /// The block's [`Jacobian`] from the measurement `counts` of
     /// [`circuits`](Self::circuits), in that order: an unbiased estimator.
-    /// A slice of the wrong length is [`QmlError::CountsLengthMismatch`].
+    /// A slice of the wrong length is [`QmlError::CountsLengthMismatch`]; a
+    /// model only the adjoint differentiates, [`QmlError::NoExactGradient`].
     pub fn jacobian_from_counts(
         &self,
         counts: &[HashMap<String, u64>],
@@ -366,6 +429,7 @@ impl JacobianBlock<'_> {
         &self,
         weights: &[HashMap<String, W>],
     ) -> Result<Jacobian, QmlError> {
+        self.jacobian.check_shift()?;
         let expected = self.num_circuits();
         let mismatch = QmlError::CountsLengthMismatch {
             expected,
@@ -421,9 +485,11 @@ impl JacobianBlock<'_> {
 
     /// The block's [adjoint runs](crate::AdjointRun) at `theta`: for each
     /// sample in order, one per readout observable in order, each
-    /// differentiating the gates the shift rule of [`circuits`](Self::circuits)
-    /// would move, in gate order. The exact-mode alternative to the shifted
-    /// circuits, for a caller that holds the statevector; read the results with
+    /// differentiating the angles the shift rule of [`circuits`](Self::circuits)
+    /// would move, in gate order — and, on a model only the adjoint
+    /// differentiates, the trainable angles of those gates too. The exact-mode
+    /// alternative to the shifted circuits, for a caller that holds the
+    /// statevector; read the results with
     /// [`jacobian_from_adjoint`](Self::jacobian_from_adjoint). A `theta` of the
     /// wrong length is
     /// [`QmlError::Circuit`]`(`[`CircuitError::WrongNumberOfParams`]`)`.
@@ -454,7 +520,7 @@ impl JacobianBlock<'_> {
                 })
                 .collect();
             let circuit = sample.template.assign_parameters(&values)?;
-            let wrt: Vec<usize> = self
+            let wrt: Vec<AngleRef> = self
                 .jacobian
                 .shifted
                 .iter()
@@ -673,19 +739,135 @@ mod tests {
         assert!(ExpectationJacobian::from_traced(&model(), samples, JacobianWrt::Params).is_ok());
     }
 
+    /// The exact probabilities of `circuit`, keyed as the native backend keys
+    /// them.
+    fn probabilities(circuit: &ConcreteCircuit) -> HashMap<String, f64> {
+        use polypus_sim::{Simulator, StatevectorSimulator};
+        let width = circuit.num_qubits();
+        StatevectorSimulator::new()
+            .run(circuit)
+            .unwrap()
+            .probabilities()
+            .into_iter()
+            .enumerate()
+            .map(|(state, p)| (format!("{state:0width$b}"), p))
+            .collect()
+    }
+
+    /// #561, decision D2 and acceptance criterion 5 for the Jacobian: a model
+    /// with gates only the adjoint differentiates is built, whatever `wrt`;
+    /// its shifted circuits and their readers fail with the shift's message,
+    /// its memory fallback with its own; and its adjoint Jacobian is the
+    /// derivative of the expectations (central differences), a parameter two
+    /// angles share included.
     #[test]
-    fn an_angle_gate_that_is_not_a_pauli_rotation_has_no_exact_jacobian() {
-        let phase = GateInstruction::P {
-            qubit: 0,
-            lam: GateParam::Param(0),
+    fn an_angle_gate_only_the_adjoint_differentiates_has_an_adjoint_jacobian_only() {
+        const STEP: f64 = 1e-5;
+        const TOLERANCE: f64 = 1e-9;
+        let gates = || {
+            vec![
+                GateInstruction::H(0),
+                GateInstruction::P {
+                    qubit: 0,
+                    lam: GateParam::Param(0),
+                },
+                ry(1),
+                GateInstruction::U {
+                    qubit: 0,
+                    theta: GateParam::Param(1),
+                    phi: GateParam::Param(0),
+                    lam: GateParam::Fixed(0.4),
+                },
+                GateInstruction::Sx(0),
+            ]
         };
+        for wrt in [JacobianWrt::Params, JacobianWrt::Inputs, JacobianWrt::Both] {
+            assert!(
+                ExpectationJacobian::from_traced(&model(), vec![traced(gates())], wrt).is_ok(),
+                "{wrt:?}"
+            );
+        }
+        let model = model();
+        let (template, trace) = traced(gates());
+        let jacobian = ExpectationJacobian::from_traced(
+            &model,
+            vec![(template.clone(), trace)],
+            JacobianWrt::Params,
+        )
+        .unwrap();
+        let theta = [0.7, -0.3];
+        assert_eq!(model.num_params(), theta.len());
+        for error in [
+            jacobian.circuits(&theta).unwrap_err(),
+            jacobian.jacobian_from_counts(&[]).unwrap_err(),
+            jacobian.jacobian_from_probabilities(&[]).unwrap_err(),
+        ] {
+            let reason = reason(Err(error));
+            assert!(reason.contains("instruction 1 (P {"), "{reason}");
+            assert!(reason.contains("exact=True"), "{reason}");
+        }
+        let memory = reason(Err(jacobian.check_shift_fallback(1).unwrap_err()));
+        assert!(
+            memory.contains("two statevectors of 1 qubit at"),
+            "{memory}"
+        );
+        assert!(memory.contains("instruction 1 (P {"), "{memory}");
+
+        let runs = jacobian.adjoint_runs(&theta).unwrap();
+        let derivatives: Vec<Vec<f64>> = runs
+            .iter()
+            .map(|run| {
+                polypus_sim::StatevectorSimulator::new()
+                    .adjoint_gradient(&run.circuit, &run.wrt, |b| run.observable.weight(b), None)
+                    .unwrap()
+                    .derivatives
+            })
+            .collect();
+        let exact = jacobian.jacobian_from_adjoint(&derivatives).unwrap();
+        let expectation = |theta: &[f64]| {
+            let circuit = template.assign_parameters(theta).unwrap();
+            model
+                .expectations_from_probabilities(&probabilities(&circuit))
+                .unwrap()[0]
+        };
+        for p in 0..theta.len() {
+            let mut plus = theta;
+            plus[p] += STEP;
+            let mut minus = theta;
+            minus[p] -= STEP;
+            let fd = (expectation(&plus) - expectation(&minus)) / (2.0 * STEP);
+            let d = exact.param(0, 0, p).unwrap();
+            assert!((d - fd).abs() < TOLERANCE, "θ[{p}]: adjoint {d} vs {fd}");
+            assert!(d.abs() > 1e-4, "θ[{p}]: {d} is vacuous");
+        }
+        // A model of Pauli rotations falls back.
+        let pauli = ExpectationJacobian::from_traced(
+            &model,
+            vec![traced(vec![ry(0)])],
+            JacobianWrt::Params,
+        )
+        .unwrap();
+        assert_eq!(pauli.check_shift_fallback(1), Ok(()));
+    }
+
+    /// What no exact gradient differentiates is still refused at construction,
+    /// whatever `wrt`: the call of a declared gate.
+    #[test]
+    fn a_declared_gate_has_no_exact_jacobian() {
+        let declared = ParameterizedCircuit::from_qasm2(
+            "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n\
+             gate g(t) a { rz(t) a; }\nqreg q[1];\ng(0.3) q[0];\n",
+        )
+        .unwrap()
+        .gates()[0]
+            .clone();
         for wrt in [JacobianWrt::Params, JacobianWrt::Inputs, JacobianWrt::Both] {
             let reason = reason(ExpectationJacobian::from_traced(
                 &model(),
-                vec![traced(vec![phase.clone()])],
+                vec![traced(vec![declared.clone()])],
                 wrt,
             ));
-            assert!(reason.contains("Pauli rotation"), "{wrt:?}: {reason}");
+            assert!(reason.contains("declared gate"), "{wrt:?}: {reason}");
         }
     }
 

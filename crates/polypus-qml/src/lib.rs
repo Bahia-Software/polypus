@@ -49,10 +49,10 @@
 //! gradient-based optimizers: [`QmlProblem::gradient_circuits`] lists the
 //! circuits, and [`QmlProblem::gradient_from_counts`] (or
 //! [`QmlProblem::gradient_from_probabilities`]) turns their results into
-//! `∂fitness/∂θ`. Every trainable gate is a Pauli rotation, for which the
-//! two-term `±π/2` shift is exact gate by gate; a parameter that several gates
-//! share (convolution and pooling reuse theirs across qubit pairs) is shifted
-//! at each of its gates in turn and the results are summed.
+//! `∂fitness/∂θ`. Every trainable gate the layers emit is a Pauli rotation,
+//! for which the two-term `±π/2` shift is exact gate by gate; a parameter that
+//! several gates share (convolution and pooling reuse theirs across qubit
+//! pairs) is shifted at each of its gates in turn and the results are summed.
 //!
 //! **Cost.** One gradient runs
 //! `num_circuits · (1 + 2 · occurrences)` circuits
@@ -62,19 +62,26 @@
 //! parameter costs two batches per gate that uses it. For example, a basic
 //! convolution over 4 qubits has 4 parameters on 3 pairs, so 12 occurrences
 //! and 25 batches instead of 9. A model with an instruction the shift rule
-//! cannot handle has no exact gradient ([`QmlError::NoExactGradient`]) but
-//! still trains with gradient-free optimizers.
+//! cannot handle has no parameter-shift gradient ([`QmlError::NoExactGradient`])
+//! but still trains with gradient-free optimizers.
 //!
 //! **Adjoint differentiation.** A caller that holds the exact statevector can
 //! get the same gradient without the shifted circuits:
 //! [`QmlProblem::adjoint_runs`] gives one [`AdjointRun`] per sample — the
-//! untied circuit, the gates to differentiate and a [`DiagonalObservable`]
-//! with the loss's chain rule folded in — for a simulator to differentiate
+//! untied circuit, the gate angles to differentiate and a
+//! [`DiagonalObservable`] with the loss's chain rule folded in — for a
+//! simulator to differentiate
 //! (`polypus_sim::StatevectorSimulator::adjoint_gradient`), and
 //! [`QmlProblem::gradient_from_adjoint`] reads the derivatives back. The
 //! expectation Jacobian has the same pair
 //! ([`JacobianBlock::adjoint_runs`], [`JacobianBlock::jacobian_from_adjoint`]),
-//! one run per sample and observable. This crate still executes nothing.
+//! one run per sample and observable. This crate still executes nothing. The
+//! adjoint also differentiates the gates the shift rule has no rule for (the
+//! controlled rotations, the phase gates and the `u` family, issue #561): a
+//! model with one has an exact gradient by the adjoint only, and its
+//! parameter-shift methods fail with [`QmlError::NoExactGradient`]
+//! ([`QmlProblem::check_shift_fallback`] tells a caller whose adjoint does not
+//! fit in memory whether it can fall back to the shift).
 //!
 //! ## Expectations and their Jacobian
 //!
