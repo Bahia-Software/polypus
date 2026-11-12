@@ -30,9 +30,10 @@ use pyo3::types::{PyDict, PyList, PyModule, PyTuple, PyType};
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 use polypus_qml::{
     AngleEncoder, CompiledModel, ConvBlock, ConvLayer, Decision, Entanglement, Entangler,
-    ExpectationJacobian, HardwareEfficientAnsatz, IqpEncoder, JacobianWrt, KeepRule, Layer, Loss,
-    Observable, Pairing, Pauli, PauliString, PoolBlock, PoolLayer, QmlError, QmlProblem,
-    QuantumModel, Readout, RotationAxis, StronglyEntanglingAnsatz, ValidationError,
+    ExpectationJacobian, FeatureMap, FeatureStates, FidelityKernel, HardwareEfficientAnsatz,
+    IqpEncoder, JacobianWrt, KeepRule, Layer, Loss, Observable, Pairing, Pauli, PauliString,
+    PoolBlock, PoolLayer, QmlError, QmlProblem, QuantumModel, Readout, RotationAxis,
+    StronglyEntanglingAnsatz, ValidationError,
 };
 
 use super::callback::validate_callback;
@@ -2098,6 +2099,18 @@ trait Primitive {
     ) -> Option<Result<(), PrimitiveError>> {
         None
     }
+    /// Run **every** sample on the exact native backend at once, by a route
+    /// that bounds its own memory and honours `cancel` inside (the kernel's
+    /// inner products, which would otherwise simulate each state again for
+    /// every block), or `None` to run in blocks (the default). Tried before
+    /// the first block.
+    fn run_exact_all(
+        &mut self,
+        _native: &NativeStatevectorBackend,
+        _cancel: &CancelToken,
+    ) -> Option<Result<(), PrimitiveError>> {
+        None
+    }
 }
 
 /// The detached part of a primitive call: create its one runner, size the
@@ -2130,16 +2143,17 @@ fn run_blocks_on(
     cancel: &CancelToken,
 ) -> Result<(), PrimitiveError> {
     let num_samples = primitive.num_samples();
+    if let BlockRunner::Exact { native, .. } = runner {
+        if num_samples > 0 {
+            check_cancel(cancel)?;
+            if let Some(outcome) = primitive.run_exact_all(native, cancel) {
+                return outcome;
+            }
+        }
+    }
     let mut start = 0;
     while start < num_samples {
-        if cancel.is_cancelled() {
-            return Err(PrimitiveError::Infrastructure(
-                InfrastructureError::Cancelled,
-            ));
-        }
-        cancel
-            .poll_interrupt()
-            .map_err(PrimitiveError::Infrastructure)?;
+        check_cancel(cancel)?;
         let end = start.saturating_add(block).min(num_samples);
         if let BlockRunner::Exact { native, .. } = runner {
             if let Some(outcome) = primitive.run_exact_block(native, start..end, cancel) {
@@ -2160,6 +2174,18 @@ fn run_blocks_on(
         start = end;
     }
     Ok(())
+}
+
+/// A cancellation or a Ctrl+C, as the planner checks them between waves.
+fn check_cancel(cancel: &CancelToken) -> Result<(), PrimitiveError> {
+    if cancel.is_cancelled() {
+        return Err(PrimitiveError::Infrastructure(
+            InfrastructureError::Cancelled,
+        ));
+    }
+    cancel
+        .poll_interrupt()
+        .map_err(PrimitiveError::Infrastructure)
 }
 
 /// `qml.expval`: one circuit per sample, every readout observable read from it.
@@ -2333,6 +2359,129 @@ impl JacobianRun {
     }
 }
 
+/// `qml.kernel_matrix`: one sample per pair `(i, j)` of the kernel, one
+/// compute-uncompute circuit each, read into one value per pair; or, exactly,
+/// the whole matrix from the native backend.
+struct KernelRun {
+    kernel: FidelityKernel,
+    /// The `rows × columns` matrix, row-major: the native backend's whole
+    /// result ([`run_exact_all`](Primitive::run_exact_all)), or allocated by
+    /// the first block read and filled block by block, each pair's value
+    /// written at its entry (a symmetric kernel's at its mirror too), so the
+    /// pairs' values are never held beside it.
+    matrix: Option<Vec<f64>>,
+    /// The pairs whose values are in `matrix`.
+    filled: usize,
+}
+
+impl KernelRun {
+    fn new(kernel: FidelityKernel) -> Self {
+        KernelRun {
+            kernel,
+            matrix: None,
+            filled: 0,
+        }
+    }
+
+    /// The `rows × columns` matrix, row-major, once every pair is in it (a
+    /// kernel with no pairs has an empty one).
+    fn into_matrix(self) -> Result<Vec<f64>, QmlError> {
+        if self.filled != self.kernel.num_pairs() {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: self.kernel.num_pairs(),
+                got: self.filled,
+            });
+        }
+        match self.matrix {
+            Some(matrix) => Ok(matrix),
+            None => self.kernel.zero_matrix(),
+        }
+    }
+}
+
+impl Primitive for KernelRun {
+    fn num_samples(&self) -> usize {
+        self.kernel.num_pairs()
+    }
+
+    fn circuits_per_sample(&self) -> usize {
+        1
+    }
+
+    fn circuits(&self, samples: Range<usize>) -> Result<Vec<ConcreteCircuit>, PrimitiveError> {
+        match self.kernel.circuits(samples.clone()) {
+            Some(circuits) => Ok(circuits?),
+            None => Err(PrimitiveError::block_out_of_range(
+                &samples,
+                self.kernel.num_pairs(),
+            )),
+        }
+    }
+
+    fn read(&mut self, samples: Range<usize>, results: BlockResults) -> Result<(), PrimitiveError> {
+        let got = match &results {
+            BlockResults::Counts(counts) => counts.len(),
+            BlockResults::Exact(probabilities) => probabilities.len(),
+        };
+        if got != samples.len() {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: samples.len(),
+                got,
+            }
+            .into());
+        }
+        let values = match results {
+            BlockResults::Counts(counts) => counts
+                .iter()
+                .map(|counts| self.kernel.fidelity_from_counts(counts))
+                .collect::<Result<Vec<_>, _>>()?,
+            BlockResults::Exact(probabilities) => probabilities
+                .iter()
+                .map(|probabilities| self.kernel.fidelity_from_probabilities(probabilities))
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        let matrix = match &mut self.matrix {
+            Some(matrix) => matrix,
+            None => self.matrix.insert(self.kernel.zero_matrix()?),
+        };
+        self.kernel.place(matrix, samples.start, &values)?;
+        self.filled += values.len();
+        Ok(())
+    }
+
+    /// The exact kernel in one call to the native backend, which picks its
+    /// route by the memory budget with the matrix counted: inner products of
+    /// statevectors, each state simulated once when they all fit and in tiles
+    /// otherwise, or, when the budget holds one statevector beside the matrix
+    /// but not two, one compute-uncompute circuit per pair (the backend logs
+    /// it). Never `None`, so the circuits never run in blocks here. A Ctrl+C
+    /// or a cancellation stops it in flight ([`watched`]).
+    fn run_exact_all(
+        &mut self,
+        native: &NativeStatevectorBackend,
+        cancel: &CancelToken,
+    ) -> Option<Result<(), PrimitiveError>> {
+        let kernel = &self.kernel;
+        let columns = (!kernel.is_symmetric()).then(|| kernel.column_states());
+        let matrix = watched(cancel, |stop| {
+            native.fidelity_matrix(
+                kernel.row_states(),
+                columns,
+                Some(&|| stop.load(Ordering::Relaxed)),
+            )
+        });
+        Some(match matrix {
+            Ok(Ok(matrix)) => {
+                self.matrix = Some(matrix);
+                self.filled = self.kernel.num_pairs();
+                Ok(())
+            }
+            Ok(Err(e)) => Err(PrimitiveError::Infrastructure(e.into())),
+            Err(e) => Err(e),
+        })
+    }
+}
+
 /// How often [`watched`] looks for a cancellation or a Ctrl+C: the simulator's
 /// own floor between two calls of its cancellation hook, so a Ctrl+C is
 /// honoured within about a frame.
@@ -2342,7 +2491,8 @@ const WATCH_INTERVAL: Duration = Duration::from_millis(25);
 /// cooperative cancellation and its interrupt guard (at the edge, a pending
 /// Ctrl+C: the guard attaches and calls `check_signals`, which only works on
 /// the thread that called into Polypus — this one — and is a no-op on the
-/// rayon threads an adjoint batch runs on). On either, `stop` is set for
+/// rayon threads an adjoint batch or the kernel's inner products run on). On
+/// either, `stop` is set for
 /// `work`'s cancellation hook to see, and once `work` returns, the reason is the
 /// result: the same `InfrastructureError` a check between blocks gives, so the
 /// edge raises the same `KeyboardInterrupt`. A signal the guard consumed is
@@ -2382,7 +2532,7 @@ fn watched<T: Send>(
         (Some(reason), _) => Err(PrimitiveError::Infrastructure(reason)),
         (None, Ok(result)) => Ok(result),
         (None, Err(_)) => Err(PrimitiveError::Internal(
-            "the adjoint gradient's thread panicked".to_string(),
+            "the watched work's thread panicked".to_string(),
         )),
     }
 }
@@ -2672,6 +2822,151 @@ pub fn jacobian<'py>(
     })
 }
 
+/// `encoder` as a native [`Encoder`], or the `TypeError` `qml.kernel_matrix`
+/// raises for anything else, naming what it takes.
+fn kernel_encoder<'py>(encoder: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Encoder>> {
+    if let Ok(encoder) = encoder.cast::<Encoder>() {
+        return Ok(encoder.clone());
+    }
+    let hint = if encoder.is_instance_of::<Ansatz>() {
+        "; trainable layers have no place in a fidelity kernel (trainable kernels are not \
+         supported)"
+    } else if encoder.is_instance_of::<Model>() || encoder.is_instance_of::<TrainedModel>() {
+        "; pass the polypus.qml.Encoder the model was built from"
+    } else {
+        ""
+    };
+    Err(PyTypeError::new_err(format!(
+        "qml.kernel_matrix takes a polypus.qml.Encoder as encoder, got {}{hint}",
+        encoder.get_type().name()?
+    )))
+}
+
+/// The rows of `x` (rows or a `Dataset`, whose labels are not used) for
+/// `qml.kernel_matrix`, checked as `qml.expval` checks its rows (empty,
+/// ragged, non-finite), each a `polypus.ConfigurationError` naming `name`.
+fn kernel_rows(x: &Bound<'_, PyAny>, name: &str) -> PyResult<polypus_qml::Dataset> {
+    if let Ok(dataset) = x.cast::<PyDataset>() {
+        return Ok(dataset.try_borrow()?.inner.clone());
+    }
+    let rows: Vec<Vec<f64>> = x.extract()?;
+    polypus_qml::Dataset::from_rows(&rows, &vec![0.0; rows.len()])
+        .map_err(|e| configuration_error(format!("{name}: {e}")))
+}
+
+/// The states of every row of `rows` under `feature_map`, each rejection (a
+/// zero sample for amplitude encoding, a non-binary feature for basis
+/// encoding) a `polypus.ConfigurationError` naming `name`.
+fn kernel_states(
+    feature_map: &FeatureMap,
+    rows: &polypus_qml::Dataset,
+    name: &str,
+) -> PyResult<FeatureStates> {
+    let samples: Vec<&[f64]> = (0..rows.num_samples()).map(|i| rows.sample(i)).collect();
+    feature_map
+        .states(&samples)
+        .map_err(|e| configuration_error(format!("{name}: {e}")))
+}
+
+/// `polypus.qml.kernel_matrix(encoder, x1, x2=None, *, …)`: the fidelity
+/// kernel `K[i, j] = |⟨φ(x1_i)|φ(x2_j)⟩|²` of the states `encoder` prepares,
+/// as a `float64` `numpy.ndarray` of shape `(len(x1), len(x2))`, C-contiguous,
+/// ready for `sklearn.svm.SVC(kernel="precomputed")`.
+///
+/// - **`encoder`** is a `polypus.qml.Encoder` (anything else is a
+///   `TypeError`); **`x1`** and **`x2`** are rows of features or `Dataset`s
+///   (labels are not used), as wide as each other.
+/// - **`x2=None`** is the Gram matrix of `x1` with itself: only the upper
+///   triangle, diagonal included, is computed, `N(N+1)/2` circuits, and
+///   mirrored, so the matrix is symmetric bit for bit. The diagonal is
+///   executed, not set to `1`. An explicit `x2` computes all `N·M` entries,
+///   even if it equals `x1`.
+/// - **Execution** takes `qml.expval`'s arguments with its rules. With
+///   `exact=True`, the inner products of the native simulator's statevectors
+///   (each state simulated once when they fit in the memory budget); otherwise
+///   each entry is the frequency of `0…0` over `shots` shots of the circuit
+///   `U(x1_i)` then `U(x2_j)†` — an unbiased estimate, and a matrix that may
+///   not be positive semi-definite.
+///
+/// Every check runs before a backend exists and raises
+/// `polypus.ConfigurationError` (a `ValueError`).
+#[pyfunction(name = "kernel_matrix", signature = (
+    encoder, x1, x2=None, *, shots=1024, infrastructure="local", n_qpus=1, nodes=1,
+    cores_per_qpu=2, walltime=None, options=None, sim_method="automatic", noise_model=None,
+    backend=None, seed=None, exact=false,
+))]
+pub fn kernel_matrix<'py>(
+    encoder: &Bound<'py, PyAny>,
+    x1: &Bound<'py, PyAny>,
+    x2: Option<&Bound<'py, PyAny>>,
+    shots: u32,
+    infrastructure: &str,
+    n_qpus: u32,
+    nodes: u32,
+    cores_per_qpu: u32,
+    walltime: Option<String>,
+    options: Option<OptionsArg>,
+    sim_method: &str,
+    noise_model: Option<Bound<'py, PyAny>>,
+    backend: Option<&str>,
+    seed: Option<u64>,
+    exact: bool,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let py = x1.py();
+    let exec = Execution {
+        shots,
+        infrastructure,
+        n_qpus,
+        nodes,
+        cores_per_qpu,
+        walltime,
+        options,
+        sim_method,
+        noise_model,
+        backend,
+        seed,
+        exact,
+    };
+    let encoder = kernel_encoder(encoder)?;
+    let backend = exec.check()?;
+    let (feature_map, rows) = {
+        // A copy: the encoder can be built on afterwards without changing it.
+        let stack = encoder.try_borrow()?.stack.clone();
+        let rows1 = kernel_rows(x1, "x1")?;
+        if stack.layers.is_empty() {
+            return Err(configuration_error(
+                "the Encoder has no layers: add an encoder (angle_encoder, iqp_encoder, \
+                 amplitude_encoder or basis_encoder) to load the rows",
+            ));
+        }
+        let feature_map = FeatureMap::compile(stack.num_qubits, stack.layers, rows1.num_features())
+            .map_err(|e| configuration_error(format!("x1: {e}")))?;
+        let rows = kernel_states(&feature_map, &rows1, "x1")?;
+        (feature_map, rows)
+    };
+    let columns = x2
+        .map(|x2| {
+            let rows2 = kernel_rows(x2, "x2")?;
+            if rows2.num_features() != feature_map.num_features() {
+                return Err(configuration_error(format!(
+                    "x2 has {} feature(s) per row but x1 has {}; the kernel compares rows of \
+                     the same width",
+                    rows2.num_features(),
+                    feature_map.num_features()
+                )));
+            }
+            kernel_states(&feature_map, &rows2, "x2")
+        })
+        .transpose()?;
+    let kernel = FidelityKernel::from_states(rows, columns).map_err(qml_to_config_err)?;
+    let (num_rows, num_columns) = (kernel.num_rows(), kernel.num_columns());
+    let mut primitive = KernelRun::new(kernel);
+    run_primitive(py, "kernel_matrix", &mut primitive, exec, backend)?;
+    let matrix = primitive.into_matrix().map_err(qml_to_py_err)?;
+    let matrix = array2(num_rows, num_columns, matrix).map_err(shape_to_py_err)?;
+    Ok(matrix.into_pyarray(py))
+}
+
 /// `qml.train` and `qml.predict` run Qiskit circuits. A native piece in their
 /// `feature_map` or `ansatz` is a `TypeError` that says so (plan D4-R), rather
 /// than a Qiskit error from composing it.
@@ -2703,6 +2998,7 @@ pub(crate) fn register(qml: &Bound<'_, PyModule>) -> PyResult<()> {
     qml.add_function(wrap_pyfunction!(load, qml)?)?;
     qml.add_function(wrap_pyfunction!(expval, qml)?)?;
     qml.add_function(wrap_pyfunction!(jacobian, qml)?)?;
+    qml.add_function(wrap_pyfunction!(kernel_matrix, qml)?)?;
     qml.add_class::<PyDataset>()?;
     qml.add_class::<PauliTerm>()?;
     qml.add_class::<PyObservable>()?;
@@ -3665,5 +3961,272 @@ mod tests {
         // And a work that ends before the first look is just its result.
         let quick = watched(&CancelToken::default(), |_| 7);
         assert!(matches!(quick, Ok(7)));
+    }
+
+    // ── qml.kernel_matrix ────────────────────────────────────────────────────
+
+    /// An IQP-then-`Rx` feature map on 3 qubits and 4 + 3 rows.
+    fn kernel_map_and_rows() -> (FeatureMap, Vec<Vec<f64>>, Vec<Vec<f64>>) {
+        let map = FeatureMap::compile(
+            3,
+            vec![
+                Layer::Iqp(IqpEncoder::new()),
+                Layer::AngleEncoder(AngleEncoder::new(RotationAxis::Rx)),
+            ],
+            3,
+        )
+        .unwrap();
+        let rows = |n: usize, shift: f64| -> Vec<Vec<f64>> {
+            (0..n)
+                .map(|i| (0..3).map(|j| shift + 0.23 * (i * 3 + j) as f64).collect())
+                .collect()
+        };
+        (map, rows(4, 0.1), rows(3, -0.6))
+    }
+
+    fn kernel_run(symmetric: bool) -> KernelRun {
+        let (map, x1, x2) = kernel_map_and_rows();
+        let x2 = (!symmetric).then_some(&x2[..]);
+        KernelRun::new(FidelityKernel::new(&map, &x1, x2).unwrap())
+    }
+
+    /// The matrix of the compute-uncompute circuits of `kernel`, each run
+    /// exactly on its own: the reference the native inner products are
+    /// checked against.
+    fn compute_uncompute_matrix(kernel: &FidelityKernel) -> Vec<f64> {
+        let circuits: Vec<BoundCircuit> = kernel
+            .circuits(0..kernel.num_pairs())
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .map(BoundCircuit::Native)
+            .collect();
+        let probabilities = NativeStatevectorBackend::new(0)
+            .run_circuits_exact(&circuits, &run_params(0, 1))
+            .unwrap();
+        let values: Vec<f64> = probabilities
+            .iter()
+            .map(|p| kernel.fidelity_from_probabilities(p).unwrap())
+            .collect();
+        kernel.matrix(&values).unwrap()
+    }
+
+    #[test]
+    fn a_seeded_kernel_does_not_depend_on_the_block_size() {
+        for symmetric in [true, false] {
+            let mut whole = kernel_run(symmetric);
+            sampled_on_native(&mut whole, 5, usize::MAX);
+            assert_eq!(whole.filled, whole.kernel.num_pairs());
+            for block in [1, 2, 5] {
+                let mut blocked = kernel_run(symmetric);
+                sampled_on_native(&mut blocked, 5, block);
+                assert_eq!(blocked.matrix, whole.matrix, "block {block}");
+            }
+            let mut other_seed = kernel_run(symmetric);
+            sampled_on_native(&mut other_seed, 6, usize::MAX);
+            assert_ne!(other_seed.matrix, whole.matrix);
+            // The sampled matrix: each block written at its pairs' entries as
+            // it is read, a symmetric one mirrored bit for bit, every entry a
+            // frequency.
+            let n2 = whole.kernel.num_columns();
+            let matrix = whole.into_matrix().unwrap();
+            for (k, value) in matrix.iter().enumerate() {
+                assert!((0.0..=1.0).contains(value));
+                if symmetric {
+                    let (i, j) = (k / n2, k % n2);
+                    assert_eq!(value.to_bits(), matrix[j * n2 + i].to_bits());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_exact_kernel_is_the_compute_uncompute_one_whatever_the_blocks() {
+        for symmetric in [true, false] {
+            let reference = compute_uncompute_matrix(&kernel_run(symmetric).kernel);
+            let mut first: Option<Vec<f64>> = None;
+            for block in [1, 2, usize::MAX] {
+                let mut run = kernel_run(symmetric);
+                run.run_exact(block);
+                // One call to the native backend computed the whole matrix,
+                // whatever the blocks: its result, bit for bit.
+                let kernel = &run.kernel;
+                let native = NativeStatevectorBackend::new(0)
+                    .fidelity_matrix(
+                        kernel.row_states(),
+                        (!symmetric).then(|| kernel.column_states()),
+                        None,
+                    )
+                    .unwrap();
+                let matrix = run.into_matrix().unwrap();
+                assert_eq!(matrix, native, "block {block}");
+                for (k, (a, b)) in matrix.iter().zip(&reference).enumerate() {
+                    // Two exact routes, a few dozen roundings each.
+                    assert!((a - b).abs() < 1e-12, "entry {k}: {a} != {b}");
+                }
+                match &first {
+                    None => first = Some(matrix),
+                    Some(first) => assert_eq!(first, &matrix, "block {block}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_rows_in_chunks_concatenate_to_the_whole_matrix() {
+        let (map, x1, x2) = kernel_map_and_rows();
+        let exact = |rows: &[Vec<f64>]| {
+            let mut run = KernelRun::new(FidelityKernel::new(&map, rows, Some(&x2[..])).unwrap());
+            run.run_exact(usize::MAX);
+            run.into_matrix().unwrap()
+        };
+        let whole = exact(&x1);
+        let chunks: Vec<f64> = [&x1[..1], &x1[1..3], &x1[3..]]
+            .into_iter()
+            .flat_map(exact)
+            .collect();
+        assert_eq!(chunks, whole);
+    }
+
+    #[test]
+    fn a_kernel_runs_its_blocks_on_one_backend_created_and_closed_once() {
+        let counters = Counters::new();
+        let mut run = kernel_run(true);
+        run_in_blocks(
+            &mut run,
+            || counters.create(),
+            |_| 4,
+            &CancelToken::default(),
+        )
+        .unwrap();
+        // 4 rows: 10 pairs, so 10 circuits in blocks of 4: three calls.
+        assert_eq!(run.filled, 10);
+        assert_eq!(counters.get(), (1, 3, 1));
+    }
+
+    #[test]
+    fn a_kernel_cancelled_or_failing_between_blocks_stops_and_still_closes() {
+        let counters = Counters::new();
+        let token = CancelToken::default();
+        let mut run = Interfering {
+            inner: kernel_run(false),
+            token: token.clone(),
+            fail_second: false,
+            built: std::cell::Cell::new(0),
+        };
+        let err = run_in_blocks(&mut run, || counters.create(), |_| 5, &token).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PrimitiveError::Infrastructure(InfrastructureError::Cancelled)
+            ),
+            "{err:?}"
+        );
+        assert_eq!(run.built.get(), 1);
+        assert_eq!(run.inner.filled, 5);
+        assert_eq!(counters.get(), (1, 1, 1));
+
+        let counters = Counters::new();
+        let mut run = Interfering {
+            inner: kernel_run(false),
+            token: CancelToken::default(),
+            fail_second: true,
+            built: std::cell::Cell::new(0),
+        };
+        let err = run_in_blocks(
+            &mut run,
+            || counters.create(),
+            |_| 5,
+            &CancelToken::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, PrimitiveError::Qml(QmlError::EmptyCounts)),
+            "{err:?}"
+        );
+        assert_eq!(counters.get(), (1, 1, 1));
+    }
+
+    #[test]
+    fn a_kernel_block_outside_its_pairs_is_an_internal_error() {
+        let run = kernel_run(true);
+        assert!(matches!(
+            run.circuits(9..11),
+            Err(PrimitiveError::Internal(_))
+        ));
+        let mut run = kernel_run(true);
+        assert!(matches!(
+            run.read(0..2, BlockResults::Counts(vec![Counts::new()])),
+            Err(PrimitiveError::Qml(QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1
+            }))
+        ));
+    }
+
+    /// A Ctrl+C stops the exact inner products in flight, with the error a
+    /// check between blocks gives: the check before them lets them start, then
+    /// the watcher's first look interrupts them. The error alone cannot tell a
+    /// stop in flight from work that ran to its end and was reported
+    /// interrupted afterwards (`watched` returns the reason it saw either
+    /// way), so the interrupted call is timed against the same call run to
+    /// completion: a stop in flight takes a fraction of it. The work must
+    /// outlive the watcher's first look (25 ms): uninterrupted, these 24
+    /// states of 18 qubits (a full IQP map) and their 300 inner products took
+    /// 3.5 s in a debug `cargo test` on a 16-CPU node, 140 times that. The
+    /// comparison needs a run long enough to time: it is made when the whole
+    /// run takes at least 16 looks of the watcher (400 ms), as it always does
+    /// in debug, which CI runs; an optimized build can finish in less, too
+    /// close to the watcher's look and the simulator's own cancellation cadence
+    /// for a quarter of it to mean anything, so there it is skipped, and said
+    /// so. The error, the polls and the empty results are checked always.
+    #[test]
+    fn a_ctrl_c_stops_an_exact_kernel_in_flight() {
+        let map = FeatureMap::compile(18, vec![Layer::Iqp(IqpEncoder::new())], 18).unwrap();
+        let rows: Vec<Vec<f64>> = (0..24)
+            .map(|i| (0..18).map(|j| 0.05 * (i + j) as f64).collect())
+            .collect();
+        let exact = || {
+            Ok(BlockRunner::Exact {
+                native: NativeStatevectorBackend::new(0),
+                params: run_params(0, 1),
+            })
+        };
+        let mut whole = KernelRun::new(FidelityKernel::new(&map, &rows, None).unwrap());
+        let started = Instant::now();
+        run_in_blocks(&mut whole, exact, |_| usize::MAX, &CancelToken::default()).unwrap();
+        let uninterrupted = started.elapsed();
+        assert!(whole.matrix.is_some());
+
+        let mut run = KernelRun::new(FidelityKernel::new(&map, &rows, None).unwrap());
+        let guard = Arc::new(InterruptAfter {
+            ok: 1,
+            polls: AtomicUsize::new(0),
+        });
+        let token = CancelToken::with_interrupt(guard.clone());
+        let started = Instant::now();
+        let err = run_in_blocks(&mut run, exact, |_| usize::MAX, &token).unwrap_err();
+        let interrupted = started.elapsed();
+        match err {
+            PrimitiveError::Infrastructure(InfrastructureError::Backend(
+                crate::infrastructure::BackendError::Aborted(message),
+            )) => assert_eq!(message, "test interrupt"),
+            other => panic!("expected the interrupt, got {other:?}"),
+        }
+        assert_eq!(guard.polls.load(Ordering::SeqCst), 2);
+        assert!(run.matrix.is_none() && run.filled == 0);
+        if uninterrupted < 16 * WATCH_INTERVAL {
+            eprintln!(
+                "the whole run took {uninterrupted:?}, under {:?}: too short to time a stop \
+                 in flight against, so that comparison is skipped",
+                16 * WATCH_INTERVAL
+            );
+            return;
+        }
+        assert!(
+            interrupted < uninterrupted / 4,
+            "stopped after {interrupted:?}, the whole run takes {uninterrupted:?}: the \
+             work did not see the stop"
+        );
     }
 }

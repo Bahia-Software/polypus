@@ -305,6 +305,14 @@ pub enum ValidationError {
         /// The offending value.
         value: f64,
     },
+    /// A [`FeatureMap`](crate::FeatureMap) was given a layer that reserves
+    /// trainable parameters (an ansatz, a convolution, a pooling): a quantum
+    /// kernel's feature map is made of encoders only, every angle fixed by the
+    /// sample.
+    TrainableLayerInFeatureMap {
+        /// The layer (0-based, in the feature map).
+        layer: usize,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -461,6 +469,11 @@ impl fmt::Display for ValidationError {
                 f,
                 "params[{index}] is {value}; every parameter must be a finite number"
             ),
+            ValidationError::TrainableLayerInFeatureMap { layer } => write!(
+                f,
+                "layer {layer} of the feature map has trainable parameters; a quantum kernel's \
+                 feature map takes encoders only"
+            ),
         }
     }
 }
@@ -613,6 +626,25 @@ pub enum QmlError {
         /// The encoder: `"amplitude"` or `"basis"`.
         encoder: &'static str,
     },
+    /// A [`FidelityKernel`](crate::FidelityKernel) over `rows × columns`
+    /// samples has more entries (or pairs) than fit in memory's address space,
+    /// or its matrix could not be allocated: a typed error, never an overflow
+    /// or a panic.
+    KernelTooLarge {
+        /// The samples of `x1`.
+        rows: usize,
+        /// The samples of `x2` (`rows` again for a symmetric kernel).
+        columns: usize,
+    },
+    /// [`FidelityKernel::from_states`](crate::FidelityKernel::from_states) was
+    /// given rows and columns encoded by feature maps of different widths,
+    /// whose states have no inner product.
+    StateWidthMismatch {
+        /// The rows' qubits.
+        rows: usize,
+        /// The columns' qubits.
+        columns: usize,
+    },
 }
 
 impl fmt::Display for QmlError {
@@ -667,6 +699,16 @@ impl fmt::Display for QmlError {
                 "no Jacobian with respect to the inputs for this model: its {encoder} encoder \
                  has no derivative in the sample; differentiate with respect to the parameters \
                  only, or encode with angle or IQP encoders"
+            ),
+            QmlError::KernelTooLarge { rows, columns } => write!(
+                f,
+                "a {rows} x {columns} kernel matrix is too large to compute: its entries do not \
+                 fit in memory"
+            ),
+            QmlError::StateWidthMismatch { rows, columns } => write!(
+                f,
+                "the rows are {rows}-qubit states and the columns {columns}-qubit ones; a kernel \
+                 pairs states of one width"
             ),
         }
     }

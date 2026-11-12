@@ -784,6 +784,247 @@ impl GateInstruction {
         }
     }
 
+    /// Append to `out` the inverse `U†` of this instruction as instructions of
+    /// the vocabulary, in the order they are applied. `position` is where the
+    /// instruction stands in its circuit, which [`CircuitError::NotInvertible`]
+    /// reports.
+    ///
+    /// The one inverse table of the workspace: what
+    /// [`ConcreteCircuit::inverse`](crate::ConcreteCircuit::inverse) builds on,
+    /// and what the native simulator's adjoint gradient steps back through.
+    /// Exact, global phase included:
+    ///
+    /// - a gate that is its own inverse (`h`, `x`, `cx`, `swap`, `ccx`, `rccx`,
+    ///   `c4x`, …, and the identities `id` and `u0`) is copied;
+    /// - `s`↔`sdg`, `t`↔`tdg`, `sx`↔`sxdg`;
+    /// - a rotation or phase by `−θ`; `u3(θ, φ, λ)† = u3(−θ, −λ, −φ)` under each
+    ///   spelling (`u`, `u3`, `cu3`, and `cu` with its phase `γ` negated too), and
+    ///   `u2(φ, λ)† = u3(−π/2, −λ, −φ)`, which no `u2` spells;
+    /// - `csx`, which has no inverse among the instructions, becomes `h`,
+    ///   `cp(−π/2)`, `h` on its target (`H·P(−π/2)·H = SX†`, controlled);
+    /// - `rc3x` and `c3sqrtx`, which have none either, become the inverse of
+    ///   their [`lowering`](Self::lowering): its instructions in reverse order,
+    ///   each inverted;
+    /// - a barrier is copied.
+    ///
+    /// The match is exhaustive, with no wildcard: a new instruction does not
+    /// compile until it says how it is inverted.
+    ///
+    /// ```
+    /// use polypus_circuit::{GateInstruction as G, GateParam};
+    ///
+    /// let mut out = Vec::new();
+    /// G::S(0).push_inverse(0, &mut out).unwrap();
+    /// G::Csx(0, 1).push_inverse(1, &mut out).unwrap();
+    /// let cp = G::Cp {
+    ///     q0: 0,
+    ///     q1: 1,
+    ///     theta: GateParam::Fixed(-std::f64::consts::FRAC_PI_2),
+    /// };
+    /// assert_eq!(out, [G::Sdg(0), G::H(1), cp, G::H(1)]);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`CircuitError::NotInvertible`] for a measurement (`measure`,
+    ///   `measure_all`) or a call of a declared gate, whose inverse is not an
+    ///   instruction of the vocabulary;
+    /// - [`CircuitError::ParamIndexOutOfBounds`] / [`CircuitError::UnknownExpression`]
+    ///   for an angle that is a free parameter or an expression, which a
+    ///   concrete circuit cannot hold and which cannot be negated.
+    ///
+    /// On an error, `out` may already hold part of the inverse; discard it.
+    pub fn push_inverse(
+        &self,
+        position: usize,
+        out: &mut Vec<GateInstruction>,
+    ) -> Result<(), CircuitError> {
+        use GateInstruction as G;
+        let neg = |p: &GateParam| match p {
+            GateParam::Fixed(v) => Ok(GateParam::Fixed(-v)),
+            GateParam::Param(index) => Err(CircuitError::ParamIndexOutOfBounds {
+                index: *index,
+                num_params: 0,
+            }),
+            GateParam::Expr(_) => Err(CircuitError::UnknownExpression),
+        };
+        let not_invertible = |instruction: &'static str| CircuitError::NotInvertible {
+            position,
+            instruction,
+        };
+        let inverse = match self {
+            G::H(_)
+            | G::X(_)
+            | G::Y(_)
+            | G::Z(_)
+            | G::Id(_)
+            | G::Cx(..)
+            | G::Cz(..)
+            | G::Swap(..)
+            | G::Cy(..)
+            | G::Ch(..)
+            | G::Ccx(..)
+            | G::Cswap(..)
+            | G::Rccx(..)
+            | G::C3x(..)
+            | G::C4x(..)
+            | G::U0 { .. }
+            | G::Barrier(_) => self.clone(),
+            G::S(q) => G::Sdg(*q),
+            G::Sdg(q) => G::S(*q),
+            G::T(q) => G::Tdg(*q),
+            G::Tdg(q) => G::T(*q),
+            G::Sx(q) => G::Sxdg(*q),
+            G::Sxdg(q) => G::Sx(*q),
+            G::Rx { qubit, theta } => G::Rx {
+                qubit: *qubit,
+                theta: neg(theta)?,
+            },
+            G::Ry { qubit, theta } => G::Ry {
+                qubit: *qubit,
+                theta: neg(theta)?,
+            },
+            G::Rz { qubit, theta } => G::Rz {
+                qubit: *qubit,
+                theta: neg(theta)?,
+            },
+            G::Rzz { q0, q1, theta } => G::Rzz {
+                q0: *q0,
+                q1: *q1,
+                theta: neg(theta)?,
+            },
+            G::Rxx { q0, q1, theta } => G::Rxx {
+                q0: *q0,
+                q1: *q1,
+                theta: neg(theta)?,
+            },
+            G::Cp { q0, q1, theta } => G::Cp {
+                q0: *q0,
+                q1: *q1,
+                theta: neg(theta)?,
+            },
+            G::Cu1 { q0, q1, theta } => G::Cu1 {
+                q0: *q0,
+                q1: *q1,
+                theta: neg(theta)?,
+            },
+            G::Crx {
+                control,
+                target,
+                theta,
+            } => G::Crx {
+                control: *control,
+                target: *target,
+                theta: neg(theta)?,
+            },
+            G::Cry {
+                control,
+                target,
+                theta,
+            } => G::Cry {
+                control: *control,
+                target: *target,
+                theta: neg(theta)?,
+            },
+            G::Crz {
+                control,
+                target,
+                theta,
+            } => G::Crz {
+                control: *control,
+                target: *target,
+                theta: neg(theta)?,
+            },
+            G::P { qubit, lam } => G::P {
+                qubit: *qubit,
+                lam: neg(lam)?,
+            },
+            G::U1 { qubit, lam } => G::U1 {
+                qubit: *qubit,
+                lam: neg(lam)?,
+            },
+            G::U {
+                qubit,
+                theta,
+                phi,
+                lam,
+            } => G::U {
+                qubit: *qubit,
+                theta: neg(theta)?,
+                phi: neg(lam)?,
+                lam: neg(phi)?,
+            },
+            G::UGate {
+                qubit,
+                theta,
+                phi,
+                lam,
+            } => G::UGate {
+                qubit: *qubit,
+                theta: neg(theta)?,
+                phi: neg(lam)?,
+                lam: neg(phi)?,
+            },
+            G::U2 { qubit, phi, lam } => G::U {
+                qubit: *qubit,
+                theta: GateParam::Fixed(-std::f64::consts::FRAC_PI_2),
+                phi: neg(lam)?,
+                lam: neg(phi)?,
+            },
+            G::Cu3 {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+            } => G::Cu3 {
+                control: *control,
+                target: *target,
+                theta: neg(theta)?,
+                phi: neg(lam)?,
+                lam: neg(phi)?,
+            },
+            G::Cu {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+                gamma,
+            } => G::Cu {
+                control: *control,
+                target: *target,
+                theta: neg(theta)?,
+                phi: neg(lam)?,
+                lam: neg(phi)?,
+                gamma: neg(gamma)?,
+            },
+            G::Csx(control, target) => {
+                out.extend([
+                    G::H(*target),
+                    G::Cp {
+                        q0: *control,
+                        q1: *target,
+                        theta: GateParam::Fixed(-std::f64::consts::FRAC_PI_2),
+                    },
+                    G::H(*target),
+                ]);
+                return Ok(());
+            }
+            G::Rc3x(..) | G::C3sqrtx(..) => {
+                for part in self.lowering().into_iter().flatten().rev() {
+                    part.push_inverse(position, out)?;
+                }
+                return Ok(());
+            }
+            G::Custom(_) => return Err(not_invertible("a call of a declared gate")),
+            G::Measure { .. } => return Err(not_invertible("measure")),
+            G::MeasureAll => return Err(not_invertible("measure_all")),
+        };
+        out.push(inverse);
+        Ok(())
+    }
+
     /// The exact decomposition of a composite `qelib1.inc` gate — `ccx`,
     /// `cswap`, `rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x` — into simpler
     /// instructions: the gate's own definition in `qelib1.inc` (with `u1`/`u2`
