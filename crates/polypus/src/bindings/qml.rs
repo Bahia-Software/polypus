@@ -2358,12 +2358,17 @@ fn run_exact_adjoint(
 /// `W`: `λ = O|ψ⟩` has every amplitude within `W` and `‖λ‖ ≤ W`; each gate of
 /// the sweep back is a unitary matrix-vector product, its outputs within the
 /// norm of its inputs (Cauchy–Schwarz on each row); and each derivative,
-/// `Im ⟨λ|P|ψ⟩` with no further factor, is within `‖λ‖·‖ψ‖ ≤ W`. What can grow
-/// is what the crate does with the derivatives afterwards: the sum over the
-/// gates that share a parameter, and the chain-rule factors of the inputs,
-/// which the contraction also computes, in another order. The factor 4 keeps
-/// that headroom on the scale of the bound, so near `f64::MAX` the product
-/// is the contraction's rather than an overflow of its own.
+/// `Im ⟨λ|P|ψ⟩` with no further factor, is within `‖λ‖·‖ψ‖ ≤ W`. So the
+/// simulator never overflows below the limit. What can still grow is what the
+/// crate does with the derivatives afterwards: the sum over the gates that
+/// share a parameter, and the chain-rule factors of the inputs, which the
+/// contraction also computes, in another order. The factor 4 is room for a
+/// few of those, not a guarantee: with more than 4 gates on one parameter, or
+/// chain-rule factors past 4, a product near `f64::MAX` can overflow on the
+/// combined path where the contraction would not, or the other way round. A
+/// cotangent within a few orders of magnitude of `f64::MAX` is not a practical
+/// case; the limit is there so that the simulator never sees a weight it
+/// refuses.
 ///
 /// [`DiagonalObservable::weight_bound`]: polypus_qml::DiagonalObservable::weight_bound
 const MAX_COMBINED_WEIGHT: f64 = f64::MAX / 4.0;

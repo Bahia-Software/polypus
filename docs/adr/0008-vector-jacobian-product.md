@@ -55,16 +55,18 @@ gain: the shift rule's circuits do not depend on the observables.
    (`SimError::NonFiniteWeight`), and near `f64::MAX` the derivatives' sums
    could overflow where the contraction does not. The binding tells by
    `DiagonalObservable::weight_bound()` (`Σ |c|`, a bound on every eigenvalue);
-   the simulator's sweep back and each derivative stay within that bound, and
-   the factor 4 leaves headroom for the sums over the gates that share a
-   parameter and the chain-rule factors. **The row** with such an observable
-   takes `qml.jacobian`'s adjoint runs, one per observable, and contracts
-   them, so the cotangent reaches the product exactly as through the
-   contraction; the other rows keep one run each. The route is decided **per
-   row, not per block**, because the blocks follow the host's cores: decided
-   per block, one row's `NaN` changed the last bits of the rows that shared
-   its block, differently on hosts with different core counts. The crate
-   gives each row's bound before any circuit is bound
+   the simulator's sweep back and each derivative stay within that bound. The
+   factor 4 is room for a few sums over the gates that share a parameter and
+   chain-rule factors, not a guarantee: past 4 of them a product near
+   `f64::MAX` can still overflow on one path and not the other, which no
+   practical cotangent comes near. **The row** with such an observable takes
+   `qml.jacobian`'s adjoint runs, one per observable, and contracts them, so
+   the cotangent reaches the product exactly as through the contraction; the
+   other rows keep one run each. The route is decided **per row, not per
+   block**, because the blocks follow the host's cores: decided per block,
+   one row's `NaN` changed the last bits of the rows that shared its block,
+   differently on hosts with different core counts. The crate gives each
+   row's bound before any circuit is bound
    (`JacobianBlock::vjp_weight_bounds`), so each row's runs are built once
    (decided during the implementation of #559; the overflow and the margin
    found in its review, the per-row route in the PR's review).

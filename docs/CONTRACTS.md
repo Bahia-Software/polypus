@@ -2697,14 +2697,14 @@ Python, for a training loop of the caller's own:
   vector-Jacobian product instead, **one adjoint run per row whatever the
   number of observables**, with the same fallback to the shifted circuits. A
   row whose combined observable cannot be weighed safely — a non-finite value
-  in its row of `v`, or a `weight_bound` past `f64::MAX / 4`, so that
-  neither the weight nor the derivatives overflow (the simulator's sweep and
-  each derivative stay within the bound; the factor 4 leaves headroom for the
-  sums over the gates that share a parameter and the chain-rule factors) —
-  takes `jacobian`'s runs, one per observable, and contracts them, so its
-  result is still the contraction. The route is decided **per row**, never
-  per block, so a row's product does not depend on the others' nor on the
-  blocks.
+  in its row of `v`, or a `weight_bound` past `f64::MAX / 4`, so that the
+  simulator never sees a weight it refuses (its sweep and each derivative stay
+  within the bound; the factor 4 is room for a few sums over the gates that
+  share a parameter and chain-rule factors, not a guarantee against an
+  overflow of the product near `f64::MAX`) — takes `jacobian`'s runs, one per
+  observable, and contracts them, so its result is still the contraction. The
+  route is decided **per row**, never per block, so a row's product does not
+  depend on the others' nor on the blocks.
 - **Execution.** One backend and one scheduler per call — one connection, one
   `qraise` on CUNQA — closed on every way out, errors and Ctrl+C included. The
   rows run in sequential blocks, each bound, run and dropped before the next
