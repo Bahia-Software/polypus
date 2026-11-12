@@ -168,6 +168,9 @@ Entries were curated from the Conventional Commits history. Releases before
   Hygiene checks the queue's candidate commit against `main` with the public
   rules; SonarQube Cloud skips its jobs there, since the quality gate already
   ran on the pull request and the push to `main` reports on the merged commit.
+- CUNQA: the seal looks up a family's QPUs with `get_QPUs` once instead of
+  once per wave, and looks them up again after `qdrop` or a failed wave
+  (#437).
 
 ### Fixed
 - `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a
