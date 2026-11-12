@@ -2723,7 +2723,8 @@ Python, for a training loop of the caller's own:
   of them (for `vjp`'s `"params"`, which sums over the rows, their sum, to
   rounding: the rows are summed in row order whatever the blocks).
 - **Checks.** Every one runs before a backend exists and raises
-  `polypus.ConfigurationError`, in order: `wrt`; `shots` and `n_qpus`, the
+  `polypus.ConfigurationError`, the cotangent's values excepted (`x`'s
+  `TypeError`, below), in order: `wrt`; `shots` and `n_qpus`, the
   CUNQA allocation and `exact`; the rows against the model; `params`; for
   `vjp`, the `cotangent` (its rows not ragged, real, then its shape, the
   error naming the expected and the received one; then each value read as a

@@ -3043,7 +3043,8 @@ fn cotangent_values(
 ///   [`jacobian`]'s, with its rules.
 ///
 /// Every check runs before a backend exists and raises
-/// `polypus.ConfigurationError` (a `ValueError`).
+/// `polypus.ConfigurationError` (a `ValueError`), except a cotangent value
+/// that is not a real number: the `TypeError` `x` raises for one.
 #[pyfunction(name = "vjp", signature = (
     model, x, params, cotangent, *, wrt="params", shots=1024, infrastructure="local", n_qpus=1,
     nodes=1, cores_per_qpu=2, walltime=None, options=None, sim_method="automatic",
