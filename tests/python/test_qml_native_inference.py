@@ -341,6 +341,87 @@ class TestSaveLoadStronglyEntangling:
             load(path)
 
 
+def _simplified_two_design_trained(num_qubits=4, reps=2):
+    """A simplified 2-design over ``num_qubits`` qubits: 4 + 2·3·2 = 16
+    parameters by default."""
+    from polypus.qml import Ansatz, Encoder
+
+    model = make_model(
+        num_qubits=num_qubits,
+        encoder=Encoder(num_qubits).angle_encoder("ry"),
+        ansatz=Ansatz(num_qubits).simplified_two_design(reps),
+    )
+    return model.bind([0.1 + 0.37 * i for i in range(model.num_params)])
+
+
+def _simplified_two_design_entry(saved):
+    """The simplified 2-design layer of a saved spec."""
+    (entry,) = [
+        layer["SimplifiedTwoDesign"]
+        for layer in saved["spec"]["layers"]
+        if "SimplifiedTwoDesign" in layer
+    ]
+    return entry
+
+
+class TestSaveLoadSimplifiedTwoDesign:
+    _ROWS = [[0.3, 1.2, 0.7, 2.0], [2.0, 0.4, 1.1, 0.2], [1.1, 2.9, 0.5, 1.6]]
+
+    def test_round_trip_predicts_identically(self, tmp_path):
+        import json
+
+        from polypus.qml import load
+
+        trained = _simplified_two_design_trained()
+        path = tmp_path / "model.json"
+        trained.save(path)
+        saved = json.loads(path.read_text())
+        assert saved["version"] == 1
+        assert _simplified_two_design_entry(saved) == {"reps": 2}
+        loaded = load(path)
+        assert len(loaded.params) == 16
+        assert loaded.params == trained.params
+        assert loaded.predict(self._ROWS, exact=True) == trained.predict(
+            self._ROWS, exact=True
+        )
+        assert (
+            loaded.run(self._ROWS, exact=True).probabilities
+            == trained.run(self._ROWS, exact=True).probabilities
+        )
+
+    def test_an_edited_reps_too_large_to_count_is_rejected(self, tmp_path):
+        import json
+
+        from polypus.qml import load
+
+        path = tmp_path / "model.json"
+        _simplified_two_design_trained().save(path)
+        saved = json.loads(path.read_text())
+        # 2 × 3 pairs × 2**62 blocks do not fit in a usize.
+        _simplified_two_design_entry(saved)["reps"] = 2**62
+        path.write_text(json.dumps(saved))
+        with pytest.raises(ValueError, match="layer 1 needs more trainable parameters"):
+            load(path)
+
+    def test_a_single_qubit_loads_any_reps(self, tmp_path):
+        import json
+
+        from polypus.qml import load
+
+        # One qubit has no pairs: the largest reps is still one parameter, and
+        # the loaded model predicts at once, as with no blocks at all.
+        trained = _simplified_two_design_trained(num_qubits=1, reps=0)
+        path = tmp_path / "model.json"
+        trained.save(path)
+        saved = json.loads(path.read_text())
+        _simplified_two_design_entry(saved)["reps"] = 2**64 - 1
+        path.write_text(json.dumps(saved))
+        loaded = load(path)
+        assert len(loaded.params) == 1
+        rows = [[0.3], [2.1]]
+        assert loaded.predict(rows, exact=True) == trained.predict(rows, exact=True)
+
+
 def json_dump(value):
     import json
 

@@ -184,6 +184,22 @@ fn strongly_entangling_with_explicit_ranges_and_cz_keeps_the_gradient_exact() {
     }
 }
 
+/// Every `Ry` of the simplified 2-design has its own parameter, and the `CZ`
+/// of the even and odd pairs carry every qubit's rotations into the `Z₁`
+/// light cone within two blocks. Five qubits give an odd `n`, whose last
+/// position is unpaired in the even pairs and paired in the odd ones.
+#[test]
+fn simplified_two_design_gradient_is_exact() {
+    for (num_qubits, reps) in [(4, 2), (4, 3), (5, 2)] {
+        for readout in [raw_readout(&[1]), raw_readout(&[0, 1, 2, 3])] {
+            let model = encoded(num_qubits)
+                .simplified_two_design(reps)
+                .readout(readout);
+            assert_gradient_is_exact(&problem(model, Loss::SquaredError, &REAL_LABELS));
+        }
+    }
+}
+
 #[test]
 fn stacked_iqp_encoders_around_an_ansatz_keep_the_gradient_exact() {
     let model = QuantumModel::new(4)
@@ -251,6 +267,20 @@ fn strongly_entangling_after_pooling_keeps_the_gradient_exact() {
             .conv(ConvBlock::Basic)
             .pool(PoolBlock::Basic)
             .strongly_entangling(2)
+            .readout(readout);
+        assert_gradient_is_exact(&problem(model, Loss::SquaredError, &REAL_LABELS));
+    }
+}
+
+/// The same behind the convolution and pooling: the layer runs over physical
+/// qubits 0 and 2, `n = 2`, one pair per block.
+#[test]
+fn simplified_two_design_after_pooling_keeps_the_gradient_exact() {
+    for readout in [raw_readout(&[1]), raw_readout(&[0, 1])] {
+        let model = encoded(4)
+            .conv(ConvBlock::Basic)
+            .pool(PoolBlock::Basic)
+            .simplified_two_design(2)
             .readout(readout);
         assert_gradient_is_exact(&problem(model, Loss::SquaredError, &REAL_LABELS));
     }

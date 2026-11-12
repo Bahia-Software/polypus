@@ -32,7 +32,8 @@ use polypus_qml::{
     AngleEncoder, CompiledModel, ConvBlock, ConvLayer, Decision, Entanglement, Entangler,
     ExpectationJacobian, HardwareEfficientAnsatz, IqpEncoder, JacobianWrt, KeepRule, Layer, Loss,
     Observable, Pairing, Pauli, PauliString, PoolBlock, PoolLayer, QmlError, QmlProblem,
-    QuantumModel, Readout, RotationAxis, StronglyEntanglingAnsatz, ValidationError,
+    QuantumModel, Readout, RotationAxis, SimplifiedTwoDesignAnsatz, StronglyEntanglingAnsatz,
+    ValidationError,
 };
 
 use super::callback::validate_callback;
@@ -687,6 +688,22 @@ impl Ansatz {
         Ok(slf)
     }
 
+    /// Append PennyLane's `SimplifiedTwoDesign`: an `Ry` on every active
+    /// qubit, then `reps` blocks that, over the even pairs `(0,1),(2,3),…` and
+    /// then the odd pairs `(1,2),(3,4),…` of the `n` qubits active at this
+    /// point, apply `CZ` followed by an `Ry` on each qubit of the pair. That is
+    /// `n + 2·(n−1)·reps` parameters; a single active qubit gets only the
+    /// initial `Ry`, whatever `reps`.
+    fn simplified_two_design(
+        mut slf: PyRefMut<'_, Self>,
+        reps: CountArg,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        let CountArg(reps) = reps;
+        let layer = Layer::SimplifiedTwoDesign(SimplifiedTwoDesignAnsatz::new(reps));
+        slf.stack.push(layer)?;
+        Ok(slf)
+    }
+
     /// Append a QCNN convolution: one `block` (`"basic"`, 4 parameters, or
     /// `"cartan"`, 3) shared by every pair of active qubits that `pairing`
     /// selects (`"even_pairs"`/`"odd_pairs"`/`"alternating"`, default
@@ -979,6 +996,7 @@ fn loads_data(layer: &Layer) -> bool {
         }
         Layer::HardwareEfficient(_)
         | Layer::StronglyEntangling(_)
+        | Layer::SimplifiedTwoDesign(_)
         | Layer::Conv(_)
         | Layer::Pool(_) => false,
     }
@@ -2810,6 +2828,23 @@ mod tests {
             .unwrap(),
             3 + 12
         );
+        // n + 2·(n−1)·reps: an initial Ry per qubit, two per pair per block.
+        let simplified = |reps| Layer::SimplifiedTwoDesign(SimplifiedTwoDesignAnsatz::new(reps));
+        assert_eq!(check_layers(3, &[simplified(2)]).unwrap(), 11);
+        assert_eq!(check_layers(4, &[simplified(2)]).unwrap(), 16);
+        assert_eq!(check_layers(5, &[simplified(1)]).unwrap(), 13);
+        assert_eq!(check_layers(3, &[simplified(0)]).unwrap(), 3);
+        // After pooling 4 → 2 qubits: the pooling's 3, then 2 + 2·1·2.
+        assert_eq!(
+            check_layers(
+                4,
+                &[Layer::Pool(PoolLayer::new(PoolBlock::Basic)), simplified(2)]
+            )
+            .unwrap(),
+            3 + 6
+        );
+        // One qubit has no pairs: one parameter, however many blocks.
+        assert_eq!(check_layers(1, &[simplified(usize::MAX)]).unwrap(), 1);
     }
 
     #[test]
@@ -2865,6 +2900,9 @@ mod tests {
         assert!(!loads_data(&Layer::StronglyEntangling(
             StronglyEntanglingAnsatz::new(1)
         )));
+        assert!(!loads_data(&Layer::SimplifiedTwoDesign(
+            SimplifiedTwoDesignAnsatz::new(1)
+        )));
         assert!(!loads_data(&Layer::Conv(ConvLayer::new(ConvBlock::Basic))));
         assert!(!loads_data(&Layer::Pool(PoolLayer::new(PoolBlock::Basic))));
     }
@@ -2896,6 +2934,9 @@ mod tests {
         assert!(check_layers(4, &[ranges(vec![1, 1])]).is_err());
         // 3 × 4 qubits × reps parameters that do not fit: an error, not a panic.
         let huge = Layer::StronglyEntangling(StronglyEntanglingAnsatz::new(usize::MAX / 4));
+        assert!(check_layers(4, &[huge]).is_err());
+        // 2 × 3 pairs × reps parameters that do not fit either.
+        let huge = Layer::SimplifiedTwoDesign(SimplifiedTwoDesignAnsatz::new(usize::MAX / 4));
         assert!(check_layers(4, &[huge]).is_err());
     }
 
@@ -2952,6 +2993,8 @@ mod tests {
         };
         // A huge `reps` on its own.
         let huge = Layer::HardwareEfficient(HardwareEfficientAnsatz::new(usize::MAX));
+        assert_eq!(message(&[huge]), too_many(0));
+        let huge = Layer::SimplifiedTwoDesign(SimplifiedTwoDesignAnsatz::new(usize::MAX));
         assert_eq!(message(&[huge]), too_many(0));
         // 2 × (2^63 − 1) parameters fit; a convolution or a pooling after them
         // does not.
