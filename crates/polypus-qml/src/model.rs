@@ -38,7 +38,8 @@ use crate::error::{QmlError, ValidationError};
 use crate::jacobian::{ExpectationJacobian, JacobianWrt};
 use crate::layers::{
     AmplitudeEncoder, AngleEncoder, BasisEncoder, ConvBlock, ConvLayer, HardwareEfficientAnsatz,
-    IqpEncoder, Layer, PoolBlock, PoolLayer, RotationAxis, StronglyEntanglingAnsatz,
+    IqpEncoder, Layer, PoolBlock, PoolLayer, RotationAxis, SimplifiedTwoDesignAnsatz,
+    StronglyEntanglingAnsatz,
 };
 use crate::observables::{BitstringWeight, Pauli, ResolvedObservable, ResolvedPauliString};
 use crate::readout::{Decision, Readout, ResolvedReadout};
@@ -271,6 +272,13 @@ impl QuantumModel {
     /// layers (PennyLane's default ranges, `Cx` entanglers).
     pub fn strongly_entangling(self, reps: usize) -> Self {
         self.layer(Layer::StronglyEntangling(StronglyEntanglingAnsatz::new(
+            reps,
+        )))
+    }
+
+    /// Sugar for [`SimplifiedTwoDesignAnsatz::new`] with `reps` blocks.
+    pub fn simplified_two_design(self, reps: usize) -> Self {
+        self.layer(Layer::SimplifiedTwoDesign(SimplifiedTwoDesignAnsatz::new(
             reps,
         )))
     }
@@ -1732,6 +1740,98 @@ mod serde_tests {
         })
         .unwrap();
         assert_eq!(loaded.params(), full_trained().params());
+    }
+
+    /// A small trained model whose trainable layer is a simplified 2-design
+    /// with `reps` blocks over `num_qubits` qubits.
+    fn simplified_two_design_trained(num_qubits: usize, reps: usize) -> TrainedModel {
+        let z0 =
+            Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())]).unwrap();
+        let spec = QuantumModel::new(num_qubits)
+            .angle_encoder(RotationAxis::Ry)
+            .simplified_two_design(reps)
+            .readout(Readout::new(vec![z0], Decision::Raw).unwrap());
+        let num_params = spec.clone().compile(0).unwrap().num_params();
+        let params = (0..num_params)
+            .map(|i| 0.1 * (i as f64 + 1.0) + 0.2 / 3.0)
+            .collect();
+        TrainedModel::new(spec, params).unwrap()
+    }
+
+    /// The simplified 2-design layer of a saved model, as JSON.
+    fn simplified_two_design_entry(value: &mut serde_json::Value) -> &mut serde_json::Value {
+        value["spec"]["layers"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find_map(|layer| layer.get_mut("SimplifiedTwoDesign"))
+            .expect("the model has a simplified 2-design layer")
+    }
+
+    #[test]
+    fn the_simplified_two_design_layer_round_trips() {
+        // 4 qubits, 2 blocks: 4 + 2·3·2 = 16 parameters.
+        let trained = simplified_two_design_trained(4, 2);
+        assert_eq!(trained.num_params(), 16);
+        let mut value = serde_json::to_value(&trained).unwrap();
+        assert_eq!(value["version"], 1);
+        assert_eq!(
+            *simplified_two_design_entry(&mut value),
+            serde_json::json!({"reps": 2})
+        );
+        let loaded: TrainedModel = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded, trained);
+        let x = vec![0.1, 0.2, 0.3, 0.4];
+        assert_eq!(
+            loaded
+                .compile(4)
+                .unwrap()
+                .bind(&x, loaded.params())
+                .unwrap(),
+            trained
+                .compile(4)
+                .unwrap()
+                .bind(&x, trained.params())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn loading_rejects_a_simplified_two_design_reps_too_large_to_count() {
+        // 2 × 3 pairs × (2^62) blocks overflow a usize on 4 qubits.
+        let mut value = serde_json::to_value(simplified_two_design_trained(4, 1)).unwrap();
+        simplified_two_design_entry(&mut value)["reps"] = serde_json::json!(1_usize << 62);
+        let err = serde_json::from_value::<TrainedModel>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("layer 1 needs more trainable parameters"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_single_qubit_simplified_two_design_loads_any_reps() {
+        // No pairs on one qubit: any `reps` is the one initial weight, and the
+        // model binds without iterating the blocks.
+        let mut value = serde_json::to_value(simplified_two_design_trained(1, 1)).unwrap();
+        simplified_two_design_entry(&mut value)["reps"] = serde_json::json!(usize::MAX);
+        let loaded: TrainedModel = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.num_params(), 1);
+        let circuit = loaded
+            .compile(1)
+            .unwrap()
+            .bind(&[0.3], loaded.params())
+            .unwrap();
+        assert_eq!(
+            circuit.gates(),
+            simplified_two_design_trained(1, 0)
+                .compile(1)
+                .unwrap()
+                .bind(&[0.3], loaded.params())
+                .unwrap()
+                .gates()
+        );
     }
 
     #[test]

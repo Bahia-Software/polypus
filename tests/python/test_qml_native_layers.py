@@ -288,6 +288,155 @@ class TestStronglyEntangling:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Simplified 2-design ansatz
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# Written out, not computed, so the oracle does not share the layer's pairing:
+# the even pairs (0,1),(2,3),… and then the odd pairs (1,2),(3,4),….
+_PAIRS = {
+    1: [],
+    2: [(0, 1)],
+    3: [(0, 1), (1, 2)],
+    4: [(0, 1), (2, 3), (1, 2)],
+    5: [(0, 1), (2, 3), (1, 2), (3, 4)],
+}
+
+
+def _simplified_two_design_circuit(sample, params, num_qubits, reps, qubits=None):
+    """The bound circuit of an ``angle_encoder("ry")`` + ``simplified_two_design``
+    model, built gate by gate with ``polypus.Circuit``: ``ry`` on every active
+    qubit, then per block and pair ``cz``, ``ry`` on the first qubit and ``ry``
+    on the second. ``qubits`` maps logical positions to physical qubits
+    (``None``: all of them, in order)."""
+    import polypus
+
+    qubits = qubits or list(range(num_qubits))
+    qc = polypus.Circuit(num_qubits)
+    for qubit, x in enumerate(sample):
+        qc.ry(qubit, x)
+    angles = iter(params)
+    for qubit in qubits:
+        qc.ry(qubit, next(angles))
+    for _ in range(reps):
+        for a, b in _PAIRS[len(qubits)]:
+            qc.cz(qubits[a], qubits[b])
+            qc.ry(qubits[a], next(angles))
+            qc.ry(qubits[b], next(angles))
+    return qc.measure_all()
+
+
+def _gate_lines(qasm):
+    """The ``cz`` and ``ry`` lines of a QASM program, in order."""
+    return [line for line in qasm.splitlines() if line.startswith(("cz", "ry"))]
+
+
+class TestSimplifiedTwoDesign:
+    """``simplified_two_design`` is PennyLane's ``SimplifiedTwoDesign``: an
+    initial ``Ry`` layer and ``reps`` blocks of ``CZ`` + ``Ry`` on the even and
+    then the odd pairs, ``n + 2·(n−1)·reps`` parameters."""
+
+    @pytest.mark.parametrize(
+        ("num_qubits", "reps"),
+        [(4, 1), (4, 2), (2, 2), (3, 1), (5, 2), (1, 3), (3, 0)],
+        ids=["n4", "n4-two-blocks", "n2", "n3", "n5", "n1", "reps0"],
+    )
+    def test_the_circuit_is_gate_for_gate(self, num_qubits, reps):
+        sample = [0.1 * (j + 1) for j in range(num_qubits)]
+        model = _raw_model(num_qubits, lambda a: a.simplified_two_design(reps))
+        params = [0.05 * (i + 1) for i in range(model.num_params)]
+        expected = _simplified_two_design_circuit(sample, params, num_qubits, reps)
+        assert model.circuit(sample, params).to_qasm2() == expected.to_qasm2()
+
+    def test_the_parameters_follow_pennylane_s_order(self):
+        # Spelled out for n = 4, one block: the initial weights, then two per
+        # pair in the order (0,1), (2,3), (1,2).
+        import polypus
+
+        params = [0.1 * (i + 1) for i in range(10)]
+        model = _raw_model(4, lambda a: a.simplified_two_design(1))
+        qc = polypus.Circuit(4)
+        for qubit in range(4):
+            qc.ry(qubit, 0.0)
+        for qubit in range(4):
+            qc.ry(qubit, params[qubit])
+        for (a, b), k in (((0, 1), 4), ((2, 3), 6), ((1, 2), 8)):
+            qc.cz(a, b)
+            qc.ry(a, params[k])
+            qc.ry(b, params[k + 1])
+        expected = qc.measure_all()
+        assert model.circuit([0.0] * 4, params).to_qasm2() == expected.to_qasm2()
+
+    def test_after_pooling_the_gates_land_on_the_active_qubits(self):
+        # Pooling 6 → 3 keeps physical qubits 0, 2 and 4: the layer's pairs are
+        # (0,2) and then (2,4), and its parameters follow the pooling's 3.
+        from polypus.qml import Ansatz, Encoder, Model, Readout, Z
+
+        model = Model(
+            Encoder(6).angle_encoder("ry"),
+            Ansatz(6).pool("basic").simplified_two_design(1),
+            Readout([Z(0)]),
+        )
+        assert model.num_params == 3 + 3 + 4
+        sample = [0.1 * (j + 1) for j in range(6)]
+        params = [0.05 * (i + 1) for i in range(model.num_params)]
+        layer = _gate_lines(
+            _simplified_two_design_circuit(
+                [], params[3:], 6, 1, qubits=[0, 2, 4]
+            ).to_qasm2()
+        )
+        # The layer's gates close the circuit, after the encoder and pooling.
+        actual = _gate_lines(model.circuit(sample, params).to_qasm2())
+        assert len(layer) == 3 + 2 * 3
+        assert actual[-len(layer) :] == layer
+
+    def test_the_count_is_n_plus_two_per_pair_per_block(self):
+        from polypus.qml import Ansatz
+
+        _assert_param_count(_raw_model(3, lambda a: a.simplified_two_design(2)), 11)
+        _assert_param_count(_raw_model(4, lambda a: a.simplified_two_design(2)), 16)
+        _assert_param_count(_raw_model(5, lambda a: a.simplified_two_design(1)), 13)
+        _assert_param_count(_raw_model(2, lambda a: a.simplified_two_design(1)), 4)
+        # After pooling, n is the qubits still active: 4 → 2.
+        assert Ansatz(4).pool("basic").simplified_two_design(1).num_params == 3 + 4
+        assert Ansatz(3).simplified_two_design(0).num_params == 3
+
+    def test_a_single_qubit_has_one_parameter_whatever_the_reps(self):
+        from polypus.qml import Ansatz
+
+        _assert_param_count(_raw_model(1, lambda a: a.simplified_two_design(3)), 1)
+        # No pairs, so no block is ever built: even the largest reps is instant.
+        assert Ansatz(1).simplified_two_design(2**64 - 1).num_params == 1
+        model = _raw_model(1, lambda a: a.simplified_two_design(2**64 - 1))
+        _assert_param_count(model, 1)
+        expected = _simplified_two_design_circuit([0.3], [0.5], 1, 0)
+        assert model.circuit([0.3], [0.5]).to_qasm2() == expected.to_qasm2()
+
+    def test_invalid_counts_are_value_errors(self):
+        from polypus.qml import Ansatz
+
+        ansatz = Ansatz(2).real_amplitudes(1)
+        for reps, match in (
+            (-1, "non-negative integer, got -1"),
+            (2**64, f"got {2**64}"),
+            (2**70, f"got {2**70}"),
+            # 2 × 1 pair × (2**64 − 1) parameters do not fit in a usize.
+            (2**64 - 1, "layer 1 needs more trainable"),
+        ):
+            with pytest.raises(ValueError, match=match):
+                ansatz.simplified_two_design(reps)
+            assert (ansatz.num_layers, ansatz.num_params) == (1, 4)
+        # Another type keeps its `TypeError`.
+        with pytest.raises(TypeError):
+            ansatz.simplified_two_design("3")
+
+    def test_it_is_an_ansatz_layer_only(self):
+        from polypus.qml import Encoder
+
+        assert not hasattr(Encoder(2), "simplified_two_design")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Encoders
 # ─────────────────────────────────────────────────────────────────────────────
 
