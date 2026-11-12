@@ -334,11 +334,6 @@ class TestNativeQmlChecksRaiseIt:
                 id="vjp-cotangent-1d",
             ),
             pytest.param(
-                lambda: _primitive("vjp", cotangent=[["a"]] * 6),
-                "float64",
-                id="vjp-cotangent-not-numbers",
-            ),
-            pytest.param(
                 lambda: _primitive("vjp", cotangent=[[1.0 + 2.0j]] * 6),
                 "real values",
                 id="vjp-cotangent-complex",
@@ -400,6 +395,17 @@ class TestNativeQmlChecksRaiseIt:
             _primitive("vjp", **{**later, **earlier})
         if match is None:
             assert "cotangent" not in str(raised.value)
+        assert fake.calls == []
+
+    def test_vjp_reads_the_cotangent_values_as_x_before_any_cunqa_call(
+        self, monkeypatch
+    ):
+        # A value that is not a real number is the `TypeError` `x` raises for
+        # one (DBFerPra's review of #577), still before any backend exists.
+        fake = FakeCunqa().install(monkeypatch)
+        for bad in ([["a"]] * 6, [[None]] * 6):
+            with pytest.raises(TypeError, match="cotangent must hold real numbers"):
+                _primitive("vjp", cotangent=bad)
         assert fake.calls == []
 
     def test_vjp_takes_the_model_type_error_first(self, monkeypatch):

@@ -9,9 +9,9 @@ the Jacobian takes. With ``exact=True`` it comes from one adjoint run per row
 whatever the number of observables, so it is the contraction to rounding
 (``TOLERANCE``); with shots it runs ``jacobian``'s circuits, so with the same
 ``seed`` it is the contraction of that seed's Jacobian, to rounding too. The
-cotangent is checked for being real and for its shape only: a ``NaN`` or an
-infinity propagates as it does through the contraction. Every check runs before
-a backend exists.
+cotangent is checked for its shape and for being real, its values read as
+``x``'s are; a ``NaN`` or an infinity propagates as it does through the
+contraction. Every check runs before a backend exists.
 """
 
 import math
@@ -305,17 +305,72 @@ class TestCotangent:
         ):
             qml.vjp(model, ROWS, point(model), bad(v), exact=True)
 
-    def test_values_that_are_not_numbers_are_a_configuration_error(self):
-        # Strings, ragged rows and objects NumPy cannot read as a float64
-        # array. (NumPy reads `None` as `NaN`, which then propagates.)
+    def test_ragged_rows_are_a_configuration_error(self):
         model = self._model()
-        for bad in [
-            [["a"] * 3] * 3,
-            [[1.0, 2.0, 3.0]] * 2 + [[1.0]],
-            [[object()] * 3] * 3,
-        ]:
-            with pytest.raises(polypus.ConfigurationError, match="cotangent"):
-                qml.vjp(model, ROWS, point(model), bad, exact=True)
+        ragged = [[1.0, 2.0, 3.0]] * 2 + [[1.0]]
+        with pytest.raises(polypus.ConfigurationError, match="cotangent"):
+            qml.vjp(model, ROWS, point(model), ragged, exact=True)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            True,
+            1,
+            np.int64(2),
+            np.float32(0.5),
+            np.bool_(False),
+            "0.5",
+            np.str_("0.5"),
+            None,
+            object(),
+        ],
+        ids=repr,
+    )
+    @pytest.mark.parametrize("as_array", [False, True], ids=["lists", "array"])
+    def test_the_cotangent_takes_the_values_x_takes(self, value, as_array):
+        # DBFerPra's review of #577: the cotangent went through
+        # `numpy.asarray(..., "float64")`, which read "0.5" as 0.5 and None as
+        # NaN where `x` raises a `TypeError`. Each value is now accepted or
+        # refused exactly as `x` accepts or refuses it, a `bool` included.
+        model = self._model()
+
+        def filled(columns):
+            rows = [[value] * columns for _ in ROWS]
+            return np.array(rows) if as_array else rows
+
+        def outcome(call):
+            try:
+                return call()
+            except TypeError as error:
+                return type(error)
+
+        x_reads = outcome(
+            lambda: qml.expval(model, filled(4), point(model), exact=True)
+        )
+        v_reads = outcome(
+            lambda: qml.vjp(model, ROWS, point(model), filled(3), exact=True)
+        )
+        assert (x_reads is TypeError) == (v_reads is TypeError)
+        if v_reads is TypeError:
+            with pytest.raises(TypeError, match="cotangent must hold real numbers"):
+                qml.vjp(model, ROWS, point(model), filled(3), exact=True)
+        else:
+            # The same product as the value read as a float.
+            as_float = np.full((len(ROWS), 3), float(value))
+            assert np.array_equal(
+                v_reads, qml.vjp(model, ROWS, point(model), as_float, exact=True)
+            )
+
+    def test_numpy_errors_other_than_the_structure_propagate(self):
+        # Only NumPy's `ValueError` (ragged rows) is the cotangent's
+        # `ConfigurationError`; a `MemoryError` stays one.
+        class Exhausting:
+            def __array__(self, dtype=None, copy=None):
+                raise MemoryError("no room")
+
+        model = self._model()
+        with pytest.raises(MemoryError, match="no room"):
+            qml.vjp(model, ROWS, point(model), Exhausting(), exact=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -83,9 +83,10 @@ Entries were curated from the Conventional Commits history. Releases before
   which now calls it, is up to `K` times cheaper for a `K`-observable readout;
   with shots it runs `qml.jacobian`'s circuits and gives its contraction for
   the same `seed`. The cotangent's shape is checked right after `params` (a
-  `polypus.ConfigurationError`, as is a complex one); a `NaN` or an infinity
-  in it propagates as through the contraction, and changes only its own
-  row's route. `qml.jacobian` does not change. In `polypus-qml`:
+  `polypus.ConfigurationError`, as is a complex one) and its values are read
+  as `x`'s are (a string or `None` is the same `TypeError`); a `NaN` or an
+  infinity in it propagates as through the contraction, and changes only its
+  own row's route. `qml.jacobian` does not change. In `polypus-qml`:
   `Jacobian::vjp`, `JacobianBlock::vjp_runs`/`num_vjp_runs`/
   `vjp_weight_bounds`/`vjp_from_adjoint` (and
   `ExpectationJacobian`'s), `Vjp` and `DiagonalObservable::weight_bound`.

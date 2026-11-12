@@ -36,11 +36,13 @@ gain: the shift rule's circuits do not depend on the observables.
    `einsum`s computed: `wrt="params"` → `float64` `(num_params,)`, **summed
    over the rows**; `"inputs"` → `(rows, features)`; `"both"` → the tuple, each
    identical to its separate call. C-contiguous; `wrt` as in `qml.jacobian`.
-3. **The cotangent is checked for its shape only.** It must be exactly
-   `(rows, observables)` and convertible to `float64` (a
-   `polypus.ConfigurationError` otherwise, checked right after `params`); a
-   `NaN` or an infinity is **accepted and propagates** as it does through the
-   contraction of `qml.jacobian`'s result.
+3. **The cotangent is checked for its shape, and its values are read as
+   `x`'s are.** It must be exactly `(rows, observables)` and real (a
+   `polypus.ConfigurationError` otherwise, checked right after `params`), each
+   value a real number as `x` takes it, a `bool` included (a string, `None` or
+   another object is the `TypeError` `x` raises); a `NaN` or an infinity is
+   **accepted and propagates** as it does through the contraction of
+   `qml.jacobian`'s result.
 4. **Exactly, one adjoint run per row;** with shots (and in the fallback when
    the memory budget holds one statevector but not two), `qml.jacobian`'s
    circuits, each block's Jacobian contracted with the block's cotangent: with
@@ -105,9 +107,11 @@ gain: the shift rule's circuits do not depend on the observables.
   sums over one combined observable rather than per observable.
 - `qml.vjp` is one more entry point with a `seed` (C-7) and one more check in
   C-11's order (the cotangent, after `params`).
-- NumPy reads `None` as `NaN`, so a `None` in the cotangent is a `NaN` that
-  propagates rather than an error. A complex cotangent is refused, rather
-  than converted with its imaginary part dropped.
+- The cotangent takes the values `x` takes, no more: a string, `None` or
+  another object is a `TypeError`, as in `x`, rather than what
+  `numpy.asarray(..., "float64")` would make of it (`"0.5"` read as `0.5`,
+  `None` as `NaN`). A complex cotangent is refused, rather than converted
+  with its imaginary part dropped.
 
 ## Reopening criteria
 

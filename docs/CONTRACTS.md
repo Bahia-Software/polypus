@@ -2656,11 +2656,13 @@ Python, for a training loop of the caller's own:
   arguments are `TrainedModel.run`'s, keyword-only, with its rules: `exact`
   needs `infrastructure="local"` and `backend="polypus"`, `backend=None` goes
   by infrastructure, `seed` is drawn when omitted and refused on `qmio` (C-7).
-  `vjp`'s `cotangent`, `v`, is anything `numpy.asarray(cotangent, "float64")`
-  takes (rows as lists or tuples, a NumPy array of any real dtype; a complex
-  one is refused rather than losing its imaginary part) of shape
-  exactly `(rows, observables)`, the rows of `x` and the model's observables;
-  its values are taken as they are: a `NaN` or an infinity is not refused.
+  `vjp`'s `cotangent`, `v`, is rows as lists or tuples, or a NumPy array, of
+  shape exactly `(rows, observables)`, the rows of `x` and the model's
+  observables; a complex one is refused rather than losing its imaginary
+  part. Its values are read as `x`'s are, each a real number (a `bool`
+  included; a real or boolean NumPy dtype is converted to `float64`), so a
+  string, `None` or another object is the `TypeError` `x` raises for it; a
+  `NaN` or an infinity is taken as it is, not refused.
 - **Results.** `float64` `numpy.ndarray`s, C-contiguous, rows in row order:
   `expval` → `(rows, observables)` with every readout observable, whatever the
   decision (one column per class for `"argmax"`, the weighted sum for an
@@ -2723,10 +2725,12 @@ Python, for a training loop of the caller's own:
 - **Checks.** Every one runs before a backend exists and raises
   `polypus.ConfigurationError`, in order: `wrt`; `shots` and `n_qpus`, the
   CUNQA allocation and `exact`; the rows against the model; `params`; for
-  `vjp`, the `cotangent` (real, convertible to `float64`, then its shape, the
-  error naming the expected and the received one); the model and rows against
-  `wrt` ((g)'s errors); a `seed` on `qmio`. The `TypeError` for `model` comes
-  first.
+  `vjp`, the `cotangent` (its rows not ragged, real, then its shape, the
+  error naming the expected and the received one; then each value read as a
+  number, a `TypeError` as for `x`); the model and rows against `wrt` ((g)'s
+  errors); a `seed` on `qmio`. The `TypeError` for `model` comes first. Only
+  NumPy's `ValueError` becomes the cotangent's `ConfigurationError`; any other
+  exception of NumPy's (a `MemoryError`) propagates as it is.
 
 **The PyTorch layer (`polypus.torch`).** `polypus.torch.QuantumLayer(model, *,
 initial_params=None, <qml.expval's execution arguments>)` is a
@@ -2884,7 +2888,8 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   readout and input encoder, exact and with the same seed, chunks, one
   observable, a zero, a non-finite, an overflowing, a complex and a wrongly
   shaped cotangent, a row that cannot be combined leaving the others bit for
-  bit, every rejection),
+  bit, the cotangent taking exactly the values `x` takes, NumPy's other
+  errors propagating, every rejection),
   `test_torch_quantum_layer.py` (the PyTorch layer: forward bit for bit
   `expval` in one call per batch, `gradcheck` with default tolerances for the
   parameters and the inputs, the backward pass the same by the adjoint and by

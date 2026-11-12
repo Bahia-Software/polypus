@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use numpy::ndarray::{Array2, Array3, ShapeError};
-use numpy::{IntoPyArray, PyArray2, PyReadonlyArrayDyn, PyUntypedArrayMethods};
+use numpy::{IntoPyArray, PyArray2, PyReadonlyArrayDyn};
 use pyo3::exceptions::{
     PyFileNotFoundError, PyOSError, PyOverflowError, PyPermissionError, PyRuntimeError,
     PyTypeError, PyValueError,
@@ -2921,11 +2921,19 @@ fn shape_repr(shape: &[usize]) -> String {
 }
 
 /// `qml.vjp`'s `cotangent` as its `rows · observables` values, row-major: the
-/// check that follows `params` (C-11). Anything `numpy.asarray(cotangent,
-/// "float64")` takes — rows as lists or tuples, a NumPy array of any real
-/// dtype — of shape exactly `(rows, observables)`; its values as they are,
-/// non-finite ones included. Complex values, not convertible, or another
-/// shape, is a `polypus.ConfigurationError` naming the expected shape.
+/// check that follows `params` (C-11). Its values are read as `x`'s are (each
+/// a real number, a `bool` included), so the two take the same values:
+///
+/// - **Structure first**, through `numpy.asarray(cotangent)`: rows as lists or
+///   tuples, or a NumPy array. Ragged rows (NumPy's `ValueError`) or a shape
+///   other than `(rows, observables)` is a `polypus.ConfigurationError` naming
+///   the expected shape; a complex dtype too, rather than losing the
+///   imaginary part in the conversion. Any other exception of NumPy's (a
+///   `MemoryError`, say) propagates as it is.
+/// - **Then the values**: a real or boolean dtype is converted to `float64`
+///   in one go; any other (strings, objects such as `None`) is read value by
+///   value as `x` is, so a value that is not a real number is the `TypeError`
+///   `x` raises for it. Non-finite values are taken as they are.
 fn cotangent_values(
     cotangent: &Bound<'_, PyAny>,
     rows: usize,
@@ -2933,18 +2941,18 @@ fn cotangent_values(
 ) -> PyResult<Vec<f64>> {
     let py = cotangent.py();
     let expected = shape_repr(&[rows, observables]);
-    let not_an_array = |e: PyErr| {
-        configuration_error(format!(
-            "cotangent must be a (rows, observables) = {expected} array of float64 values: {}",
-            e.value(py)
-        ))
-    };
     let numpy = py.import("numpy")?;
-    // Read as it is first: a complex cotangent would lose its imaginary part
-    // in the conversion, with only NumPy's warning to say so.
-    let as_is = numpy
-        .call_method1("asarray", (cotangent,))
-        .map_err(not_an_array)?;
+    let as_is = numpy.call_method1("asarray", (cotangent,)).map_err(|e| {
+        if e.is_instance_of::<PyValueError>(py) {
+            configuration_error(format!(
+                "cotangent must be a (rows, observables) = {expected} array of real \
+                 numbers: {}",
+                e.value(py)
+            ))
+        } else {
+            e
+        }
+    })?;
     let kind: String = as_is.getattr("dtype")?.getattr("kind")?.extract()?;
     if kind == "c" {
         return Err(configuration_error(format!(
@@ -2952,22 +2960,35 @@ fn cotangent_values(
              complex ones"
         )));
     }
-    let array = numpy
-        .call_method1("asarray", (as_is, "float64"))
-        .and_then(|array| {
-            array
-                .extract::<PyReadonlyArrayDyn<'_, f64>>()
-                .map_err(PyErr::from)
-        })
-        .map_err(not_an_array)?;
-    let shape = array.shape();
+    let shape: Vec<usize> = as_is.getattr("shape")?.extract()?;
     if shape != [rows, observables] {
         return Err(configuration_error(format!(
             "cotangent must have shape (rows, observables) = {expected}, got {}",
-            shape_repr(shape)
+            shape_repr(&shape)
         )));
     }
-    Ok(array.as_array().iter().copied().collect())
+    if matches!(kind.as_str(), "f" | "i" | "u" | "b") {
+        let array = numpy
+            .call_method1("asarray", (as_is, "float64"))?
+            .extract::<PyReadonlyArrayDyn<'_, f64>>()?;
+        return Ok(array.as_array().iter().copied().collect());
+    }
+    // Strings, objects, dates: value by value, with `x`'s `TypeError` for the
+    // first that is not a real number.
+    as_is
+        .call_method0("ravel")?
+        .call_method0("tolist")?
+        .extract::<Vec<f64>>()
+        .map_err(|e| {
+            if e.is_instance_of::<PyTypeError>(py) {
+                PyTypeError::new_err(format!(
+                    "cotangent must hold real numbers, as x does: {}",
+                    e.value(py)
+                ))
+            } else {
+                e
+            }
+        })
 }
 
 /// `polypus.qml.vjp(model, x, params, cotangent, *, wrt="params", …)`: the
@@ -2981,9 +3002,10 @@ fn cotangent_values(
 ///   encoder is [`jacobian`]'s `polypus.ConfigurationError`); **`"both"`** the
 ///   tuple `(by_params, by_inputs)`, each identical to its separate call. Any
 ///   other `wrt` is a `polypus.ConfigurationError`.
-/// - **`cotangent`** is rows of real values or a 2-D NumPy array of a real
-///   dtype (complex is refused), of shape exactly `(rows, observables)`
-///   (otherwise a `polypus.ConfigurationError`), taken as it is: a `NaN` or an
+/// - **`cotangent`** is rows of real values or a 2-D NumPy array (complex is
+///   refused), of shape exactly `(rows, observables)` (otherwise a
+///   `polypus.ConfigurationError`), its values read as `x`'s are (a string or
+///   `None` is the same `TypeError`) and taken as they are: a `NaN` or an
 ///   infinity propagates to the product as it does through the contraction of
 ///   [`jacobian`].
 /// - **Circuits:** with `exact=True`, one adjoint differentiation per row,
