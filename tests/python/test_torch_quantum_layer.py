@@ -3,9 +3,9 @@
 "The PyTorch layer").
 
 The layer adds no quantum logic of its own: its forward pass must be, bit for
-bit, ``qml.expval`` over the whole batch in one call, and its backward pass the
-vector-Jacobian product of one ``qml.jacobian`` call that asks only for what
-needs a gradient. ``torch.autograd.gradcheck`` checks the gradients with its
+bit, ``qml.expval`` over the whole batch in one call, and its backward pass
+one ``qml.vjp`` call (#559) that asks only for what needs a gradient, never
+``qml.jacobian``. ``torch.autograd.gradcheck`` checks the gradients with its
 default tolerances, in exact mode, for the parameters and the inputs. Then the
 dtype and device at the boundary, the input shapes, the derived seeds, training
 inside ``torch.nn.Sequential`` with several ``torch.optim`` optimizers, and
@@ -95,16 +95,19 @@ def functional(layer):
 
 class Spy:
     """Wraps a `qml` primitive and records the keyword arguments and row count
-    of every call."""
+    of every call (and the cotangent of a `qml.vjp` call)."""
 
     def __init__(self, monkeypatch, name):
         self.inner = getattr(qml, name)
         self.calls = []
         monkeypatch.setattr(qml, name, self)
 
-    def __call__(self, model, x, params, **kwargs):
-        self.calls.append({"rows": len(x), **kwargs})
-        return self.inner(model, x, params, **kwargs)
+    def __call__(self, model, x, params, *cotangent, **kwargs):
+        call = {"rows": len(x), **kwargs}
+        if cotangent:
+            call["cotangent"] = np.array(cotangent[0])
+        self.calls.append(call)
+        return self.inner(model, x, params, *cotangent, **kwargs)
 
 
 def test_the_module_imports_the_real_torch():
@@ -175,7 +178,7 @@ class TestForward:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Backward: the vector-Jacobian product of one qml.jacobian call
+# Backward: one qml.vjp call
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -197,14 +200,23 @@ class TestBackward:
         x = rows(requires_grad=True)
         weights = torch.tensor([[1.0, -2.0, 0.5], [0.3, 0.0, 1.5], [-1.0, 2.0, 0.2]])
         (layer(x) * weights.double()).sum().backward()
-        by_params, by_inputs = qml.jacobian(
+        w = weights.double().numpy()
+        # Bit for bit what qml.vjp gives with the incoming gradient...
+        by_params, by_inputs = qml.vjp(
+            model, ROWS, point(model), w, wrt="both", exact=True
+        )
+        assert np.array_equal(layer.params.grad.numpy(), by_params)
+        assert np.array_equal(x.grad.numpy(), by_inputs)
+        # ...which is the Jacobian's contraction: exact either way, by one
+        # adjoint run per row instead of one per row and observable, so the
+        # sums run in another order and the last bits differ (#559).
+        j_params, j_inputs = qml.jacobian(
             model, ROWS, point(model), wrt="both", exact=True
         )
-        w = weights.double().numpy()
-        assert np.array_equal(
-            layer.params.grad.numpy(), np.einsum("bo,bok->k", w, by_params)
-        )
-        assert np.array_equal(x.grad.numpy(), np.einsum("bo,bof->bf", w, by_inputs))
+        expected_params = np.einsum("bo,bok->k", w, j_params)
+        expected_inputs = np.einsum("bo,bof->bf", w, j_inputs)
+        assert np.max(np.abs(layer.params.grad.numpy() - expected_params)) < 1e-9
+        assert np.max(np.abs(x.grad.numpy() - expected_inputs)) < 1e-9
 
     def test_the_backward_pass_is_the_same_by_the_adjoint_and_by_the_shift(self):
         # The exact gradient is the adjoint's, or the parameter shift's when
@@ -236,21 +248,26 @@ class TestBackward:
         model = models()["reuploading"]
         layer = QuantumLayer(model, initial_params=point(model), exact=True)
         layer.params.requires_grad_(params_grad)
-        spy = Spy(monkeypatch, "jacobian")
+        spy, jacobian = Spy(monkeypatch, "vjp"), Spy(monkeypatch, "jacobian")
         x = rows(requires_grad=x_grad)
         layer(x).sum().backward()
         assert [(call["wrt"], call["rows"]) for call in spy.calls] == [(wrt, len(ROWS))]
+        # The incoming gradient (all ones for a sum) is the cotangent.
+        assert np.array_equal(
+            spy.calls[0]["cotangent"], np.ones((len(ROWS), model.num_observables))
+        )
+        assert jacobian.calls == []
         assert (x.grad is not None) == x_grad
         assert (layer.params.grad is not None) == params_grad
 
     def test_nothing_is_asked_when_nothing_needs_a_gradient(self, monkeypatch):
         model = models()["angle-ry"]
         layer = QuantumLayer(model, exact=True).requires_grad_(False)
-        spy = Spy(monkeypatch, "jacobian")
+        spy, jacobian = Spy(monkeypatch, "vjp"), Spy(monkeypatch, "jacobian")
         assert not layer(rows()).requires_grad
         with torch.no_grad():
             assert not QuantumLayer(model, exact=True)(rows()).requires_grad
-        assert spy.calls == []
+        assert spy.calls == [] and jacobian.calls == []
 
     @pytest.mark.parametrize(
         ("encoder", "x", "name"),
@@ -360,7 +377,7 @@ class TestSeeds:
         assert not torch.equal(first[0][0], first[1][0])
 
     def test_each_call_gets_its_derived_seed(self, monkeypatch):
-        forward, backward = Spy(monkeypatch, "expval"), Spy(monkeypatch, "jacobian")
+        forward, backward = Spy(monkeypatch, "expval"), Spy(monkeypatch, "vjp")
         self._steps(self._layer(11))
         assert [c["seed"] for c in forward.calls] == [
             _derived(11, n, 0) for n in range(3)
@@ -381,7 +398,7 @@ class TestSeeds:
         assert not torch.equal(outputs[11][1][0], outputs[12][0][0])
 
     def test_without_a_seed_the_backend_draws_each_one(self, monkeypatch):
-        forward, backward = Spy(monkeypatch, "expval"), Spy(monkeypatch, "jacobian")
+        forward, backward = Spy(monkeypatch, "expval"), Spy(monkeypatch, "vjp")
         for output, x_grad, params_grad in self._steps(self._layer(None), n=2):
             assert output.shape == (len(ROWS), 2)
             assert torch.isfinite(params_grad).all()

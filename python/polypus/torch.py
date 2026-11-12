@@ -2,7 +2,7 @@
 
 :class:`QuantumLayer` is a ``torch.nn.Module`` whose trainable parameters are
 the model's: its forward pass is ``polypus.qml.expval`` over the batch and its
-backward pass ``polypus.qml.jacobian``, so it fits in a ``torch.nn.Sequential``
+backward pass ``polypus.qml.vjp``, so it fits in a ``torch.nn.Sequential``
 next to classical layers and trains with any ``torch.optim`` optimizer::
 
     from polypus import qml
@@ -30,14 +30,15 @@ PyTorch: import it as ``polypus.torch``.
   ``qml.expval`` call with the whole batch, with the layer's execution
   arguments, which are ``qml.expval``'s and are checked by it at the first
   forward pass.
-- **Backward.** One ``qml.jacobian`` call per backward pass, with respect to
-  what needs a gradient: the parameters, the inputs (an angle or IQP encoder;
-  an amplitude or basis encoder has no input gradient and raises
-  ``polypus.ConfigurationError``), or both. The gradients are the
-  vector-Jacobian products of the incoming gradient with that Jacobian: exact
-  with ``exact=True`` (by adjoint differentiation on the native simulator, or
-  the parameter shift when only one statevector fits in memory), unbiased
-  parameter-shift estimates with shots.
+- **Backward.** One ``qml.vjp`` call per backward pass, with the incoming
+  gradient as its cotangent and with respect to what needs a gradient: the
+  parameters, the inputs (an angle or IQP encoder; an amplitude or basis
+  encoder has no input gradient and raises ``polypus.ConfigurationError``), or
+  both. The gradients are the vector-Jacobian products of the incoming
+  gradient with the expectations' Jacobian: exact with ``exact=True`` (by
+  adjoint differentiation on the native simulator, one run per sample whatever
+  the number of observables, or the parameter shift when only one statevector
+  fits in memory), unbiased parameter-shift estimates with shots.
 - **dtype and device.** The quantum computation runs in ``float64`` on the CPU.
   The input is converted there at the boundary, and the output comes back in
   the input's dtype and device (``float64`` for a non-floating input), each
@@ -149,32 +150,30 @@ class _Expectation(torch.autograd.Function):
 def _vector_jacobian_product(
     ctx: Any, grad: torch.Tensor
 ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], None]:
-    """The gradients of ``_Expectation``'s inputs from one ``qml.jacobian``
-    call, ``None`` where no gradient is wanted."""
+    """The gradients of ``_Expectation``'s inputs from one ``qml.vjp`` call,
+    ``None`` where no gradient is wanted (and no call when none is)."""
     x, params = ctx.saved_tensors
     call: _Call = ctx.call
     wants_x, wants_params = ctx.needs_input_grad[0], ctx.needs_input_grad[1]
+    if not (wants_x or wants_params):
+        return None, None, None
     rows, theta = _float64(x), _float64(params)
     kwargs = {"seed": call.seed(_BACKWARD), **call.execution}
     # Only what needs a gradient is asked for: an amplitude or basis
     # encoder then raises only when the input's gradient is wanted.
+    g = _float64(grad)
     by_params = by_inputs = None
     if wants_x and wants_params:
-        by_params, by_inputs = qml.jacobian(
-            call.model, rows, theta, wrt="both", **kwargs
-        )
+        by_params, by_inputs = qml.vjp(call.model, rows, theta, g, wrt="both", **kwargs)
     elif wants_x:
-        by_inputs = qml.jacobian(call.model, rows, theta, wrt="inputs", **kwargs)
+        by_inputs = qml.vjp(call.model, rows, theta, g, wrt="inputs", **kwargs)
     else:
-        by_params = qml.jacobian(call.model, rows, theta, wrt="params", **kwargs)
-    g = _float64(grad)
+        by_params = qml.vjp(call.model, rows, theta, g, wrt="params", **kwargs)
     grad_x = grad_params = None
     if by_inputs is not None:
-        grad_x = torch.from_numpy(np.einsum("bo,bof->bf", g, by_inputs)).to(
-            dtype=x.dtype, device=x.device
-        )
+        grad_x = torch.from_numpy(by_inputs).to(dtype=x.dtype, device=x.device)
     if by_params is not None:
-        grad_params = torch.from_numpy(np.einsum("bo,bok->k", g, by_params)).to(
+        grad_params = torch.from_numpy(by_params).to(
             dtype=params.dtype, device=params.device
         )
     return grad_x, grad_params, None

@@ -134,4 +134,5 @@ nav:
           - adr/0005-registry-option-values.md
           - adr/0006-declared-classical-registers.md
           - adr/0007-native-qml.md
+          - adr/0008-vector-jacobian-product.md
   - Changelog: changelog.md

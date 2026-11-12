@@ -171,19 +171,23 @@ def _infer(entry_point, x=_UNSET, **kwargs):
     )
 
 
-def _primitive(entry_point, x=_UNSET, params=_UNSET, model=None, **kwargs):
+def _primitive(
+    entry_point, x=_UNSET, params=_UNSET, model=None, cotangent=_UNSET, **kwargs
+):
+    """`qml.<entry_point>` on CUNQA; `qml.vjp` gets a cotangent of ones of the
+    right shape unless one is given."""
     from qml_native_helpers import X, make_model
 
     model = model or make_model()
+    x = X if x is _UNSET else x
     kwargs.setdefault("infrastructure", "cunqa")
+    args = [model, x, [0.1] * model.num_params if params is _UNSET else params]
+    if entry_point == "vjp":
+        if cotangent is _UNSET:
+            cotangent = [[1.0] * model.num_observables for _ in range(len(x))]
+        args.append(cotangent)
     return getattr(polypus.qml, entry_point)(
-        model,
-        X if x is _UNSET else x,
-        [0.1] * model.num_params if params is _UNSET else params,
-        shots=16,
-        nodes=1,
-        cores_per_qpu=1,
-        **kwargs,
+        *args, shots=16, nodes=1, cores_per_qpu=1, **kwargs
     )
 
 
@@ -263,7 +267,7 @@ class TestNativeQmlChecksRaiseIt:
             ),
             *[
                 case
-                for entry in ("expval", "jacobian")
+                for entry in ("expval", "jacobian", "vjp")
                 for case in (
                     pytest.param(
                         lambda entry=entry: _primitive(entry, exact=True),
@@ -296,15 +300,48 @@ class TestNativeQmlChecksRaiseIt:
                     ),
                 )
             ],
+            *[
+                case
+                for entry in ("jacobian", "vjp")
+                for case in (
+                    pytest.param(
+                        lambda entry=entry: _primitive(entry, wrt="theta"),
+                        "unknown wrt",
+                        id=f"{entry}-wrt",
+                    ),
+                    pytest.param(
+                        lambda entry=entry: _primitive(
+                            entry, model=_amplitude_model(), wrt="inputs"
+                        ),
+                        "amplitude encoder",
+                        id=f"{entry}-amplitude-inputs",
+                    ),
+                )
+            ],
             pytest.param(
-                lambda: _primitive("jacobian", wrt="theta"),
-                "unknown wrt",
-                id="jacobian-wrt",
+                lambda: _primitive("vjp", cotangent=[[1.0]] * 5),
+                r"shape \(rows, observables\) = \(6, 1\), got \(5, 1\)",
+                id="vjp-cotangent-rows",
             ),
             pytest.param(
-                lambda: _primitive("jacobian", model=_amplitude_model(), wrt="inputs"),
-                "amplitude encoder",
-                id="jacobian-amplitude-inputs",
+                lambda: _primitive("vjp", cotangent=[[1.0, 1.0]] * 6),
+                r"= \(6, 1\), got \(6, 2\)",
+                id="vjp-cotangent-observables",
+            ),
+            pytest.param(
+                lambda: _primitive("vjp", cotangent=[1.0] * 6),
+                r"= \(6, 1\), got \(6,\)",
+                id="vjp-cotangent-1d",
+            ),
+            pytest.param(
+                lambda: _primitive("vjp", cotangent=[[1.0 + 2.0j]] * 6),
+                "real values",
+                id="vjp-cotangent-complex",
+            ),
+            pytest.param(
+                lambda: _primitive("vjp", cotangent=[[1.0]] * 5 + [[1.0, 2.0]]),
+                r"\(rows, observables\) = \(6, 1\)",
+                id="vjp-cotangent-ragged",
             ),
         ],
     )
@@ -322,12 +359,62 @@ class TestNativeQmlChecksRaiseIt:
         fake = FakeCunqa().install(monkeypatch)
         _infer("predict")
         assert fake.names()[0] == "qraise"
-        for entry in ("expval", "jacobian"):
+        for entry in ("expval", "jacobian", "vjp"):
             fake = FakeCunqa().install(monkeypatch)
             _primitive(entry)
             assert fake.names()[0] == "qraise"
 
-    @pytest.mark.parametrize("entry", ["expval", "jacobian"])
+    @pytest.mark.parametrize(
+        ("earlier", "later", "match"),
+        [
+            # The cotangent comes after `params`...
+            ({"params": [0.1]}, {"cotangent": [[1.0]]}, "params has 1 values"),
+            # ...and after the rows, whose count it is checked against...
+            ({"x": [[0.1, 0.2]] * 6}, {"cotangent": [[1.0]]}, None),
+            # ...and before the model and rows against `wrt`...
+            (
+                {"cotangent": [[1.0]]},
+                {"model": _amplitude_model(), "wrt": "inputs"},
+                "cotangent must have shape",
+            ),
+            # ...and before a seed on qmio.
+            (
+                {"cotangent": [[1.0]]},
+                {"infrastructure": "qmio", "seed": 1},
+                "cotangent must have shape",
+            ),
+            # The execution arguments come before it.
+            ({"exact": True}, {"cotangent": [[1.0]]}, "exact=True"),
+        ],
+    )
+    def test_vjp_checks_the_cotangent_right_after_params(
+        self, monkeypatch, earlier, later, match
+    ):
+        fake = FakeCunqa().install(monkeypatch)
+        with pytest.raises(polypus.ConfigurationError, match=match) as raised:
+            _primitive("vjp", **{**later, **earlier})
+        if match is None:
+            assert "cotangent" not in str(raised.value)
+        assert fake.calls == []
+
+    def test_vjp_reads_the_cotangent_values_as_x_before_any_cunqa_call(
+        self, monkeypatch
+    ):
+        # A value that is not a real number is the `TypeError` `x` raises for
+        # one (DBFerPra's review of #577), still before any backend exists.
+        fake = FakeCunqa().install(monkeypatch)
+        for bad in ([["a"]] * 6, [[None]] * 6):
+            with pytest.raises(TypeError, match="cotangent must hold real numbers"):
+                _primitive("vjp", cotangent=bad)
+        assert fake.calls == []
+
+    def test_vjp_takes_the_model_type_error_first(self, monkeypatch):
+        fake = FakeCunqa().install(monkeypatch)
+        with pytest.raises(TypeError, match="qml.vjp takes a polypus.qml.Model"):
+            polypus.qml.vjp("model", [[0.1]], [0.1], [["a"]], wrt="theta")
+        assert fake.calls == []
+
+    @pytest.mark.parametrize("entry", ["expval", "jacobian", "vjp"])
     def test_a_primitive_runs_every_block_on_one_allocation(self, monkeypatch, entry):
         # Enough rows for several blocks on this host (2 × cores rows each):
         # still one `qraise`, every circuit on that family, and one `qdrop`.
@@ -335,7 +422,9 @@ class TestNativeQmlChecksRaiseIt:
 
         fake = FakeCunqa().install(monkeypatch)
         rows = [[0.1 * (i % 30)] for i in range(6 * len(os.sched_getaffinity(0)) + 1)]
-        values = _primitive(entry, x=rows)
+        # `qml.vjp`'s parameter product sums the rows: its input one has one each.
+        wrt = {"wrt": "inputs"} if entry == "vjp" else {}
+        values = _primitive(entry, x=rows, **wrt)
         assert len(values) == len(rows)
         names = fake.names()
         assert names.count("qraise") == 1 and names[0] == "qraise", names

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use numpy::ndarray::{Array2, Array3, ShapeError};
-use numpy::{IntoPyArray, PyArray2};
+use numpy::{IntoPyArray, PyArray2, PyReadonlyArrayDyn};
 use pyo3::exceptions::{
     PyFileNotFoundError, PyOSError, PyOverflowError, PyPermissionError, PyRuntimeError,
     PyTypeError, PyValueError,
@@ -1460,8 +1460,8 @@ impl ExactResult {
     }
 }
 
-/// The execution arguments `TrainedModel.predict` and `run`, and `qml.expval`
-/// and `qml.jacobian`, share.
+/// The execution arguments `TrainedModel.predict` and `run`, and `qml.expval`,
+/// `qml.jacobian` and `qml.vjp`, share.
 struct Execution<'a, 'py> {
     shots: u32,
     infrastructure: &'a str,
@@ -1945,10 +1945,10 @@ pub fn load(path: PathBuf) -> PyResult<TrainedModel> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// qml.expval and qml.jacobian: the loss-free primitives
+// qml.expval, qml.jacobian and qml.vjp: the loss-free primitives
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `wrt` of `qml.jacobian`, a closed set (C-11, "Options").
+/// `wrt` of `qml.jacobian` and `qml.vjp`, a closed set (C-11, "Options").
 fn parse_wrt(wrt: &str) -> PyResult<JacobianWrt> {
     match wrt {
         "params" => Ok(JacobianWrt::Params),
@@ -2073,6 +2073,14 @@ impl PrimitiveError {
     fn block_out_of_range(samples: &Range<usize>, num_samples: usize) -> Self {
         PrimitiveError::Internal(format!(
             "block {samples:?} lies outside the {num_samples} sample(s)"
+        ))
+    }
+
+    /// Adjoint derivatives that do not answer the runs they were asked for,
+    /// one row per run: a bookkeeping bug, never the caller's.
+    fn derivative_rows_mismatch(expected: usize, got: usize) -> Self {
+        PrimitiveError::Internal(format!(
+            "the adjoint runs gave {got} row(s) of derivatives for {expected} run(s)"
         ))
     }
 }
@@ -2289,30 +2297,8 @@ impl Primitive for JacobianRun {
             Ok(runs) => runs,
             Err(e) => return Some(Err(e.into())),
         };
-        let width = runs
-            .iter()
-            .map(|run| run.circuit.num_qubits())
-            .max()
-            .unwrap_or(0);
-        match native.adjoint_fits(width) {
-            Ok(true) => {}
-            Ok(false) => return None,
-            Err(e) => return Some(Err(PrimitiveError::Infrastructure(e.into()))),
-        }
-        let tasks: Vec<AdjointTask<'_, _>> = runs
-            .iter()
-            .map(|run| AdjointTask {
-                circuit: &run.circuit,
-                wrt: &run.wrt,
-                weight: move |b: usize| run.observable.weight(b),
-            })
-            .collect();
-        let derivatives = watched(cancel, |stop| {
-            native.run_adjoint(&tasks, Some(&|| stop.load(Ordering::Relaxed)))
-        });
-        let derivatives = match derivatives {
-            Ok(Ok(derivatives)) => derivatives,
-            Ok(Err(e)) => return Some(Err(PrimitiveError::Infrastructure(e.into()))),
+        let derivatives = match run_exact_adjoint(native, &runs, cancel)? {
+            Ok(derivatives) => derivatives,
             Err(e) => return Some(Err(e)),
         };
         Some(
@@ -2330,6 +2316,275 @@ impl JacobianRun {
         let (by_params, by_inputs) = jacobian.into_parts();
         self.by_params.extend(by_params.unwrap_or_default());
         self.by_inputs.extend(by_inputs.unwrap_or_default());
+    }
+}
+
+/// `runs` on the exact native backend by adjoint differentiation, one row of
+/// derivatives per run, or `None` when the memory budget holds one statevector
+/// of their width but not two ([`NativeStatevectorBackend::adjoint_fits`],
+/// which logs it): the caller then runs the shifted circuits. A Ctrl+C or a
+/// cancellation stops the runs in flight ([`watched`]).
+fn run_exact_adjoint(
+    native: &NativeStatevectorBackend,
+    runs: &[polypus_qml::AdjointRun],
+    cancel: &CancelToken,
+) -> Option<Result<Vec<Vec<f64>>, PrimitiveError>> {
+    let width = runs
+        .iter()
+        .map(|run| run.circuit.num_qubits())
+        .max()
+        .unwrap_or(0);
+    match native.adjoint_fits(width) {
+        Ok(true) => {}
+        Ok(false) => return None,
+        Err(e) => return Some(Err(PrimitiveError::Infrastructure(e.into()))),
+    }
+    let tasks: Vec<AdjointTask<'_, _>> = runs
+        .iter()
+        .map(|run| AdjointTask {
+            circuit: &run.circuit,
+            wrt: &run.wrt,
+            weight: move |b: usize| run.observable.weight(b),
+        })
+        .collect();
+    let derivatives = watched(cancel, |stop| {
+        native.run_adjoint(&tasks, Some(&|| stop.load(Ordering::Relaxed)))
+    });
+    Some(match derivatives {
+        Ok(Ok(derivatives)) => Ok(derivatives),
+        Ok(Err(e)) => Err(PrimitiveError::Infrastructure(e.into())),
+        Err(e) => Err(e),
+    })
+}
+
+/// The largest weight bound ([`DiagonalObservable::weight_bound`]) of a
+/// combined observable `Σ_o v_o·O_o` that `qml.vjp` hands the native simulator
+/// (C-11). Past it, or when it is not finite, the sample takes
+/// `qml.jacobian`'s runs and contracts them.
+///
+/// Why a quarter of `f64::MAX`. In the simulator nothing grows past the bound
+/// `W`: `λ = O|ψ⟩` has every amplitude within `W` and `‖λ‖ ≤ W`; each gate of
+/// the sweep back is a unitary matrix-vector product, its outputs within the
+/// norm of its inputs (Cauchy–Schwarz on each row); and each derivative,
+/// `Im ⟨λ|P|ψ⟩` with no further factor, is within `‖λ‖·‖ψ‖ ≤ W`. So the
+/// simulator never overflows below the limit. What can still grow is what the
+/// crate does with the derivatives afterwards: the sum over the gates that
+/// share a parameter, and the chain-rule factors of the inputs, which the
+/// contraction also computes, in another order. The factor 4 is room for a
+/// few of those, not a guarantee: with more than 4 gates on one parameter, or
+/// chain-rule factors past 4, a product near `f64::MAX` can overflow on the
+/// combined path where the contraction would not, or the other way round. A
+/// cotangent within a few orders of magnitude of `f64::MAX` is not a practical
+/// case; the limit is there so that the simulator never sees a weight it
+/// refuses.
+///
+/// [`DiagonalObservable::weight_bound`]: polypus_qml::DiagonalObservable::weight_bound
+const MAX_COMBINED_WEIGHT: f64 = f64::MAX / 4.0;
+
+/// `qml.vjp`: the Jacobian's product with a cotangent. Its circuits, and its
+/// reading of their results, are `qml.jacobian`'s, the Jacobian of each block
+/// contracted with the block's cotangent; exactly, one adjoint run per sample
+/// instead (#559).
+struct VjpRun {
+    plan: ExpectationJacobian,
+    params: Vec<f64>,
+    /// `(num_samples, num_observables)`, row-major: the cotangent `v`.
+    cotangent: Vec<f64>,
+    /// `num_params` values (empty unless `wrt` asks for them): the product's
+    /// rows read so far, summed in row order, so the sum does not depend on
+    /// the blocks.
+    by_params: Vec<f64>,
+    /// `(num_samples, num_features)`, row-major.
+    by_inputs: Vec<f64>,
+    /// The adjoint runs handed to the native backend so far.
+    adjoint_runs: usize,
+}
+
+impl VjpRun {
+    fn new(plan: ExpectationJacobian, params: Vec<f64>, cotangent: Vec<f64>) -> Self {
+        let by_params = match plan.wrt() {
+            JacobianWrt::Params | JacobianWrt::Both => vec![0.0; plan.num_params()],
+            JacobianWrt::Inputs => Vec::new(),
+        };
+        VjpRun {
+            plan,
+            params,
+            cotangent,
+            by_params,
+            by_inputs: Vec::new(),
+            adjoint_runs: 0,
+        }
+    }
+
+    /// The block `samples` and its rows of the cotangent.
+    fn block(
+        &self,
+        samples: Range<usize>,
+    ) -> Result<(polypus_qml::JacobianBlock<'_>, &[f64]), PrimitiveError> {
+        let k = self.plan.num_observables();
+        let out_of_range = || PrimitiveError::block_out_of_range(&samples, self.plan.num_samples());
+        let block = self.plan.block(samples.clone()).ok_or_else(out_of_range)?;
+        let cotangent = self
+            .cotangent
+            .get(samples.start * k..samples.end * k)
+            .ok_or_else(out_of_range)?;
+        Ok((block, cotangent))
+    }
+
+    /// Add a block's product, in sample order: its parameter rows into the
+    /// running sum, its input rows after the others.
+    fn keep(&mut self, vjp: polypus_qml::Vjp) {
+        let num_params = vjp.num_params().max(1);
+        let (by_params, by_inputs) = vjp.into_parts();
+        for row in by_params.unwrap_or_default().chunks_exact(num_params) {
+            for (sum, &value) in self.by_params.iter_mut().zip(row) {
+                *sum += value;
+            }
+        }
+        self.by_inputs.extend(by_inputs.unwrap_or_default());
+    }
+
+    /// The exact product of the block by adjoint differentiation, one [`Vjp`]
+    /// per sample in order, or `None` for the shifted circuits (see
+    /// [`run_exact_adjoint`]).
+    ///
+    /// [`Vjp`]: polypus_qml::Vjp
+    fn exact_block(
+        &mut self,
+        native: &NativeStatevectorBackend,
+        samples: Range<usize>,
+        cancel: &CancelToken,
+    ) -> Option<Result<Vec<polypus_qml::Vjp>, PrimitiveError>> {
+        let (runs, combined) = match self.exact_runs(samples.clone()) {
+            Ok(found) => found,
+            Err(e) => return Some(Err(e)),
+        };
+        let derivatives = match run_exact_adjoint(native, &runs, cancel)? {
+            Ok(derivatives) => derivatives,
+            Err(e) => return Some(Err(e)),
+        };
+        let vjps = self.read_exact(samples, &combined, &derivatives);
+        self.adjoint_runs += runs.len();
+        log::debug!(
+            "qml vjp: {} adjoint run(s), {} in all",
+            runs.len(),
+            self.adjoint_runs
+        );
+        Some(vjps)
+    }
+
+    /// The block's adjoint runs, sample after sample, and for each sample
+    /// whether it takes the combined observable. The route is **decided per
+    /// sample**, so a sample's product does not depend on the others' — nor on
+    /// the blocks, which follow the host's cores (C-11): one run, the
+    /// cotangent folded into its observable; or, when that observable cannot
+    /// be weighed safely — a non-finite value in the sample's cotangent (the
+    /// simulator refuses a non-finite weight), or a weight bound past
+    /// `MAX_COMBINED_WEIGHT` — the Jacobian's runs, one per observable, to be
+    /// contracted: the cotangent then reaches the product as it would through
+    /// the contraction of `qml.jacobian`. The bounds come before any circuit
+    /// is bound, so each sample's runs are built once. `<=` is false for a
+    /// `NaN` bound too.
+    fn exact_runs(
+        &self,
+        samples: Range<usize>,
+    ) -> Result<(Vec<polypus_qml::AdjointRun>, Vec<bool>), PrimitiveError> {
+        let (block, cotangent) = self.block(samples.clone())?;
+        let bounds = block.vjp_weight_bounds(cotangent)?;
+        let mut runs = Vec::with_capacity(block.num_vjp_runs());
+        let mut combined = Vec::with_capacity(bounds.len());
+        for (s, bound) in samples.zip(bounds) {
+            let (one, v) = self.block(s..s + 1)?;
+            let safe = bound <= MAX_COMBINED_WEIGHT;
+            runs.extend(if safe {
+                one.vjp_runs(&self.params, v)?
+            } else {
+                one.adjoint_runs(&self.params)?
+            });
+            combined.push(safe);
+        }
+        Ok((runs, combined))
+    }
+
+    /// Each sample's product, in order, from the derivatives of
+    /// [`exact_runs`](Self::exact_runs)' runs: its one row through the
+    /// combined observable, or its `num_observables` rows read as its
+    /// Jacobian and contracted with its cotangent. One row of `derivatives`
+    /// per run, no more and no fewer, or a bookkeeping error before any is
+    /// read: a row too many or too few would shift every sample after it.
+    fn read_exact(
+        &self,
+        samples: Range<usize>,
+        combined: &[bool],
+        derivatives: &[Vec<f64>],
+    ) -> Result<Vec<polypus_qml::Vjp>, PrimitiveError> {
+        let k = self.plan.num_observables();
+        let expected: usize = combined.iter().map(|&c| if c { 1 } else { k }).sum();
+        if derivatives.len() != expected {
+            return Err(PrimitiveError::derivative_rows_mismatch(
+                expected,
+                derivatives.len(),
+            ));
+        }
+        let mut rest = derivatives;
+        samples
+            .zip(combined)
+            .map(|(s, &combined)| {
+                let (one, v) = self.block(s..s + 1)?;
+                let take = if combined { 1 } else { k };
+                let (rows, after) = rest.split_at(take.min(rest.len()));
+                rest = after;
+                let vjp = if combined {
+                    one.vjp_from_adjoint(rows)
+                } else {
+                    one.jacobian_from_adjoint(rows)
+                        .and_then(|jacobian| jacobian.vjp(v))
+                };
+                Ok(vjp?)
+            })
+            .collect()
+    }
+}
+
+impl Primitive for VjpRun {
+    fn num_samples(&self) -> usize {
+        self.plan.num_samples()
+    }
+
+    fn circuits_per_sample(&self) -> usize {
+        self.plan.circuits_per_sample()
+    }
+
+    fn circuits(&self, samples: Range<usize>) -> Result<Vec<ConcreteCircuit>, PrimitiveError> {
+        let (block, _) = self.block(samples)?;
+        Ok(block.circuits(&self.params)?)
+    }
+
+    fn read(&mut self, samples: Range<usize>, results: BlockResults) -> Result<(), PrimitiveError> {
+        let (block, cotangent) = self.block(samples)?;
+        let jacobian = match &results {
+            BlockResults::Counts(counts) => block.jacobian_from_counts(counts)?,
+            BlockResults::Exact(probabilities) => {
+                block.jacobian_from_probabilities(probabilities)?
+            }
+        };
+        let vjp = jacobian.vjp(cotangent)?;
+        self.keep(vjp);
+        Ok(())
+    }
+
+    /// The exact product by adjoint differentiation (#559): one run per sample
+    /// whatever the number of observables, two statevectors each. When the
+    /// memory budget holds one statevector of the width but not two, `None`:
+    /// the shifted circuits run instead, as for the Jacobian.
+    fn run_exact_block(
+        &mut self,
+        native: &NativeStatevectorBackend,
+        samples: Range<usize>,
+        cancel: &CancelToken,
+    ) -> Option<Result<(), PrimitiveError>> {
+        let vjps = self.exact_block(native, samples, cancel)?;
+        Some(vjps.map(|vjps| vjps.into_iter().for_each(|vjp| self.keep(vjp))))
     }
 }
 
@@ -2672,6 +2927,195 @@ pub fn jacobian<'py>(
     })
 }
 
+/// A shape as Python prints a tuple: `(3, 2)`, `(3,)`, `()`.
+fn shape_repr(shape: &[usize]) -> String {
+    match shape {
+        [only] => format!("({only},)"),
+        _ => format!(
+            "({})",
+            shape
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// `qml.vjp`'s `cotangent` as its `rows · observables` values, row-major: the
+/// check that follows `params` (C-11). Its values are read as `x`'s are (each
+/// a real number, a `bool` included), so the two take the same values:
+///
+/// - **Structure first**, through `numpy.asarray(cotangent)`: rows as lists or
+///   tuples, or a NumPy array. Ragged rows (NumPy's `ValueError`) or a shape
+///   other than `(rows, observables)` is a `polypus.ConfigurationError` naming
+///   the expected shape; a complex dtype too, rather than losing the
+///   imaginary part in the conversion. Any other exception of NumPy's (a
+///   `MemoryError`, say) propagates as it is.
+/// - **Then the values**: a real or boolean dtype is converted to `float64`
+///   in one go; any other (strings, objects such as `None`) is read value by
+///   value as `x` is, so a value that is not a real number is the `TypeError`
+///   `x` raises for it. Non-finite values are taken as they are.
+fn cotangent_values(
+    cotangent: &Bound<'_, PyAny>,
+    rows: usize,
+    observables: usize,
+) -> PyResult<Vec<f64>> {
+    let py = cotangent.py();
+    let expected = shape_repr(&[rows, observables]);
+    let numpy = py.import("numpy")?;
+    let as_is = numpy.call_method1("asarray", (cotangent,)).map_err(|e| {
+        if e.is_instance_of::<PyValueError>(py) {
+            configuration_error(format!(
+                "cotangent must be a (rows, observables) = {expected} array of real \
+                 numbers: {}",
+                e.value(py)
+            ))
+        } else {
+            e
+        }
+    })?;
+    let kind: String = as_is.getattr("dtype")?.getattr("kind")?.extract()?;
+    if kind == "c" {
+        return Err(configuration_error(format!(
+            "cotangent must be a (rows, observables) = {expected} array of real values, got \
+             complex ones"
+        )));
+    }
+    let shape: Vec<usize> = as_is.getattr("shape")?.extract()?;
+    if shape != [rows, observables] {
+        return Err(configuration_error(format!(
+            "cotangent must have shape (rows, observables) = {expected}, got {}",
+            shape_repr(&shape)
+        )));
+    }
+    if matches!(kind.as_str(), "f" | "i" | "u" | "b") {
+        let array = numpy
+            .call_method1("asarray", (as_is, "float64"))?
+            .extract::<PyReadonlyArrayDyn<'_, f64>>()?;
+        return Ok(array.as_array().iter().copied().collect());
+    }
+    // Strings, objects, dates: value by value, with `x`'s `TypeError` for the
+    // first that is not a real number.
+    as_is
+        .call_method0("ravel")?
+        .call_method0("tolist")?
+        .extract::<Vec<f64>>()
+        .map_err(|e| {
+            if e.is_instance_of::<PyTypeError>(py) {
+                PyTypeError::new_err(format!(
+                    "cotangent must hold real numbers, as x does: {}",
+                    e.value(py)
+                ))
+            } else {
+                e
+            }
+        })
+}
+
+/// `polypus.qml.vjp(model, x, params, cotangent, *, wrt="params", …)`: the
+/// vector-Jacobian product of [`jacobian`] with `cotangent`, `v`, of shape
+/// `(rows, observables)` — what a reverse-mode backward pass needs — as
+/// `float64` `numpy.ndarray`s, C-contiguous:
+///
+/// - **`wrt="params"`** gives `Σ_r,o v[r,o]·J_θ[r,o,:]`, shape `(num_params,)`,
+///   summed over the rows; **`"inputs"`** gives `Σ_o v[r,o]·J_x[r,o,:]` per
+///   row, `(rows, features)`, for angle and IQP encoders (an amplitude or basis
+///   encoder is [`jacobian`]'s `polypus.ConfigurationError`); **`"both"`** the
+///   tuple `(by_params, by_inputs)`, each identical to its separate call. Any
+///   other `wrt` is a `polypus.ConfigurationError`.
+/// - **`cotangent`** is rows of real values or a 2-D NumPy array (complex is
+///   refused), of shape exactly `(rows, observables)` (otherwise a
+///   `polypus.ConfigurationError`), its values read as `x`'s are (a string or
+///   `None` is the same `TypeError`) and taken as they are: a `NaN` or an
+///   infinity propagates to the product as it does through the contraction of
+///   [`jacobian`].
+/// - **Circuits:** with `exact=True`, one adjoint differentiation per row,
+///   whatever the number of observables (of `Σ_o v[r,o]·O_o`); a row whose
+///   combined observable cannot be weighed safely (a non-finite value in its
+///   row of `cotangent`, or a weight bound past `f64::MAX / 4`) takes
+///   [`jacobian`]'s runs, one per observable, decided row by row so no row
+///   depends on another; and when the memory budget holds one statevector but
+///   not two,
+///   [`jacobian`]'s shifted circuits. With shots, [`jacobian`]'s circuits, the
+///   same with the same `seed`: the result is its contraction, to rounding.
+/// - **`model`**, **`x`**, **`params`** and the execution arguments are
+///   [`jacobian`]'s, with its rules.
+///
+/// Every check runs before a backend exists and raises
+/// `polypus.ConfigurationError` (a `ValueError`), except a cotangent value
+/// that is not a real number: the `TypeError` `x` raises for one.
+#[pyfunction(name = "vjp", signature = (
+    model, x, params, cotangent, *, wrt="params", shots=1024, infrastructure="local", n_qpus=1,
+    nodes=1, cores_per_qpu=2, walltime=None, options=None, sim_method="automatic",
+    noise_model=None, backend=None, seed=None, exact=false,
+))]
+pub fn vjp<'py>(
+    model: &Bound<'py, PyAny>,
+    x: &Bound<'py, PyAny>,
+    params: Vec<f64>,
+    cotangent: &Bound<'py, PyAny>,
+    wrt: &str,
+    shots: u32,
+    infrastructure: &str,
+    n_qpus: u32,
+    nodes: u32,
+    cores_per_qpu: u32,
+    walltime: Option<String>,
+    options: Option<OptionsArg>,
+    sim_method: &str,
+    noise_model: Option<Bound<'py, PyAny>>,
+    backend: Option<&str>,
+    seed: Option<u64>,
+    exact: bool,
+) -> PyResult<Py<PyAny>> {
+    let py = x.py();
+    let exec = Execution {
+        shots,
+        infrastructure,
+        n_qpus,
+        nodes,
+        cores_per_qpu,
+        walltime,
+        options,
+        sim_method,
+        noise_model,
+        backend,
+        seed,
+        exact,
+    };
+    let model = primitive_model(model, "vjp")?;
+    let wrt = parse_wrt(wrt)?;
+    let backend = exec.check()?;
+    let (compiled, rows, params) = primitive_inputs(model.get(), x, params)?;
+    let cotangent = cotangent_values(cotangent, rows.num_samples(), compiled.num_observables())?;
+    let samples: Vec<&[f64]> = (0..rows.num_samples()).map(|i| rows.sample(i)).collect();
+    let plan = compiled
+        .jacobian(&samples, wrt)
+        .map_err(qml_to_config_err)?;
+    let (n, num_features) = (plan.num_samples(), plan.num_features());
+    let mut primitive = VjpRun::new(plan, params, cotangent);
+    run_primitive(py, "vjp", &mut primitive, exec, backend)?;
+    let VjpRun {
+        by_params,
+        by_inputs,
+        ..
+    } = primitive;
+    let by_params = || by_params.into_pyarray(py).into_any();
+    let by_inputs = || {
+        array2(n, num_features, by_inputs)
+            .map(|a| a.into_pyarray(py).into_any())
+            .map_err(shape_to_py_err)
+    };
+    Ok(match wrt {
+        JacobianWrt::Params => by_params().unbind(),
+        JacobianWrt::Inputs => by_inputs()?.unbind(),
+        JacobianWrt::Both => PyTuple::new(py, [by_params(), by_inputs()?])?
+            .into_any()
+            .unbind(),
+    })
+}
+
 /// `qml.train` and `qml.predict` run Qiskit circuits. A native piece in their
 /// `feature_map` or `ansatz` is a `TypeError` that says so (plan D4-R), rather
 /// than a Qiskit error from composing it.
@@ -2703,6 +3147,7 @@ pub(crate) fn register(qml: &Bound<'_, PyModule>) -> PyResult<()> {
     qml.add_function(wrap_pyfunction!(load, qml)?)?;
     qml.add_function(wrap_pyfunction!(expval, qml)?)?;
     qml.add_function(wrap_pyfunction!(jacobian, qml)?)?;
+    qml.add_function(wrap_pyfunction!(vjp, qml)?)?;
     qml.add_class::<PyDataset>()?;
     qml.add_class::<PauliTerm>()?;
     qml.add_class::<PyObservable>()?;
@@ -3614,6 +4059,437 @@ mod tests {
         }
         assert_eq!(guard.polls.load(Ordering::SeqCst), 2);
         assert!(run.by_params.is_empty() && run.by_inputs.is_empty());
+    }
+
+    // ── qml.vjp ──────────────────────────────────────────────────────────────
+
+    /// `primitive_model_and_rows`'s model and rows read out by `k` observables
+    /// (`⟨Z₀⟩`, `⟨Z₁Z₂⟩`, `⟨Z₂⟩`, …, cycling over the three qubits).
+    fn model_with_observables(k: usize) -> CompiledModel {
+        let strings = [vec![0], vec![1, 2], vec![2], vec![0, 1], vec![1]];
+        let observables = (0..k)
+            .map(|o| {
+                let string = strings[o % strings.len()]
+                    .iter()
+                    .map(|&q| (q, Pauli::Z))
+                    .collect();
+                Observable::new(vec![(
+                    1.0 + 0.1 * o as f64,
+                    PauliString::new(string).unwrap(),
+                )])
+                .unwrap()
+            })
+            .collect();
+        QuantumModel::new(3)
+            .layer(Layer::AngleEncoder(AngleEncoder::new(RotationAxis::Ry)))
+            .layer(Layer::HardwareEfficient(HardwareEfficientAnsatz::new(1)))
+            .layer(Layer::Iqp(IqpEncoder::new()))
+            .layer(Layer::HardwareEfficient(
+                HardwareEfficientAnsatz::real_amplitudes(1),
+            ))
+            .readout(Readout::new(observables, Decision::Raw).unwrap())
+            .compile(3)
+            .unwrap()
+    }
+
+    /// A cotangent with neither zero nor repeated entries.
+    fn cotangent(rows: usize, k: usize) -> Vec<f64> {
+        (0..rows * k).map(|i| 0.9 - 0.23 * i as f64).collect()
+    }
+
+    fn vjp_run(compiled: &CompiledModel, wrt: JacobianWrt, v: Vec<f64>) -> VjpRun {
+        let (_, rows, _) = primitive_model_and_rows();
+        let theta = (0..compiled.num_params())
+            .map(|p| -0.7 + 0.13 * p as f64)
+            .collect();
+        VjpRun::new(compiled.jacobian(&rows, wrt).unwrap(), theta, v)
+    }
+
+    /// `qml.jacobian`'s result for the same model, rows and `wrt`, contracted
+    /// with `v` as the PyTorch backward pass did: `(Σ_r,o v·J_θ, Σ_o v·J_x)`.
+    fn contracted_jacobian(run: &JacobianRun, v: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let (n, k) = (run.plan.num_samples(), run.plan.num_observables());
+        let (p, f) = (run.plan.num_params(), run.plan.num_features());
+        let mut by_params = vec![0.0; if run.by_params.is_empty() { 0 } else { p }];
+        let mut by_inputs = vec![0.0; if run.by_inputs.is_empty() { 0 } else { n * f }];
+        for r in 0..n {
+            for o in 0..k {
+                let weight = v[r * k + o];
+                for (c, sum) in by_params.iter_mut().enumerate() {
+                    *sum += weight * run.by_params[(r * k + o) * p + c];
+                }
+                for c in 0..by_inputs.len() / n.max(1) {
+                    by_inputs[r * f + c] += weight * run.by_inputs[(r * k + o) * f + c];
+                }
+            }
+        }
+        (by_params, by_inputs)
+    }
+
+    /// Exactly, `qml.vjp` hands `run_adjoint` one task per row, whatever the
+    /// number of observables (`qml.jacobian` hands it one per row and
+    /// observable), and its result is `qml.jacobian`'s contracted, whatever the
+    /// blocks.
+    #[test]
+    fn the_exact_vjp_takes_one_adjoint_run_per_row_whatever_the_observables() {
+        for k in [1, 2, 3, 5] {
+            let compiled = model_with_observables(k);
+            let v = cotangent(5, k);
+            for wrt in [JacobianWrt::Params, JacobianWrt::Inputs, JacobianWrt::Both] {
+                let mut jacobian = JacobianRun {
+                    plan: compiled
+                        .jacobian(&primitive_model_and_rows().1, wrt)
+                        .unwrap(),
+                    params: vjp_run(&compiled, wrt, v.clone()).params,
+                    by_params: Vec::new(),
+                    by_inputs: Vec::new(),
+                };
+                jacobian.run_exact(usize::MAX);
+                let (by_params, by_inputs) = contracted_jacobian(&jacobian, &v);
+                for block in [usize::MAX, 1, 2] {
+                    let mut run = vjp_run(&compiled, wrt, v.clone());
+                    run.run_exact(block);
+                    assert_eq!(run.adjoint_runs, 5, "k = {k}, block {block}");
+                    assert_eq!(run.by_params.len(), by_params.len());
+                    assert_eq!(run.by_inputs.len(), by_inputs.len());
+                    assert_close(&run.by_params, &by_params);
+                    assert_close(&run.by_inputs, &by_inputs);
+                }
+            }
+        }
+    }
+
+    /// The route the exact path takes when only one statevector fits — the
+    /// Jacobian's shifted circuits run exactly and read by `read` — gives the
+    /// adjoint's product; and with shots the circuits are `qml.jacobian`'s, so
+    /// with the same seed the product is its contraction.
+    #[test]
+    fn the_shift_and_sampled_routes_contract_the_jacobian() {
+        let compiled = model_with_observables(3);
+        let v = cotangent(5, 3);
+        let mut adjoint = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+        adjoint.run_exact(2);
+        let mut shift = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+        for start in (0..5).step_by(2) {
+            let samples = start..(start + 2).min(5);
+            let circuits: Vec<BoundCircuit> = shift
+                .circuits(samples.clone())
+                .unwrap()
+                .into_iter()
+                .map(BoundCircuit::Native)
+                .collect();
+            let probabilities = NativeStatevectorBackend::new(0)
+                .run_circuits_exact(&circuits, &run_params(0, 1))
+                .unwrap();
+            shift
+                .read(samples, BlockResults::Exact(probabilities))
+                .unwrap();
+        }
+        assert_eq!(shift.adjoint_runs, 0);
+        assert_close(&shift.by_params, &adjoint.by_params);
+        assert_close(&shift.by_inputs, &adjoint.by_inputs);
+
+        let mut sampled = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+        sampled_on_native(&mut sampled, 7, 2);
+        let mut jacobian = JacobianRun {
+            plan: compiled
+                .jacobian(&primitive_model_and_rows().1, JacobianWrt::Both)
+                .unwrap(),
+            params: sampled.params.clone(),
+            by_params: Vec::new(),
+            by_inputs: Vec::new(),
+        };
+        sampled_on_native(&mut jacobian, 7, 2);
+        let (by_params, by_inputs) = contracted_jacobian(&jacobian, &v);
+        assert_close(&sampled.by_params, &by_params);
+        assert_close(&sampled.by_inputs, &by_inputs);
+    }
+
+    /// A non-finite cotangent is not refused: the row with one takes the
+    /// Jacobian's runs (one per observable), every other row one run, and the
+    /// value reaches the product as the contraction gives it.
+    #[test]
+    fn a_non_finite_cotangent_propagates_through_the_jacobians_runs() {
+        let k = 2;
+        let compiled = model_with_observables(k);
+        let mut v = cotangent(5, k);
+        v[3 * k] = f64::NAN; // row 3
+        let mut run = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+        run.run_exact(2);
+        // Rows 0, 1, 2 and 4 take one run each, row 3 takes k.
+        assert_eq!(run.adjoint_runs, 4 + k);
+        assert!(run.by_params.iter().all(|d| d.is_nan()));
+        let f = compiled.num_features();
+        for (r, row) in run.by_inputs.chunks(f).enumerate() {
+            assert!(row.iter().all(|d| d.is_nan() == (r == 3)), "row {r}");
+        }
+    }
+
+    /// `qml.vjp` exactly over the rows of `primitive_model_and_rows`, read out
+    /// by two copies of `⟨Z₀⟩`, with row 1's cotangent `value` in both columns
+    /// (so its combined weight bound is `2 · value`), in blocks of 2: the run,
+    /// once checked against `qml.jacobian`'s contraction — the same finiteness,
+    /// and within 1e-9 relative where finite. On the `combined` path, relative
+    /// to `value`'s scale rather than to each entry: `assert_close`'s 1e-9 for
+    /// a cotangent of order 1, scaled by this one's, since the rounding errors
+    /// of the combined weight grow with `value` and an entry near zero is all
+    /// rounding at that scale. Off it, the Jacobian is `qml.jacobian`'s own and
+    /// each entry is held to its own magnitude.
+    fn vjp_with_a_large_row(value: f64, combined: bool) -> VjpRun {
+        let z0 = || {
+            Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())]).unwrap()
+        };
+        let compiled = QuantumModel::new(3)
+            .layer(Layer::AngleEncoder(AngleEncoder::new(RotationAxis::Ry)))
+            .layer(Layer::HardwareEfficient(HardwareEfficientAnsatz::new(1)))
+            .layer(Layer::Iqp(IqpEncoder::new()))
+            .readout(Readout::new(vec![z0(), z0()], Decision::Argmax).unwrap())
+            .compile(3)
+            .unwrap();
+        let mut v = cotangent(5, 2);
+        v[2] = value; // row 1, both observables
+        v[3] = value;
+        assert!(v.iter().all(|x| x.is_finite()));
+        let mut run = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+        run.run_exact(2);
+        let mut jacobian = JacobianRun {
+            plan: compiled
+                .jacobian(&primitive_model_and_rows().1, JacobianWrt::Both)
+                .unwrap(),
+            params: run.params.clone(),
+            by_params: Vec::new(),
+            by_inputs: Vec::new(),
+        };
+        jacobian.run_exact(usize::MAX);
+        let (by_params, by_inputs) = contracted_jacobian(&jacobian, &v);
+        for (got, expected) in [(&run.by_params, &by_params), (&run.by_inputs, &by_inputs)] {
+            assert_eq!(got.len(), expected.len());
+            for (k, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+                assert_eq!(
+                    g.is_finite(),
+                    e.is_finite(),
+                    "{value}, entry {k}: {g} vs {e}"
+                );
+                if e.is_finite() {
+                    let floor = if combined { value } else { 1.0 };
+                    let scale = g.abs().max(e.abs()).max(floor);
+                    assert!(
+                        (g - e).abs() <= 1e-9 * scale,
+                        "{value}, entry {k}: {g} vs {e}"
+                    );
+                }
+            }
+        }
+        // Row 1's input product is large and finite.
+        let f = compiled.num_features();
+        assert!(
+            run.by_inputs[f..2 * f]
+                .iter()
+                .any(|d| d.is_finite() && d.abs() > value / 1e3),
+            "{value}"
+        );
+        run
+    }
+
+    /// Finite cotangent values can still overflow the combined weight: two
+    /// copies of `⟨Z₀⟩` weighed by `1e308` each make a weight of `2e308`,
+    /// which no statevector can be weighed by. That row takes the Jacobian's
+    /// runs instead, and the product is the contraction, finite where it is.
+    #[test]
+    fn a_finite_cotangent_that_overflows_the_weight_takes_the_jacobians_runs() {
+        let run = vjp_with_a_large_row(1e308, false);
+        // Rows 0, 2, 3 and 4 take one run each, row 1 takes k = 2.
+        assert_eq!(run.adjoint_runs, 4 + 2);
+    }
+
+    /// A finite weight bound past `MAX_COMBINED_WEIGHT` (`6e307 · 2 = 1.2e308`,
+    /// below `f64::MAX`) takes the Jacobian's runs too; one under it (`1e307 ·
+    /// 2 = 2e307`) stays on the combined path, one run per row. Both are the
+    /// contraction.
+    #[test]
+    fn a_weight_bound_near_the_largest_float_takes_the_jacobians_runs() {
+        const {
+            assert!(2.0 * 6e307 > MAX_COMBINED_WEIGHT && (2.0_f64 * 6e307).is_finite());
+            assert!(2.0 * 1e307 < MAX_COMBINED_WEIGHT);
+        }
+        assert_eq!(vjp_with_a_large_row(6e307, false).adjoint_runs, 4 + 2);
+        assert_eq!(vjp_with_a_large_row(1e307, true).adjoint_runs, 5);
+    }
+
+    /// The route is decided row by row, never for a block: with a `NaN` in
+    /// row 0's cotangent, or finite values that overflow row 1's combined
+    /// weight, only that row takes the Jacobian's runs, so the product is the
+    /// same bit for bit whatever the block size — that is, whatever the
+    /// host's cores (DBFerPra's review of #577: blocks of 16 rows on one host
+    /// and 8 on another gave rows 16–31 different last bits).
+    #[test]
+    fn the_route_is_decided_per_row_so_the_blocks_change_nothing() {
+        let k = 3;
+        let compiled = model_with_observables(k);
+        let mut with_nan = cotangent(5, k);
+        with_nan[0] = f64::NAN; // row 0
+        let mut overflowing = cotangent(5, k);
+        overflowing[k..2 * k].fill(1e308); // row 1
+        let bits = |values: &[f64]| values.iter().map(|d| d.to_bits()).collect::<Vec<_>>();
+        for v in [with_nan, overflowing] {
+            let mut reference = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+            reference.run_exact(usize::MAX);
+            for block in [1, 2, 3, 4] {
+                let mut run = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+                run.run_exact(block);
+                assert_eq!(run.adjoint_runs, 4 + k, "block {block}");
+                assert_eq!(
+                    bits(&run.by_inputs),
+                    bits(&reference.by_inputs),
+                    "block {block}"
+                );
+                assert_eq!(
+                    bits(&run.by_params),
+                    bits(&reference.by_params),
+                    "block {block}"
+                );
+            }
+            // The rows the value is not in are those of a finite cotangent's
+            // route, one run each, bit for bit.
+            let row = if v[0].is_nan() { 0 } else { 1 };
+            let mut clean = v.clone();
+            clean[row * k..(row + 1) * k].fill(0.5);
+            let mut finite = vjp_run(&compiled, JacobianWrt::Inputs, clean);
+            finite.run_exact(2);
+            assert_eq!(finite.adjoint_runs, 5);
+            let f = compiled.num_features();
+            for r in (0..5).filter(|&r| r != row) {
+                assert_eq!(
+                    bits(&reference.by_inputs[r * f..(r + 1) * f]),
+                    bits(&finite.by_inputs[r * f..(r + 1) * f]),
+                    "row {r}"
+                );
+            }
+        }
+    }
+
+    /// `read_exact` takes one row of derivatives per run, no more and no
+    /// fewer: a row too many or too few is a bookkeeping error before any
+    /// sample is read, rather than a product read from rows shifted by one.
+    #[test]
+    fn reading_the_exact_product_takes_exactly_one_row_per_run() {
+        let k = 3;
+        let compiled = model_with_observables(k);
+        let mut v = cotangent(5, k);
+        v[0] = f64::NAN; // row 0 takes k runs, the others one each
+        let run = vjp_run(&compiled, JacobianWrt::Both, v);
+        let (runs, combined) = run.exact_runs(0..5).unwrap();
+        assert_eq!(runs.len(), 4 + k);
+        let rows: Vec<Vec<f64>> = runs.iter().map(|r| vec![0.0; r.wrt.len()]).collect();
+        assert_eq!(run.read_exact(0..5, &combined, &rows).unwrap().len(), 5);
+        let mut extra = rows.clone();
+        extra.push(rows[0].clone());
+        let missing = &rows[..rows.len() - 1];
+        for (what, derivatives) in [("one too many", extra.as_slice()), ("one too few", missing)] {
+            let expected = format!(
+                "{} row(s) of derivatives for {} run(s)",
+                derivatives.len(),
+                runs.len()
+            );
+            match run.read_exact(0..5, &combined, derivatives) {
+                Err(PrimitiveError::Internal(message)) => {
+                    assert!(message.contains(&expected), "{what}: {message}")
+                }
+                other => panic!("{what}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_cancellation_between_vjp_blocks_stops_before_the_next() {
+        let counters = Counters::new();
+        let token = CancelToken::default();
+        let compiled = model_with_observables(2);
+        let mut run = Interfering {
+            inner: vjp_run(&compiled, JacobianWrt::Inputs, cotangent(5, 2)),
+            token: token.clone(),
+            fail_second: false,
+            built: std::cell::Cell::new(0),
+        };
+        let err = run_in_blocks(&mut run, || counters.create(), |_| 2, &token).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PrimitiveError::Infrastructure(InfrastructureError::Cancelled)
+            ),
+            "{err:?}"
+        );
+        assert_eq!(run.built.get(), 1);
+        assert_eq!(counters.get(), (1, 1, 1));
+        assert_eq!(run.inner.by_inputs.len(), 2 * compiled.num_features());
+    }
+
+    /// A Ctrl+C stops the adjoint runs of an exact `qml.vjp` block in flight,
+    /// as it does `qml.jacobian`'s (see
+    /// `a_ctrl_c_stops_an_adjoint_jacobian_in_flight` for the sizing).
+    #[test]
+    fn a_ctrl_c_stops_an_adjoint_vjp_in_flight() {
+        let compiled = QuantumModel::new(16)
+            .layer(Layer::AngleEncoder(AngleEncoder::new(RotationAxis::Ry)))
+            .layer(Layer::HardwareEfficient(HardwareEfficientAnsatz::new(4)))
+            .readout(
+                Readout::new(
+                    vec![Observable::new(vec![(
+                        1.0,
+                        PauliString::new(vec![(0, Pauli::Z)]).unwrap(),
+                    )])
+                    .unwrap()],
+                    Decision::Raw,
+                )
+                .unwrap(),
+            )
+            .compile(16)
+            .unwrap();
+        let rows: Vec<Vec<f64>> = (0..32)
+            .map(|i| (0..16).map(|j| 0.1 * (i + j) as f64).collect())
+            .collect();
+        let theta: Vec<f64> = (0..compiled.num_params())
+            .map(|p| 0.01 * p as f64)
+            .collect();
+        let mut run = VjpRun::new(
+            compiled.jacobian(&rows, JacobianWrt::Both).unwrap(),
+            theta,
+            vec![1.0; 32],
+        );
+        let guard = Arc::new(InterruptAfter {
+            ok: 1,
+            polls: AtomicUsize::new(0),
+        });
+        let token = CancelToken::with_interrupt(guard.clone());
+        let err = run_in_blocks(
+            &mut run,
+            || {
+                Ok(BlockRunner::Exact {
+                    native: NativeStatevectorBackend::new(0),
+                    params: run_params(0, 1),
+                })
+            },
+            |_| usize::MAX,
+            &token,
+        )
+        .unwrap_err();
+        match err {
+            PrimitiveError::Infrastructure(InfrastructureError::Backend(
+                crate::infrastructure::BackendError::Aborted(message),
+            )) => assert_eq!(message, "test interrupt"),
+            other => panic!("expected the interrupt, got {other:?}"),
+        }
+        assert_eq!(guard.polls.load(Ordering::SeqCst), 2);
+        assert!(run.by_params.iter().all(|&d| d == 0.0) && run.by_inputs.is_empty());
+        assert_eq!(run.adjoint_runs, 0);
+    }
+
+    #[test]
+    fn shapes_print_as_python_tuples() {
+        assert_eq!(shape_repr(&[3, 2]), "(3, 2)");
+        assert_eq!(shape_repr(&[3]), "(3,)");
+        assert_eq!(shape_repr(&[]), "()");
+        assert_eq!(shape_repr(&[1, 2, 3]), "(1, 2, 3)");
     }
 
     /// `watched` hands the work its stop flag: an interrupt seen by the watcher

@@ -9,5 +9,6 @@
 | [0005](0005-registry-option-values.md) | Typed values in registry `options`: `str` or `list[str]` | Accepted (2026-10) |
 | [0006](0006-declared-classical-registers.md) | The circuit carries its declared classical width | Proposed (2026-10) |
 | [0007](0007-native-qml.md) | Native QML, with its own API beside `qml.train` | Proposed (2026-10) |
+| [0008](0008-vector-jacobian-product.md) | `qml.vjp`: the vector-Jacobian product in one adjoint run per row | Proposed (2026-11) |
 
 Numbers are never reused or renumbered. A new ADR takes the next free number.
