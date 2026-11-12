@@ -550,29 +550,67 @@ pub(crate) struct Selection {
     pub(crate) infrastructure: String,
     pub(crate) backend: String,
     typed: Option<Target>,
+    strings: StringArgs,
+}
+
+/// The provider arguments an entry point takes next to the `infrastructure`
+/// and `backend` strings. `None` means "not given"; an entry point without
+/// `fusion` passes `None`.
+struct StringArgs {
+    sim_method: String,
+    noise_model: Option<Py<PyAny>>,
+    fusion: Option<bool>,
+    nodes: Option<u32>,
+    cores_per_qpu: Option<u32>,
+    walltime: Option<String>,
 }
 
 impl Selection {
-    /// `given` lists each other exclusive argument, in signature order, and
-    /// whether the caller set it to something other than its default.
+    /// With `target`, any of `infrastructure`, `noise_model`, `fusion`,
+    /// `nodes`, `cores_per_qpu` or `walltime` given, or `backend`/`sim_method`
+    /// off its default, is a `ConfigurationError` naming each one.
     pub(crate) fn new(
         func: &str,
         target: Option<&Bound<'_, PyAny>>,
         infrastructure: Option<String>,
         backend: &str,
-        given: &[(&str, bool)],
+        sim_method: &str,
+        noise_model: Option<Bound<'_, PyAny>>,
+        fusion: Option<bool>,
+        nodes: Option<u32>,
+        cores_per_qpu: Option<u32>,
+        walltime: Option<String>,
     ) -> PyResult<Self> {
+        let strings = StringArgs {
+            sim_method: sim_method.to_owned(),
+            noise_model: noise_model.map(Bound::unbind),
+            fusion,
+            nodes,
+            cores_per_qpu,
+            walltime,
+        };
         let Some(target) = target else {
             return Ok(Self {
                 infrastructure: require_arg(func, "infrastructure", infrastructure)?,
                 backend: backend.to_owned(),
                 typed: None,
+                strings,
             });
         };
         let target = extract_target(target)?;
-        let conflicts: Vec<&str> = std::iter::once(("infrastructure", infrastructure.is_some()))
-            .chain(given.iter().copied())
-            .filter_map(|(name, set)| set.then_some(name))
+        let given = [
+            ("infrastructure", infrastructure.is_some()),
+            ("backend", backend != DEFAULT_BACKEND),
+            ("sim_method", strings.sim_method != DEFAULT_SIM_METHOD),
+            ("noise_model", strings.noise_model.is_some()),
+            ("fusion", strings.fusion.is_some()),
+            ("nodes", strings.nodes.is_some()),
+            ("cores_per_qpu", strings.cores_per_qpu.is_some()),
+            ("walltime", strings.walltime.is_some()),
+        ];
+        let conflicts: Vec<&str> = given
+            .iter()
+            .filter_map(|&(name, set)| set.then_some(name))
             .collect();
         if !conflicts.is_empty() {
             return Err(configuration_error(format!(
@@ -585,11 +623,29 @@ impl Selection {
             infrastructure: target.infrastructure_label(),
             backend: target.backend_label(),
             typed: Some(target),
+            strings,
         })
     }
 
-    pub(crate) fn is_typed(&self) -> bool {
-        self.typed.is_some()
+    /// For `train`/`qml.train`, where `nodes` and `cores_per_qpu` have no
+    /// default: the string path still requires both.
+    pub(crate) fn require_allocation(&self, func: &str) -> PyResult<()> {
+        if self.typed.is_none() {
+            require_arg(func, "nodes", self.strings.nodes)?;
+            require_arg(func, "cores_per_qpu", self.strings.cores_per_qpu)?;
+        }
+        Ok(())
+    }
+
+    /// Check the CUNQA allocation (defaults where not given), as before
+    /// targets; a `Cunqa` target checked its own when built.
+    pub(crate) fn validate_allocation(&self) -> PyResult<()> {
+        super::validate_cunqa_allocation(
+            &self.infrastructure,
+            self.strings.nodes.unwrap_or(DEFAULT_NODES),
+            self.strings.cores_per_qpu.unwrap_or(DEFAULT_CORES_PER_QPU),
+            self.strings.walltime.as_deref(),
+        )
     }
 
     /// Whether the run goes to the native simulator. On the string path this
@@ -602,17 +658,27 @@ impl Selection {
         }
     }
 
-    /// The final target: the typed one with `options` added, or `strings`
-    /// applied to them.
-    pub(crate) fn resolve(
-        self,
-        options: Option<HashMap<String, OptionValue>>,
-        strings: impl FnOnce(Option<HashMap<String, OptionValue>>) -> PyResult<Target>,
-    ) -> PyResult<Target> {
-        match self.typed {
-            Some(target) => with_options(target, options),
-            None => strings(options),
+    /// The final target: the typed one with `options` added, or the strings'.
+    pub(crate) fn resolve(self, options: Option<HashMap<String, OptionValue>>) -> PyResult<Target> {
+        if let Some(target) = self.typed {
+            return with_options(target, options);
         }
+        let (nodes, cores_per_qpu, walltime) = (
+            self.strings.nodes.unwrap_or(DEFAULT_NODES),
+            self.strings.cores_per_qpu.unwrap_or(DEFAULT_CORES_PER_QPU),
+            self.strings.walltime.as_deref(),
+        );
+        target_from_strings(
+            &self.infrastructure,
+            &self.backend,
+            &self.strings.sim_method,
+            self.strings.noise_model,
+            nodes,
+            cores_per_qpu,
+            walltime,
+            self.strings.fusion,
+            options,
+        )
     }
 }
 
