@@ -84,8 +84,6 @@
 //! The single-photon polarization Hamiltonian `ω σ_z + Ω σ_x` is in
 //! [`hamiltonians::photon_polarization`].
 
-#![deny(clippy::all)]
-
 pub mod chemistry;
 pub mod constants;
 pub mod error;

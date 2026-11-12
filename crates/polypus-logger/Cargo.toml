@@ -31,3 +31,6 @@ warn-logs  = ["log/max_level_warn",  "log/release_max_level_warn"]
 info-logs  = ["log/max_level_info",  "log/release_max_level_info"]
 debug-logs = ["log/max_level_debug", "log/release_max_level_debug"]
 trace-logs = ["log/max_level_trace", "log/release_max_level_trace"]
+
+[lints]
+workspace = true

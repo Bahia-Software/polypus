@@ -1,9 +1,9 @@
 # Clippy configuration for the Polypus workspace.
 #
 # NOTE: clippy.toml only tunes lint *thresholds/behaviour*. Lint *levels*
-# (deny/warn/allow) are set in CI (`-- -D warnings`) and, optionally, in the
-# `[workspace.lints]` table of the root Cargo.toml (see "Lint policy" in
-# docs/CONTRIBUTING.md).
+# (deny/warn/allow) are set in the `[workspace.lints]` table of the root
+# Cargo.toml, which every member crate inherits, and in CI (`-- -D warnings`)
+# (see "Lint policy" in docs/CONTRIBUTING.md).
 
 # Polypus is pre-1.0 and under active development: don't hold back lints
 # just to preserve a frozen public API.
