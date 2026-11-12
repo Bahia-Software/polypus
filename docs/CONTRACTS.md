@@ -2467,6 +2467,11 @@ that does not depend on the data is checked where it is written, as a plain
   does not fit in a `usize` (a huge `reps`, or any layer after one) is
   `ValidationError::TooManyParams`; both are a `ValueError` that leaves the
   object as it was, never PyO3's `OverflowError` or a panic.
+  `simplified_two_design(reps)` takes only that count: it reserves
+  `n + 2·(n − 1)·reps` parameters for the `n` qubits active where it sits
+  (one `Ry` per qubit, then two per pair per block), has no string options
+  and so no row in the **Options** table below, and with one active qubit
+  (no pairs) is that single `Ry` layer for any `reps`.
 
 What depends on the data — how many features the encoders can carry — is
 checked when the model meets a dataset. `num_params` and `num_observables` (the
@@ -2732,9 +2737,10 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   `strongly_entangling` range included). Loading only parses JSON: it
   never runs code.
 - A new layer is a new variant of the `spec`'s layer list, which leaves every
-  existing file valid, so it keeps `version` 1 (`StronglyEntangling` was
-  added this way). The reverse does not hold: an older Polypus rejects, as a
-  `ValueError`, a file that uses a layer it does not know.
+  existing file valid, so it keeps `version` 1 (`StronglyEntangling` and
+  `SimplifiedTwoDesign` were added this way). The reverse does not hold: an
+  older Polypus rejects, as a `ValueError`, a file that uses a layer it does
+  not know.
 - Every parameter reads back bit for bit (the file is written with
   `serde_json`'s round-trip float formatting), so a loaded model predicts
   exactly as the saved one.

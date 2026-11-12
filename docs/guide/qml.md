@@ -151,10 +151,13 @@ Everything after `y` is keyword-only. The execution arguments have defaults (`sh
 | Hardware-efficient block (Qiskit's `TwoLocal`) | `hardware_efficient(reps, rotations=["ry", "rz"], entangler="cx", entanglement="linear", final_rotation_layer=True)` (`Ansatz` only) | one per rotation gate |
 | `RealAmplitudes` | `real_amplitudes(reps)` (`Ansatz` only) | one per rotation gate |
 | PennyLane's `StronglyEntanglingLayers`: per layer, `Rz(φ)`, `Ry(θ)`, `Rz(ω)` (in that order) on every qubit, then an entangler from each qubit `i` to `(i + r) mod n` | `strongly_entangling(reps, ranges=None, entangler="cx")` (`Ansatz` only) | `3·n·reps` (`n`: qubits active at that point) |
+| PennyLane's `SimplifiedTwoDesign`: an `Ry` on every qubit, then per block `CZ` + `Ry` on the even and then the odd pairs | `simplified_two_design(reps)` (`Ansatz` only) | `n + 2·(n − 1)·reps` (`n`: qubits active at that point) |
 | QCNN convolution, one block shared by every pair | `conv("basic" \| "cartan", pairing="alternating")` (`Ansatz` only) | 4 (`"basic"`) or 3 (`"cartan"`) |
 | QCNN pooling: each pair of active qubits becomes one | `pool("basic", keep="even_positions")` (`Ansatz` only) | 3 |
 
 In `strongly_entangling`, `ranges` gives each layer's `r`: one per layer, each from `1` to `n − 1`, or `None` for PennyLane's default `r = (layer mod (n − 1)) + 1` (`1, 2, …`). A range outside those bounds, or a count other than `reps`, raises `ValueError` at the call. One active qubit gets no entanglers, only the rotations. The parameters go layer by layer, qubit by qubit, `(φ, θ, ω)` each: PennyLane's `(reps, n, 3)` weights flattened in C order.
+
+`simplified_two_design` starts with an `Ry(θ)` on every qubit. Each of its `reps` blocks then takes the even pairs `(0, 1), (2, 3), …` and after them the odd pairs `(1, 2), (3, 4), …`, and on each pair applies `CZ` followed by an `Ry(θ)` on both of its qubits. The parameters are the `n` initial weights and then, block by block and pair by pair, two per pair: PennyLane's initial weights `(n,)` followed by its `(reps, n − 1, 2)` weights in C order. With `reps=0`, or with a single active qubit (no pairs) whatever `reps`, only the initial `Ry` layer remains. PennyLane still declares `(reps,)` block weights for a single wire, which it never uses; Polypus reserves none, so drop them when porting such weights.
 
 Two other common templates are `hardware_efficient` settings rather than methods of their own:
 

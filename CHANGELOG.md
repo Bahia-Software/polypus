@@ -12,6 +12,16 @@ Entries were curated from the Conventional Commits history. Releases before
 ## [Unreleased]
 
 ### Added
+- `polypus.qml.Ansatz.simplified_two_design(reps)`, PennyLane's
+  `SimplifiedTwoDesign`: an `Ry` on every qubit, then `reps` blocks that apply
+  `CZ` and an `Ry` on both qubits of each even pair and then each odd pair;
+  `n + 2·(n−1)·reps` parameters for the `n` qubits active at that point, in
+  PennyLane's order (initial weights, then `(reps, n−1, 2)`). Only `Ry` and
+  `CZ`, so the exact parameter-shift gradient still applies; one active qubit
+  is the initial layer alone, whatever `reps`. The layer saves and loads with
+  `TrainedModel.save`/`qml.load` (format version still 1). In `polypus-qml`:
+  `SimplifiedTwoDesignAnsatz`, `Layer::SimplifiedTwoDesign` and
+  `QuantumModel::simplified_two_design` (#505, #570).
 - `polypus.qml.Ansatz.strongly_entangling(reps, ranges=None, entangler="cx")`,
   PennyLane's `StronglyEntanglingLayers`: per layer, a general rotation on
   every qubit, emitted as `Rz(φ)`, `Ry(θ)`, `Rz(ω)`, in that order, so the
@@ -95,6 +105,9 @@ Entries were curated from the Conventional Commits history. Releases before
   `libm` (`erf` for the Boys function).
 
 ### Changed
+- **BREAKING (Rust):** `polypus_qml::Layer` has a new variant,
+  `SimplifiedTwoDesign`, so an exhaustive `match` on it outside its crate
+  must handle it (#570).
 - **BREAKING (Rust):** `polypus_qml::ValidationError` has two new variants,
   `StronglyEntanglingRangesLength` and `StronglyEntanglingRangeOutOfBounds`,
   so an exhaustive `match` on it outside its crate must handle them (#505).
