@@ -66,7 +66,9 @@ gain: the shift rule's circuits do not depend on the observables.
 7. **In `polypus-qml`,** the product is a `Vjp` with **one row per sample**
    (`Jacobian::vjp`, and by the adjoint `JacobianBlock::vjp_runs` /
    `vjp_from_adjoint`); the binding sums the parameter rows in row order, so the
-   sum does not depend on the blocks.
+   sum does not depend on the blocks. `Jacobian` and `Vjp` share one private
+   bookkeeping (where a gate's derivative goes in a row), so the two cannot
+   drift apart.
 
 ## Alternatives considered
 

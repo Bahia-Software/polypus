@@ -402,17 +402,15 @@ impl JacobianBlock<'_> {
     fn zero_jacobian(&self) -> Jacobian {
         let jacobian = self.jacobian;
         let (n, k) = (self.samples.len(), jacobian.num_observables());
-        let (num_params, num_features) = (jacobian.num_params(), jacobian.num_features());
         Jacobian {
             num_samples: n,
             num_observables: k,
-            num_params,
-            num_features,
-            params: jacobian.wrt.params().then(|| vec![0.0; n * k * num_params]),
-            inputs: jacobian
-                .wrt
-                .inputs()
-                .then(|| vec![0.0; n * k * num_features]),
+            parts: Parts::zeros(
+                jacobian.wrt,
+                n * k,
+                jacobian.num_params(),
+                jacobian.num_features(),
+            ),
         }
     }
 
@@ -607,6 +605,58 @@ fn check_cotangent(cotangent: &[f64], samples: usize, observables: usize) -> Res
     Ok(())
 }
 
+/// What [`Jacobian`] and [`Vjp`] hold alike: the parts `wrt` asked for, flat
+/// and row-major, `num_params` and `num_features` wide, and where a gate's
+/// derivative goes in a row. One body for both, so the two bookkeepings cannot
+/// drift apart: a [`Jacobian`] row is a `(sample, observable)` pair, a [`Vjp`]
+/// row a sample.
+#[derive(Debug, Clone, PartialEq)]
+struct Parts {
+    num_params: usize,
+    num_features: usize,
+    params: Option<Vec<f64>>,
+    inputs: Option<Vec<f64>>,
+}
+
+impl Parts {
+    /// `rows` rows of zeros in each part `wrt` asks for, `None` for the other.
+    fn zeros(wrt: JacobianWrt, rows: usize, num_params: usize, num_features: usize) -> Self {
+        Parts {
+            num_params,
+            num_features,
+            params: wrt.params().then(|| vec![0.0; rows * num_params]),
+            inputs: wrt.inputs().then(|| vec![0.0; rows * num_features]),
+        }
+    }
+
+    /// Add the derivative with respect to one gate's angle to row `row` where
+    /// it belongs: to the parameter the gate reads, or to each feature it
+    /// reads times that feature's chain-rule factor. A slot of a part not held
+    /// is skipped (only the slots `wrt` asks for are differentiated).
+    fn add(&mut self, row: usize, slot: &Slot, derivative: f64) {
+        match (slot, &mut self.params, &mut self.inputs) {
+            (Slot::Param(p), Some(params), _) => {
+                params[row * self.num_params + p] += derivative;
+            }
+            (Slot::Input { features, .. }, _, Some(inputs)) => {
+                for &(f, factor) in features {
+                    inputs[row * self.num_features + f] += factor * derivative;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The entry at `column` of row `row` of a part, or `None` when the part
+    /// is not held or the column is out of range (the caller checks the row).
+    fn entry(part: Option<&[f64]>, width: usize, row: usize, column: usize) -> Option<f64> {
+        if column >= width {
+            return None;
+        }
+        part?.get(row * width + column).copied()
+    }
+}
+
 /// The Jacobian of every readout observable's expectation over some samples:
 /// with respect to the parameters, the inputs, or both, as the
 /// [`JacobianWrt`] it was built with says.
@@ -621,31 +671,16 @@ fn check_cotangent(cotangent: &[f64], samples: usize, observables: usize) -> Res
 pub struct Jacobian {
     num_samples: usize,
     num_observables: usize,
-    num_params: usize,
-    num_features: usize,
-    params: Option<Vec<f64>>,
-    inputs: Option<Vec<f64>>,
+    /// One row per `(sample, observable)`, sample-major.
+    parts: Parts,
 }
 
 impl Jacobian {
     /// Add the derivative of `⟨O_o⟩(x_s)` with respect to one gate's angle
-    /// where it belongs: to the parameter the gate reads, or to each feature
-    /// it reads times that feature's chain-rule factor. A slot of a part this
-    /// Jacobian does not hold is skipped (only the slots `wrt` asks for are
-    /// differentiated).
+    /// where it belongs ([`Parts::add`]).
     fn add(&mut self, s: usize, o: usize, slot: &Slot, derivative: f64) {
-        let k = self.num_observables;
-        match (slot, &mut self.params, &mut self.inputs) {
-            (Slot::Param(p), Some(params), _) => {
-                params[(s * k + o) * self.num_params + p] += derivative;
-            }
-            (Slot::Input { features, .. }, _, Some(inputs)) => {
-                for &(f, factor) in features {
-                    inputs[(s * k + o) * self.num_features + f] += factor * derivative;
-                }
-            }
-            _ => {}
-        }
+        self.parts
+            .add(s * self.num_observables + o, slot, derivative);
     }
 
     /// The number of samples: both parts' first axis.
@@ -660,55 +695,49 @@ impl Jacobian {
 
     /// The number of trainable parameters: the parameter part's last axis.
     pub fn num_params(&self) -> usize {
-        self.num_params
+        self.parts.num_params
     }
 
     /// The number of features: the input part's last axis.
     pub fn num_features(&self) -> usize {
-        self.num_features
+        self.parts.num_features
     }
 
     /// The Jacobian with respect to the parameters, flat and row-major, if
     /// asked for.
     pub fn params(&self) -> Option<&[f64]> {
-        self.params.as_deref()
+        self.parts.params.as_deref()
     }
 
     /// The Jacobian with respect to the inputs, flat and row-major, if asked
     /// for.
     pub fn inputs(&self) -> Option<&[f64]> {
-        self.inputs.as_deref()
+        self.parts.inputs.as_deref()
     }
 
     /// `∂⟨O_observable⟩(x_sample, θ)/∂θ_param`, or `None` when out of range or
     /// not asked for.
     pub fn param(&self, sample: usize, observable: usize, param: usize) -> Option<f64> {
-        if sample >= self.num_samples
-            || observable >= self.num_observables
-            || param >= self.num_params
-        {
-            return None;
-        }
-        let index = (sample * self.num_observables + observable) * self.num_params + param;
-        self.params.as_ref()?.get(index).copied()
+        let row = self.row(sample, observable)?;
+        Parts::entry(self.params(), self.num_params(), row, param)
     }
 
     /// `∂⟨O_observable⟩(x_sample, θ)/∂x_{sample,feature}`, or `None` when out of
     /// range or not asked for.
     pub fn input(&self, sample: usize, observable: usize, feature: usize) -> Option<f64> {
-        if sample >= self.num_samples
-            || observable >= self.num_observables
-            || feature >= self.num_features
-        {
-            return None;
-        }
-        let index = (sample * self.num_observables + observable) * self.num_features + feature;
-        self.inputs.as_ref()?.get(index).copied()
+        let row = self.row(sample, observable)?;
+        Parts::entry(self.inputs(), self.num_features(), row, feature)
+    }
+
+    /// The row of `(sample, observable)`, or `None` when either is out of range.
+    fn row(&self, sample: usize, observable: usize) -> Option<usize> {
+        (sample < self.num_samples && observable < self.num_observables)
+            .then(|| sample * self.num_observables + observable)
     }
 
     /// The two parts, `(params, inputs)`, each `None` if not asked for.
     pub fn into_parts(self) -> (Option<Vec<f64>>, Option<Vec<f64>>) {
-        (self.params, self.inputs)
+        (self.parts.params, self.parts.inputs)
     }
 
     /// The vector-Jacobian product with `cotangent`, `v`, flat and row-major
@@ -737,18 +766,15 @@ impl Jacobian {
             }
             out
         };
+        let (num_params, num_features) = (self.num_params(), self.num_features());
         Ok(Vjp {
             num_samples: n,
-            num_params: self.num_params,
-            num_features: self.num_features,
-            params: self
-                .params
-                .as_deref()
-                .map(|part| contract(part, self.num_params)),
-            inputs: self
-                .inputs
-                .as_deref()
-                .map(|part| contract(part, self.num_features)),
+            parts: Parts {
+                num_params,
+                num_features,
+                params: self.params().map(|part| contract(part, num_params)),
+                inputs: self.inputs().map(|part| contract(part, num_features)),
+            },
         })
     }
 }
@@ -768,10 +794,8 @@ impl Jacobian {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Vjp {
     num_samples: usize,
-    num_params: usize,
-    num_features: usize,
-    params: Option<Vec<f64>>,
-    inputs: Option<Vec<f64>>,
+    /// One row per sample.
+    parts: Parts,
 }
 
 impl Vjp {
@@ -779,29 +803,14 @@ impl Vjp {
     fn zeros(wrt: JacobianWrt, n: usize, num_params: usize, num_features: usize) -> Self {
         Vjp {
             num_samples: n,
-            num_params,
-            num_features,
-            params: wrt.params().then(|| vec![0.0; n * num_params]),
-            inputs: wrt.inputs().then(|| vec![0.0; n * num_features]),
+            parts: Parts::zeros(wrt, n, num_params, num_features),
         }
     }
 
     /// Add the derivative of sample `s`'s weighted expectation with respect to
-    /// one gate's angle where [`Jacobian::add`] would: to the parameter the
-    /// gate reads, or to each feature it reads times that feature's chain-rule
-    /// factor; skipped for a part this product does not hold.
+    /// one gate's angle where [`Jacobian::add`] would ([`Parts::add`]).
     fn add(&mut self, s: usize, slot: &Slot, derivative: f64) {
-        match (slot, &mut self.params, &mut self.inputs) {
-            (Slot::Param(p), Some(params), _) => {
-                params[s * self.num_params + p] += derivative;
-            }
-            (Slot::Input { features, .. }, _, Some(inputs)) => {
-                for &(f, factor) in features {
-                    inputs[s * self.num_features + f] += factor * derivative;
-                }
-            }
-            _ => {}
-        }
+        self.parts.add(s, slot, derivative);
     }
 
     /// The number of samples: both parts' first axis.
@@ -811,29 +820,29 @@ impl Vjp {
 
     /// The number of trainable parameters: the parameter part's last axis.
     pub fn num_params(&self) -> usize {
-        self.num_params
+        self.parts.num_params
     }
 
     /// The number of features: the input part's last axis.
     pub fn num_features(&self) -> usize {
-        self.num_features
+        self.parts.num_features
     }
 
     /// The product with respect to the parameters, `(num_samples,
     /// num_params)`, flat and row-major, if asked for.
     pub fn params(&self) -> Option<&[f64]> {
-        self.params.as_deref()
+        self.parts.params.as_deref()
     }
 
     /// The product with respect to the inputs, `(num_samples, num_features)`,
     /// flat and row-major, if asked for.
     pub fn inputs(&self) -> Option<&[f64]> {
-        self.inputs.as_deref()
+        self.parts.inputs.as_deref()
     }
 
     /// The two parts, `(params, inputs)`, each `None` if not asked for.
     pub fn into_parts(self) -> (Option<Vec<f64>>, Option<Vec<f64>>) {
-        (self.params, self.inputs)
+        (self.parts.params, self.parts.inputs)
     }
 }
 
