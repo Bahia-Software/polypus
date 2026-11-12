@@ -4,7 +4,7 @@ use crate::error::OptimizerError;
 use crate::linalg::symmetric_eigen;
 use crate::objective::EvaluationOracle;
 use crate::observer::{IterationObserver, IterationReport};
-use crate::outcome::{OptimizationOutcome, Optimizer};
+use crate::outcome::{OptimizationOutcome, Optimizer, StopReason};
 use crate::rng::with_seeded_rng;
 use crate::util::{
     check_initial_point, check_oracle_len, check_patience, recent_improvement, stagnated,
@@ -282,6 +282,7 @@ impl AlgorithmCmaEs {
         let mut best = Incumbent::new();
         let mut fitness_history: Vec<f64> = Vec::new();
         let mut converged = false;
+        let mut stop_reason = StopReason::IterationBudget;
         // Index of the current run: 0 is the first, k the k-th restart.
         let mut run = 0u32;
 
@@ -334,11 +335,12 @@ impl AlgorithmCmaEs {
                     best_params: &best.params,
                 };
                 if observer.observe(&report).is_break() {
+                    stop_reason = StopReason::Callback;
                     break 'runs;
                 }
 
                 let stop = dist.degeneration(sigma0).or_else(|| {
-                    stagnated(&run_history, tolerance, patience).then_some(StopReason::Stagnation)
+                    stagnated(&run_history, tolerance, patience).then_some(RestartCause::Stagnation)
                 });
                 let Some(reason) = stop else {
                     continue;
@@ -354,6 +356,7 @@ impl AlgorithmCmaEs {
                 }
                 log::debug!("Stopping early at generation {generation} due to {reason}");
                 converged = true;
+                stop_reason = reason.stop_reason();
                 break 'runs;
             }
         }
@@ -364,6 +367,7 @@ impl AlgorithmCmaEs {
             iterations_run: fitness_history.len(),
             converged,
             fitness_history,
+            stop_reason,
         })
     }
 }
@@ -639,9 +643,10 @@ impl Strategy {
     }
 }
 
-/// Why a run ended.
+/// Why one CMA-ES run (the first or a restart) ended: a restart while restarts
+/// remain, otherwise the [`StopReason`] of the whole optimisation.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum StopReason {
+enum RestartCause {
     /// The run's best fitness improved by less than `tolerance` over its last
     /// `patience` generations.
     Stagnation,
@@ -656,21 +661,34 @@ enum StopReason {
     Diverged(f64),
 }
 
-impl fmt::Display for StopReason {
+impl RestartCause {
+    /// The [`StopReason`] of a run this cause ends, with no restart left.
+    fn stop_reason(self) -> StopReason {
+        match self {
+            RestartCause::Stagnation => StopReason::FitnessTolerance,
+            RestartCause::NonFinite
+            | RestartCause::IllConditioned(_)
+            | RestartCause::Collapsed(_)
+            | RestartCause::Diverged(_) => StopReason::Degenerate,
+        }
+    }
+}
+
+impl fmt::Display for RestartCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StopReason::Stagnation => write!(f, "fitness stagnation"),
-            StopReason::NonFinite => write!(f, "a non-finite search distribution"),
-            StopReason::IllConditioned(condition) => write!(
+            RestartCause::Stagnation => write!(f, "fitness stagnation"),
+            RestartCause::NonFinite => write!(f, "a non-finite search distribution"),
+            RestartCause::IllConditioned(condition) => write!(
                 f,
                 "an ill-conditioned covariance (condition number {condition:.3e} > {MAX_CONDITION:e})"
             ),
-            StopReason::Collapsed(spread) => write!(
+            RestartCause::Collapsed(spread) => write!(
                 f,
                 "a collapsed search distribution (TolX: largest coordinate std {spread:.3e} < \
                  {TOL_X:e}·sigma0)"
             ),
-            StopReason::Diverged(spread) => write!(
+            RestartCause::Diverged(spread) => write!(
                 f,
                 "a diverging search distribution (TolXUp: largest coordinate std {spread:.3e} > \
                  {TOL_X_UP:e}·sigma0)"
@@ -861,7 +879,7 @@ impl Distribution {
     }
 
     /// The first of Hansen's termination criteria that holds, if any.
-    fn degeneration(&self, sigma0: f64) -> Option<StopReason> {
+    fn degeneration(&self, sigma0: f64) -> Option<RestartCause> {
         let finite = self.sigma.is_finite()
             && self
                 .mean
@@ -871,18 +889,18 @@ impl Distribution {
                 .chain(&self.cov)
                 .all(|x| x.is_finite());
         if !finite {
-            return Some(StopReason::NonFinite);
+            return Some(RestartCause::NonFinite);
         }
         if let Some(condition) = self.ill_conditioned {
-            return Some(StopReason::IllConditioned(condition));
+            return Some(RestartCause::IllConditioned(condition));
         }
         // σ·max_i √C_ii: the largest coordinate standard deviation.
         let spread = self.sigma * self.max_coordinate_std();
         if spread < TOL_X * sigma0 {
-            return Some(StopReason::Collapsed(spread));
+            return Some(RestartCause::Collapsed(spread));
         }
         if spread > TOL_X_UP * sigma0 {
-            return Some(StopReason::Diverged(spread));
+            return Some(RestartCause::Diverged(spread));
         }
         None
     }
@@ -1237,7 +1255,7 @@ mod tests {
         let mut dist = Distribution::new(Array1::zeros(3), 1.0);
         dist.cov = Array2::from_diag(&Array1::from(vec![1.0, 1e-3, 1e-15]));
         dist.decompose();
-        let Some(StopReason::IllConditioned(condition)) = dist.degeneration(1.0) else {
+        let Some(RestartCause::IllConditioned(condition)) = dist.degeneration(1.0) else {
             panic!("expected an ill-conditioned covariance");
         };
         assert!((condition - 1e15).abs() < 1e3, "{condition:e}");
@@ -1252,23 +1270,26 @@ mod tests {
 
         let mut d = healthy();
         d.mean[1] = f64::NAN;
-        assert_eq!(d.degeneration(0.5), Some(StopReason::NonFinite));
+        assert_eq!(d.degeneration(0.5), Some(RestartCause::NonFinite));
         let mut d = healthy();
         d.cov[[0, 1]] = f64::INFINITY;
-        assert_eq!(d.degeneration(0.5), Some(StopReason::NonFinite));
+        assert_eq!(d.degeneration(0.5), Some(RestartCause::NonFinite));
         let mut d = healthy();
         d.sigma = f64::INFINITY;
-        assert_eq!(d.degeneration(0.5), Some(StopReason::NonFinite));
+        assert_eq!(d.degeneration(0.5), Some(RestartCause::NonFinite));
 
         let mut d = healthy();
         d.sigma = 1e-13;
         assert!(matches!(
             d.degeneration(0.5),
-            Some(StopReason::Collapsed(_))
+            Some(RestartCause::Collapsed(_))
         ));
         let mut d = healthy();
         d.sigma = 1e4;
-        assert!(matches!(d.degeneration(0.5), Some(StopReason::Diverged(_))));
+        assert!(matches!(
+            d.degeneration(0.5),
+            Some(RestartCause::Diverged(_))
+        ));
         // The spread is the largest coordinate's: one wide coordinate keeps a
         // distribution that is collapsed in the other from TolX.
         let mut d = healthy();
@@ -1510,17 +1531,17 @@ mod tests {
         assert_eq!(at(TOL_X * 0.5, 0.5), None, "TolX is a strict bound");
         assert!(matches!(
             at(TOL_X * 0.5 * 0.99, 0.5),
-            Some(StopReason::Collapsed(_))
+            Some(RestartCause::Collapsed(_))
         ));
         assert_eq!(at(TOL_X_UP * 0.5, 0.5), None, "TolXUp is a strict bound");
         assert!(matches!(
             at(TOL_X_UP * 0.5 * 1.01, 0.5),
-            Some(StopReason::Diverged(_))
+            Some(RestartCause::Diverged(_))
         ));
         // Both are relative to σ₀: 1e-12 is collapsed for σ₀ = 2, not for
         // σ₀ = 0.5 (between TolX·σ₀ and TolX/σ₀).
         assert_eq!(at(1e-12, 0.5), None);
-        assert!(matches!(at(1e-12, 2.0), Some(StopReason::Collapsed(_))));
+        assert!(matches!(at(1e-12, 2.0), Some(RestartCause::Collapsed(_))));
     }
 
     #[test]
@@ -1566,11 +1587,23 @@ mod tests {
 
     #[test]
     fn stop_reasons_read_well_in_the_log() {
-        assert_eq!(StopReason::Stagnation.to_string(), "fitness stagnation");
-        assert!(StopReason::IllConditioned(2e14)
+        assert_eq!(RestartCause::Stagnation.to_string(), "fitness stagnation");
+        assert_eq!(
+            RestartCause::Stagnation.stop_reason(),
+            StopReason::FitnessTolerance
+        );
+        for cause in [
+            RestartCause::NonFinite,
+            RestartCause::IllConditioned(2e14),
+            RestartCause::Collapsed(1e-13),
+            RestartCause::Diverged(1e5),
+        ] {
+            assert_eq!(cause.stop_reason(), StopReason::Degenerate, "{cause}");
+        }
+        assert!(RestartCause::IllConditioned(2e14)
             .to_string()
             .contains("condition number 2.000e14 > 1e14"));
-        assert!(StopReason::Collapsed(1e-13).to_string().contains("TolX"));
-        assert!(StopReason::Diverged(1e5).to_string().contains("TolXUp"));
+        assert!(RestartCause::Collapsed(1e-13).to_string().contains("TolX"));
+        assert!(RestartCause::Diverged(1e5).to_string().contains("TolXUp"));
     }
 }

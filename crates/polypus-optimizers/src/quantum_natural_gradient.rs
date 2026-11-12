@@ -3,7 +3,7 @@
 use crate::error::OptimizerError;
 use crate::objective::{EvaluationOracle, VarianceOracle};
 use crate::observer::{IterationObserver, IterationReport};
-use crate::outcome::{OptimizationOutcome, Optimizer};
+use crate::outcome::{OptimizationOutcome, Optimizer, StopReason};
 use crate::rng::with_seeded_rng;
 use crate::util::{check_initial_point, check_oracle_len};
 use rand::{Rng, RngExt};
@@ -239,6 +239,7 @@ impl AlgorithmQNG {
         let mut best_energy = f64::NEG_INFINITY;
         let mut best_theta = theta.clone();
         let mut iterations_run = 0usize;
+        let mut stop_reason = StopReason::IterationBudget;
         // Best energy at the end of each iteration (see
         // `OptimizationOutcome::fitness_history`).
         let mut fitness_history: Vec<f64> = Vec::with_capacity(max_iters as usize);
@@ -279,6 +280,7 @@ impl AlgorithmQNG {
                 best_params: &best_theta,
             };
             if observer.observe(&report).is_break() {
+                stop_reason = StopReason::Callback;
                 break;
             }
         }
@@ -290,6 +292,7 @@ impl AlgorithmQNG {
             // QNG runs a fixed iteration budget; it has no early-stopping test.
             converged: false,
             fitness_history,
+            stop_reason,
         })
     }
 }

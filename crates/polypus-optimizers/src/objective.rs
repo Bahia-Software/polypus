@@ -41,7 +41,9 @@ pub trait EvaluationOracle: Send + Sync {
     /// through it is as noisy as the optimizer's own: override it to honour
     /// `shots`. A wrapper that forwards `evaluate_batch` to another oracle
     /// should forward this method too, as the `Arc` implementation below
-    /// does; otherwise the inner oracle's override is skipped.
+    /// does; otherwise the inner oracle's override is skipped. A method added
+    /// to this trait must be forwarded by `Counted` in
+    /// `polypus-orchestration`, which wraps every training run's oracles.
     fn evaluate_batch_with_shots(&self, candidates: &[Vec<f64>], _shots: u32) -> Vec<f64> {
         self.evaluate_batch(candidates)
     }
@@ -97,6 +99,9 @@ pub trait VarianceOracle: Send + Sync {
 /// be finite, as every fitness value must be. An implementation that scores
 /// candidates to compute its gradient can also return the fitness at `θ` from
 /// the same batch ([`value_and_gradient`](GradientOracle::value_and_gradient)).
+///
+/// A method added to this trait must be forwarded by `CountedGradient` in
+/// `polypus-orchestration`, which wraps every training run's exact gradient.
 pub trait GradientOracle: Send + Sync {
     /// `∂fitness/∂θ[param_index]` at `theta`.
     fn gradient(&self, theta: &[f64], param_index: usize) -> f64;

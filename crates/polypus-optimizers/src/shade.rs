@@ -34,7 +34,7 @@ use crate::differential_evolution::{
 };
 use crate::error::OptimizerError;
 use crate::observer::{IterationObserver, IterationReport};
-use crate::outcome::OptimizationOutcome;
+use crate::outcome::{OptimizationOutcome, StopReason};
 use crate::util::{argmax, check_oracle_len, fitness_stagnated, wrap_angle, wrap_difference};
 use rand::{Rng, RngExt};
 use std::f64::consts::{PI, TAU};
@@ -484,6 +484,13 @@ pub(crate) fn run_with_rng<R: Rng>(
 
     let mut iterations_run = 0usize;
     let mut converged = false;
+    // L-SHADE's schedule is a budget of evaluations; SHADE's population never
+    // shrinks, so its schedule is `generations` generations.
+    let mut stop_reason = if variant == Variant::LShade {
+        StopReason::EvaluationBudget
+    } else {
+        StopReason::IterationBudget
+    };
     let mut fitness_history: Vec<f64> = Vec::new();
 
     // The population always has the schedule's current size: it starts at
@@ -556,10 +563,12 @@ pub(crate) fn run_with_rng<R: Rng>(
             best_params: &population[best],
         };
         if observer.observe(&report).is_break() {
+            stop_reason = StopReason::Callback;
             break;
         }
         if fitness_stagnated(&fitness_history, tolerance, patience, generation) {
             converged = true;
+            stop_reason = StopReason::FitnessTolerance;
             break;
         }
         generation += 1;
@@ -571,6 +580,7 @@ pub(crate) fn run_with_rng<R: Rng>(
         iterations_run,
         converged,
         fitness_history,
+        stop_reason,
     })
 }
 

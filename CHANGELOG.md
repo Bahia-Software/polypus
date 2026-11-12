@@ -105,12 +105,28 @@ Entries were curated from the Conventional Commits history. Releases before
   PySCF/OpenFermion data in `reference-data/h2-sto3g/` (FCI at 0.7414 Å:
   −1.1372701747 Ha). `constants::BOHR_RADIUS_ANGSTROM`. New dependency:
   `libm` (`erf` for the Boys function).
+- `TrainResult.stop_reason` and `TrainResult.n_evaluations` on `train`,
+  `qml.train` and `Model.fit`. `stop_reason` names what ended the
+  optimizer's loop: `"iteration_budget"`, `"evaluation_budget"` (L-SHADE's
+  schedule, `External`'s `max_evaluations`), `"fitness_tolerance"`,
+  `"parameter_tolerance"` (PSO), `"degenerate"` (CMA-ES),
+  `"optimizer_finished"` (`External`'s empty `ask()`) or `"callback"`.
+  `n_evaluations` counts the candidates scored as a fitness, as
+  `TrainProgress.evaluations` does, plus the re-score of `best_params` on
+  the whole training set when a gradient-free optimizer trains on
+  minibatches; the shifted circuits of an exact gradient (`Adam` in
+  `qml.Model.fit`) and the final batch are not counted. In
+  Rust: `polypus_optimizers::StopReason`, `OptimizationOutcome::stop_reason`
+  and `TrainOutcome::n_evaluations`. Seeded results are unchanged (#431).
 
 ### Changed
 - **BREAKING:** for Rust users, `TrainFlow` and `RunCircuitFlow`
   (`polypus-orchestration`) have a new public field,
   `trace: Option<Arc<CallTracer>>`, so a struct literal must set it;
   `trace: None` keeps today's behaviour.
+- **BREAKING (Rust):** `polypus_optimizers::OptimizationOutcome` has a new
+  public field, `stop_reason`, so a struct literal of it outside its crate
+  must set it (#431).
 - **BREAKING (Rust):** `polypus_qml::ValidationError` has two new variants,
   `StronglyEntanglingRangesLength` and `StronglyEntanglingRangeOutOfBounds`,
   so an exhaustive `match` on it outside its crate must handle them (#505).

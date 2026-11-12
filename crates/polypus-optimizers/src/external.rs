@@ -13,7 +13,7 @@
 use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
 use crate::observer::{IterationObserver, IterationReport};
-use crate::outcome::{OptimizationOutcome, Optimizer};
+use crate::outcome::{OptimizationOutcome, Optimizer, StopReason};
 use crate::util::{check_oracle_len, BestMeasured};
 use std::fmt::Write;
 
@@ -217,6 +217,8 @@ impl AlgorithmExternal {
         let mut fitness_history: Vec<f64> = Vec::new();
         let mut spent: u64 = 0;
         let mut converged = false;
+        // The loop also ends when the budget is spent, without asking again.
+        let mut stop_reason = StopReason::EvaluationBudget;
 
         while spent < max_evaluations {
             let batch_index = fitness_history.len();
@@ -238,6 +240,7 @@ impl AlgorithmExternal {
                          stopping after {spent} evaluations"
                     );
                     converged = true;
+                    stop_reason = StopReason::OptimizerFinished;
                     break;
                 }
             };
@@ -291,6 +294,7 @@ impl AlgorithmExternal {
                 best_params: best.params(),
             };
             if observer.observe(&report).is_break() {
+                stop_reason = StopReason::Callback;
                 break;
             }
         }
@@ -304,6 +308,7 @@ impl AlgorithmExternal {
             iterations_run: fitness_history.len(),
             converged,
             fitness_history,
+            stop_reason,
         })
     }
 }
