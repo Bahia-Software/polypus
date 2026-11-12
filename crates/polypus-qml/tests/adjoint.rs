@@ -720,6 +720,71 @@ fn the_adjoint_vjp_of_zero_is_zero_and_a_nan_reaches_only_its_sample() {
     }
 }
 
+/// `vjp_weight_bounds` gives, sample by sample, the weight bound of the
+/// observable `vjp_runs` would hand each run, bit for bit — finite, `NaN`,
+/// infinite or overflowing — from the cotangent alone (it takes no `θ`, so it
+/// binds nothing), the same on a block as on the whole; and one sample's bound
+/// does not depend on the others'.
+#[test]
+fn the_vjp_weight_bounds_are_the_runs_bounds_without_binding() {
+    let model = encoded(RotationAxis::Ry)
+        .hardware_efficient(1)
+        .readout(readouts().remove(5))
+        .compile(4)
+        .unwrap();
+    let k = model.num_observables();
+    let theta = &thetas(model.num_params())[0];
+    let jacobian = model.jacobian(&rows(), JacobianWrt::Both).unwrap();
+    let finite = cotangent(ROWS.len(), k);
+    let mut nan = finite.clone();
+    nan[k] = f64::NAN; // sample 1
+    let mut infinite = finite.clone();
+    infinite[2 * k] = f64::NEG_INFINITY; // sample 2
+    let mut overflowing = finite.clone();
+    overflowing[..k].fill(f64::MAX); // sample 0: every value finite, the sum not
+    for v in [&finite, &nan, &infinite, &overflowing] {
+        let bounds = jacobian.vjp_weight_bounds(v).unwrap();
+        let runs = jacobian.vjp_runs(theta, v).unwrap();
+        assert_eq!(bounds.len(), runs.len());
+        for (s, (bound, run)) in bounds.iter().zip(&runs).enumerate() {
+            assert_eq!(
+                bound.to_bits(),
+                run.observable.weight_bound().to_bits(),
+                "sample {s}: {bound}"
+            );
+            // Only the sample with the value is touched.
+            let alone = jacobian.vjp_weight_bounds(&finite).unwrap()[s];
+            let touched = v[s * k..(s + 1) * k] != finite[s * k..(s + 1) * k];
+            assert_eq!(bound.to_bits() != alone.to_bits(), touched, "sample {s}");
+        }
+        let mut start = 0;
+        for block in jacobian.blocks(2) {
+            let end = start + block.num_samples();
+            let part = block.vjp_weight_bounds(&v[start * k..end * k]).unwrap();
+            let whole: Vec<u64> = bounds[start..end].iter().map(|b| b.to_bits()).collect();
+            assert_eq!(part.iter().map(|b| b.to_bits()).collect::<Vec<_>>(), whole);
+            start = end;
+        }
+    }
+    assert!(jacobian.vjp_weight_bounds(&nan).unwrap()[1].is_nan());
+    assert_eq!(
+        jacobian.vjp_weight_bounds(&infinite).unwrap()[2],
+        f64::INFINITY
+    );
+    assert_eq!(
+        jacobian.vjp_weight_bounds(&overflowing).unwrap()[0],
+        f64::INFINITY
+    );
+    assert!(jacobian.vjp_weight_bounds(&finite).unwrap()[0].is_finite());
+    assert_eq!(
+        jacobian.vjp_weight_bounds(&finite[1..]).unwrap_err(),
+        QmlError::CountsLengthMismatch {
+            expected: ROWS.len() * k,
+            got: ROWS.len() * k - 1
+        }
+    );
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 #[test]

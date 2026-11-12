@@ -55,18 +55,25 @@ gain: the shift rule's circuits do not depend on the observables.
    `DiagonalObservable::weight_bound()` (`Σ |c|`, a bound on every eigenvalue);
    the simulator's sweep back and each derivative stay within that bound, and
    the factor 4 leaves headroom for the sums over the gates that share a
-   parameter and the chain-rule factors. A block with such an observable takes
-   `qml.jacobian`'s adjoint runs, one per row and observable, and contracts
+   parameter and the chain-rule factors. **The row** with such an observable
+   takes `qml.jacobian`'s adjoint runs, one per observable, and contracts
    them, so the cotangent reaches the product exactly as through the
-   contraction (decided during the implementation of #559; the overflow and
-   the margin found in its review).
+   contraction; the other rows keep one run each. The route is decided **per
+   row, not per block**, because the blocks follow the host's cores: decided
+   per block, one row's `NaN` changed the last bits of the rows that shared
+   its block, differently on hosts with different core counts. The crate
+   gives each row's bound before any circuit is bound
+   (`JacobianBlock::vjp_weight_bounds`), so each row's runs are built once
+   (decided during the implementation of #559; the overflow and the margin
+   found in its review, the per-row route in the PR's review).
 6. **`QuantumLayer.backward` calls `qml.vjp`,** once per backward pass, with
    the incoming gradient as the cotangent, the same `wrt` as before and the same
    derived seeds (`[s, n, 1]`), and no longer `qml.jacobian`.
 7. **In `polypus-qml`,** the product is a `Vjp` with **one row per sample**
    (`Jacobian::vjp`, and by the adjoint `JacobianBlock::vjp_runs` /
-   `vjp_from_adjoint`); the binding sums the parameter rows in row order, so the
-   sum does not depend on the blocks. `Jacobian` and `Vjp` share one private
+   `vjp_from_adjoint`, with `vjp_weight_bounds` to choose each sample's
+   route); the binding sums the parameter rows in row order, so the sum does
+   not depend on the blocks. `Jacobian` and `Vjp` share one private
    bookkeeping (where a gate's derivative goes in a row), so the two cannot
    drift apart.
 

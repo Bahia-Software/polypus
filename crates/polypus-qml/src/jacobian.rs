@@ -297,6 +297,11 @@ impl ExpectationJacobian {
         self.all().vjp_runs(theta, cotangent)
     }
 
+    /// [`all`](Self::all)`().vjp_weight_bounds(cotangent)`.
+    pub fn vjp_weight_bounds(&self, cotangent: &[f64]) -> Result<Vec<f64>, QmlError> {
+        self.all().vjp_weight_bounds(cotangent)
+    }
+
     /// [`all`](Self::all)`().vjp_from_adjoint(derivatives)`.
     pub fn vjp_from_adjoint(&self, derivatives: &[Vec<f64>]) -> Result<Vjp, QmlError> {
         self.all().vjp_from_adjoint(derivatives)
@@ -491,7 +496,11 @@ impl JacobianBlock<'_> {
     /// refuse (the native one does). A caller that wants the cotangent to
     /// reach the product as the contraction does differentiates those samples
     /// by [`adjoint_runs`](Self::adjoint_runs) and contracts with
-    /// [`Jacobian::vjp`] instead. A `theta` of the wrong length is
+    /// [`Jacobian::vjp`] instead, sample by sample (one-sample
+    /// [blocks](ExpectationJacobian::block)), so that a sample's product does
+    /// not depend on the others': [`vjp_weight_bounds`](Self::vjp_weight_bounds)
+    /// gives each sample's bound before any run is built. A `theta` of the
+    /// wrong length is
     /// [`QmlError::Circuit`]`(`[`CircuitError::WrongNumberOfParams`]`)`; a
     /// `cotangent` of the wrong length, [`QmlError::CountsLengthMismatch`].
     pub fn vjp_runs(&self, theta: &[f64], cotangent: &[f64]) -> Result<Vec<AdjointRun>, QmlError> {
@@ -509,6 +518,28 @@ impl JacobianBlock<'_> {
             });
         }
         Ok(runs)
+    }
+
+    /// For each sample of the block, in order, the
+    /// [`weight_bound`](crate::DiagonalObservable::weight_bound) of the
+    /// observable `Σ_o v[s][o] · O_o` that [`vjp_runs`](Self::vjp_runs) gives
+    /// its run with `cotangent` — the same value, from the cotangent and the
+    /// readout alone, without binding a circuit. A caller that refuses some
+    /// observables (a non-finite bound, or one past a limit of its own) decides
+    /// with it, sample by sample, which runs to build — `vjp_runs` or
+    /// [`adjoint_runs`](Self::adjoint_runs) of a one-sample
+    /// [block](ExpectationJacobian::block) — before building any. A
+    /// `cotangent` of the wrong length is [`QmlError::CountsLengthMismatch`].
+    pub fn vjp_weight_bounds(&self, cotangent: &[f64]) -> Result<Vec<f64>, QmlError> {
+        let k = self.jacobian.num_observables();
+        check_cotangent(cotangent, self.samples.len(), k)?;
+        let observables = self.diagonal_observables()?;
+        Ok((0..self.samples.len())
+            .map(|s| {
+                DiagonalObservable::combine(&cotangent[s * k..(s + 1) * k], &observables)
+                    .weight_bound()
+            })
+            .collect())
     }
 
     /// The block's [`Vjp`] from the derivatives of the runs of

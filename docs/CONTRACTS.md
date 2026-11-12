@@ -2448,9 +2448,14 @@ batching and distribution are the oracle's concern.
     may refuse to weigh such an observable (the native one does: `polypus-sim`
     refuses non-finite weights); the caller that wants the cotangent to reach
     the product as the contraction does takes `adjoint_runs` and
-    `Jacobian::vjp` for that sample instead (the binding of `qml.vjp` does so
-    already past a quarter of `f64::MAX`, below). A `v` of the wrong length,
-    like derivatives of the wrong length, is `QmlError::CountsLengthMismatch`.
+    `Jacobian::vjp` for that sample instead, on a one-sample block, so no
+    sample's product depends on another's (the binding of `qml.vjp` does so
+    already past a quarter of `f64::MAX`, below). `vjp_weight_bounds(v)` gives
+    each sample's bound — the `weight_bound` of the observable `vjp_runs`
+    would give its run, bit for bit — from `v` and the readout alone, without
+    binding a circuit, so the route can be chosen before any run is built. A
+    `v` of the wrong length, like derivatives of the wrong length, is
+    `QmlError::CountsLengthMismatch`.
   - *Circuits and order.* `2 · shifts` circuits per sample and no unshifted
     one, `shifts` counting the gates that read a parameter (a parameter shared
     by `g` gates counts `g` times) for `Params`, the gates that read the sample
@@ -2689,13 +2694,15 @@ Python, for a training loop of the caller's own:
   `jacobian`'s result, to rounding; with `exact=True` it takes (g)'s
   vector-Jacobian product instead, **one adjoint run per row whatever the
   number of observables**, with the same fallback to the shifted circuits. A
-  block whose combined observable cannot be weighed safely — a non-finite
-  value in its rows of `v`, or a `weight_bound` past `f64::MAX / 4`, so that
+  row whose combined observable cannot be weighed safely — a non-finite value
+  in its row of `v`, or a `weight_bound` past `f64::MAX / 4`, so that
   neither the weight nor the derivatives overflow (the simulator's sweep and
   each derivative stay within the bound; the factor 4 leaves headroom for the
   sums over the gates that share a parameter and the chain-rule factors) —
-  takes `jacobian`'s runs, one per row and observable, and contracts them, so
-  the result is still the contraction.
+  takes `jacobian`'s runs, one per observable, and contracts them, so its
+  result is still the contraction. The route is decided **per row**, never
+  per block, so a row's product does not depend on the others' nor on the
+  blocks.
 - **Execution.** One backend and one scheduler per call — one connection, one
   `qraise` on CUNQA — closed on every way out, errors and Ctrl+C included. The
   rows run in sequential blocks, each bound, run and dropped before the next
@@ -2817,7 +2824,8 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     vector-Jacobian product tests of `tests/adjoint.rs` (one run per sample
     whatever the observables, the contraction of the shift Jacobian for every
     readout and model shape, the inputs of angle and IQP encoders, blocks, a
-    `NaN` reaching only its sample) with
+    `NaN` reaching only its sample, `vjp_weight_bounds` giving each sample's
+    bound bit for bit without binding) with
     `the_weight_bound_bounds_every_eigenvalue_and_flags_an_overflow` in
     `src/adjoint.rs`, the `untie_traced_*` tests in
     `src/problem.rs`, the tests in `src/jacobian.rs` (a structure other than
@@ -2847,8 +2855,9 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     watcher that stops it; for `qml.vjp`, one adjoint run per row whatever the
     observables and `qml.jacobian`'s contraction whatever the blocks, the
     shift and sampled routes, a non-finite cotangent, or a finite one that
-    overflows the weight, through the Jacobian's runs, a cancellation between
-    blocks and a Ctrl+C inside one), with the window
+    overflows the weight, through the Jacobian's runs for that row only, the
+    route decided per row so the block size changes nothing bit for bit, a
+    cancellation between blocks and a Ctrl+C inside one), with the window
     tests in `crates/polypus-evaluation/src/qml_oracle.rs`
     (`a_backend_*`, `the_lift_*`, `many_circuits_per_item_*`,
     `the_window_is_never_zero`): `qml.expval`/`qml.jacobian`/`qml.vjp`'s
@@ -2874,7 +2883,8 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   cotangent's containers, the contraction of `qml.jacobian` for every layer,
   readout and input encoder, exact and with the same seed, chunks, one
   observable, a zero, a non-finite, an overflowing, a complex and a wrongly
-  shaped cotangent, every rejection),
+  shaped cotangent, a row that cannot be combined leaving the others bit for
+  bit, every rejection),
   `test_torch_quantum_layer.py` (the PyTorch layer: forward bit for bit
   `expval` in one call per batch, `gradcheck` with default tolerances for the
   parameters and the inputs, the backward pass the same by the adjoint and by

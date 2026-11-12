@@ -84,9 +84,10 @@ Entries were curated from the Conventional Commits history. Releases before
   with shots it runs `qml.jacobian`'s circuits and gives its contraction for
   the same `seed`. The cotangent's shape is checked right after `params` (a
   `polypus.ConfigurationError`, as is a complex one); a `NaN` or an infinity
-  in it propagates as through the contraction. `qml.jacobian` does not
-  change. In `polypus-qml`: `Jacobian::vjp`,
-  `JacobianBlock::vjp_runs`/`num_vjp_runs`/`vjp_from_adjoint` (and
+  in it propagates as through the contraction, and changes only its own
+  row's route. `qml.jacobian` does not change. In `polypus-qml`:
+  `Jacobian::vjp`, `JacobianBlock::vjp_runs`/`num_vjp_runs`/
+  `vjp_weight_bounds`/`vjp_from_adjoint` (and
   `ExpectationJacobian`'s), `Vjp` and `DiagonalObservable::weight_bound`.
   `benchmarks/bench_vjp.py` measures it (#559, ADR 0008).
 - A call trace for `polypus.train` and `polypus.run_quantum_circuit`

@@ -346,6 +346,27 @@ class TestBlocks:
         assert np.array_equal(whole_inputs, np.concatenate([i for _, i in parts]))
         assert_close(whole_params, sum(p for p, _ in parts), tolerance=1e-12)
 
+    @pytest.mark.parametrize("value", [math.nan, 1e308], ids=["nan", "overflowing"])
+    def test_a_row_that_cannot_be_combined_changes_no_other_row(self, value):
+        # DBFerPra's review of #577: the route was decided per block, so a NaN
+        # in row 0 changed the last bits of the rows sharing its block, and
+        # the block size follows the host's cores. It is decided per row now:
+        # the other rows' products are those of a call without row 0, bit for
+        # bit, on any host.
+        model = model_of("iqp", "argmax")
+        params = point(model)
+        rows = _many_rows(40)
+        v = cotangent(model, rows=40)
+        v[0, :] = value
+        whole = qml.vjp(model, rows, params, v, wrt="inputs", exact=True)
+        rest = qml.vjp(model, rows[1:], params, v[1:], wrt="inputs", exact=True)
+        assert np.array_equal(whole[1:], rest)
+        # Row 0 itself is the contraction of `qml.jacobian`, as always.
+        expected = contraction(model, rows[:1], params, v[:1], "inputs", exact=True)
+        assert np.array_equal(np.isnan(whole[:1]), np.isnan(expected))
+        finite = np.isfinite(expected)
+        np.testing.assert_allclose(whole[:1][finite], expected[finite], rtol=1e-9)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Rejections

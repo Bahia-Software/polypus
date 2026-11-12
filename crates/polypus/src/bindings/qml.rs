@@ -2351,8 +2351,8 @@ fn run_exact_adjoint(
 
 /// The largest weight bound ([`DiagonalObservable::weight_bound`]) of a
 /// combined observable `Σ_o v_o·O_o` that `qml.vjp` hands the native simulator
-/// (C-11). Past it, or when it is not finite, the block takes `qml.jacobian`'s
-/// runs and contracts them.
+/// (C-11). Past it, or when it is not finite, the sample takes
+/// `qml.jacobian`'s runs and contracts them.
 ///
 /// Why a quarter of `f64::MAX`. In the simulator nothing grows past the bound
 /// `W`: `λ = O|ψ⟩` has every amplitude within `W` and `‖λ‖ ≤ W`; each gate of
@@ -2431,58 +2431,96 @@ impl VjpRun {
         self.by_inputs.extend(by_inputs.unwrap_or_default());
     }
 
-    /// The exact product of the block by adjoint differentiation, or `None`
-    /// for the shifted circuits (see [`run_exact_adjoint`]).
+    /// The exact product of the block by adjoint differentiation, one [`Vjp`]
+    /// per sample in order, or `None` for the shifted circuits (see
+    /// [`run_exact_adjoint`]).
+    ///
+    /// [`Vjp`]: polypus_qml::Vjp
     fn exact_block(
         &mut self,
         native: &NativeStatevectorBackend,
         samples: Range<usize>,
         cancel: &CancelToken,
-    ) -> Option<Result<polypus_qml::Vjp, PrimitiveError>> {
-        let (block, cotangent) = match self.block(samples) {
+    ) -> Option<Result<Vec<polypus_qml::Vjp>, PrimitiveError>> {
+        let (runs, combined) = match self.exact_runs(samples.clone()) {
             Ok(found) => found,
             Err(e) => return Some(Err(e)),
-        };
-        // One run per sample, the cotangent folded into its observable. An
-        // observable that cannot be weighed safely — a non-finite value in the
-        // cotangent (the simulator refuses a non-finite weight), or a weight
-        // bound past `MAX_COMBINED_WEIGHT`, so that neither the weight nor the
-        // derivatives overflow — makes the block take the Jacobian's runs, one
-        // per sample and observable, and contract them: the cotangent then
-        // reaches the product as it would through the contraction of
-        // `qml.jacobian` (C-11). `<=` is false for a `NaN` bound too.
-        let runs = block.vjp_runs(&self.params, cotangent).and_then(|runs| {
-            if runs
-                .iter()
-                .all(|run| run.observable.weight_bound() <= MAX_COMBINED_WEIGHT)
-            {
-                Ok((runs, true))
-            } else {
-                block.adjoint_runs(&self.params).map(|runs| (runs, false))
-            }
-        });
-        let (runs, combined) = match runs {
-            Ok(found) => found,
-            Err(e) => return Some(Err(e.into())),
         };
         let derivatives = match run_exact_adjoint(native, &runs, cancel)? {
             Ok(derivatives) => derivatives,
             Err(e) => return Some(Err(e)),
         };
-        let vjp = if combined {
-            block.vjp_from_adjoint(&derivatives)
-        } else {
-            block
-                .jacobian_from_adjoint(&derivatives)
-                .and_then(|jacobian| jacobian.vjp(cotangent))
-        };
+        let vjps = self.read_exact(samples, &combined, &derivatives);
         self.adjoint_runs += runs.len();
         log::debug!(
             "qml vjp: {} adjoint run(s), {} in all",
             runs.len(),
             self.adjoint_runs
         );
-        Some(vjp.map_err(PrimitiveError::from))
+        Some(vjps)
+    }
+
+    /// The block's adjoint runs, sample after sample, and for each sample
+    /// whether it takes the combined observable. The route is **decided per
+    /// sample**, so a sample's product does not depend on the others' — nor on
+    /// the blocks, which follow the host's cores (C-11): one run, the
+    /// cotangent folded into its observable; or, when that observable cannot
+    /// be weighed safely — a non-finite value in the sample's cotangent (the
+    /// simulator refuses a non-finite weight), or a weight bound past
+    /// `MAX_COMBINED_WEIGHT` — the Jacobian's runs, one per observable, to be
+    /// contracted: the cotangent then reaches the product as it would through
+    /// the contraction of `qml.jacobian`. The bounds come before any circuit
+    /// is bound, so each sample's runs are built once. `<=` is false for a
+    /// `NaN` bound too.
+    fn exact_runs(
+        &self,
+        samples: Range<usize>,
+    ) -> Result<(Vec<polypus_qml::AdjointRun>, Vec<bool>), PrimitiveError> {
+        let (block, cotangent) = self.block(samples.clone())?;
+        let bounds = block.vjp_weight_bounds(cotangent)?;
+        let mut runs = Vec::with_capacity(block.num_vjp_runs());
+        let mut combined = Vec::with_capacity(bounds.len());
+        for (s, bound) in samples.zip(bounds) {
+            let (one, v) = self.block(s..s + 1)?;
+            let safe = bound <= MAX_COMBINED_WEIGHT;
+            runs.extend(if safe {
+                one.vjp_runs(&self.params, v)?
+            } else {
+                one.adjoint_runs(&self.params)?
+            });
+            combined.push(safe);
+        }
+        Ok((runs, combined))
+    }
+
+    /// Each sample's product, in order, from the derivatives of
+    /// [`exact_runs`](Self::exact_runs)' runs: its one row through the
+    /// combined observable, or its `num_observables` rows read as its
+    /// Jacobian and contracted with its cotangent.
+    fn read_exact(
+        &self,
+        samples: Range<usize>,
+        combined: &[bool],
+        derivatives: &[Vec<f64>],
+    ) -> Result<Vec<polypus_qml::Vjp>, PrimitiveError> {
+        let k = self.plan.num_observables();
+        let mut rest = derivatives;
+        samples
+            .zip(combined)
+            .map(|(s, &combined)| {
+                let (one, v) = self.block(s..s + 1)?;
+                let take = if combined { 1 } else { k };
+                let (rows, after) = rest.split_at(take.min(rest.len()));
+                rest = after;
+                let vjp = if combined {
+                    one.vjp_from_adjoint(rows)
+                } else {
+                    one.jacobian_from_adjoint(rows)
+                        .and_then(|jacobian| jacobian.vjp(v))
+                };
+                Ok(vjp?)
+            })
+            .collect()
     }
 }
 
@@ -2523,8 +2561,8 @@ impl Primitive for VjpRun {
         samples: Range<usize>,
         cancel: &CancelToken,
     ) -> Option<Result<(), PrimitiveError>> {
-        let vjp = self.exact_block(native, samples, cancel)?;
-        Some(vjp.map(|vjp| self.keep(vjp)))
+        let vjps = self.exact_block(native, samples, cancel)?;
+        Some(vjps.map(|vjps| vjps.into_iter().for_each(|vjp| self.keep(vjp))))
     }
 }
 
@@ -2949,12 +2987,12 @@ fn cotangent_values(
 ///   infinity propagates to the product as it does through the contraction of
 ///   [`jacobian`].
 /// - **Circuits:** with `exact=True`, one adjoint differentiation per row,
-///   whatever the number of observables (of `Σ_o v[r,o]·O_o`); a block whose
-///   combined observable cannot be weighed safely (a non-finite value in
-///   `cotangent`, or a weight bound past `f64::MAX / 4`, so neither the weight
-///   nor the derivatives overflow) takes [`jacobian`]'s runs,
-///   one per row and observable, and when the memory budget holds one
-///   statevector but not two,
+///   whatever the number of observables (of `Σ_o v[r,o]·O_o`); a row whose
+///   combined observable cannot be weighed safely (a non-finite value in its
+///   row of `cotangent`, or a weight bound past `f64::MAX / 4`) takes
+///   [`jacobian`]'s runs, one per observable, decided row by row so no row
+///   depends on another; and when the memory budget holds one statevector but
+///   not two,
 ///   [`jacobian`]'s shifted circuits. With shots, [`jacobian`]'s circuits, the
 ///   same with the same `seed`: the result is its contraction, to rounding.
 /// - **`model`**, **`x`**, **`params`** and the execution arguments are
@@ -4122,9 +4160,9 @@ mod tests {
         assert_close(&sampled.by_inputs, &by_inputs);
     }
 
-    /// A non-finite cotangent is not refused: a block with one takes the
-    /// Jacobian's runs (one per row and observable), the others one per row,
-    /// and the value reaches the product as the contraction gives it.
+    /// A non-finite cotangent is not refused: the row with one takes the
+    /// Jacobian's runs (one per observable), every other row one run, and the
+    /// value reaches the product as the contraction gives it.
     #[test]
     fn a_non_finite_cotangent_propagates_through_the_jacobians_runs() {
         let k = 2;
@@ -4133,8 +4171,8 @@ mod tests {
         v[3 * k] = f64::NAN; // row 3
         let mut run = vjp_run(&compiled, JacobianWrt::Both, v.clone());
         run.run_exact(2);
-        // Blocks [0, 1], [2, 3], [4]: the second takes 2 · k runs.
-        assert_eq!(run.adjoint_runs, 2 + 2 * k + 1);
+        // Rows 0, 1, 2 and 4 take one run each, row 3 takes k.
+        assert_eq!(run.adjoint_runs, 4 + k);
         assert!(run.by_params.iter().all(|d| d.is_nan()));
         let f = compiled.num_features();
         for (r, row) in run.by_inputs.chunks(f).enumerate() {
@@ -4210,13 +4248,13 @@ mod tests {
 
     /// Finite cotangent values can still overflow the combined weight: two
     /// copies of `⟨Z₀⟩` weighed by `1e308` each make a weight of `2e308`,
-    /// which no statevector can be weighed by. The block takes the Jacobian's
+    /// which no statevector can be weighed by. That row takes the Jacobian's
     /// runs instead, and the product is the contraction, finite where it is.
     #[test]
     fn a_finite_cotangent_that_overflows_the_weight_takes_the_jacobians_runs() {
         let run = vjp_with_a_large_row(1e308, false);
-        // Blocks [0, 1], [2, 3], [4]: the first takes 2 · k runs.
-        assert_eq!(run.adjoint_runs, 2 * 2 + 2 + 1);
+        // Rows 0, 2, 3 and 4 take one run each, row 1 takes k = 2.
+        assert_eq!(run.adjoint_runs, 4 + 2);
     }
 
     /// A finite weight bound past `MAX_COMBINED_WEIGHT` (`6e307 · 2 = 1.2e308`,
@@ -4229,11 +4267,60 @@ mod tests {
             assert!(2.0 * 6e307 > MAX_COMBINED_WEIGHT && (2.0_f64 * 6e307).is_finite());
             assert!(2.0 * 1e307 < MAX_COMBINED_WEIGHT);
         }
-        assert_eq!(
-            vjp_with_a_large_row(6e307, false).adjoint_runs,
-            2 * 2 + 2 + 1
-        );
-        assert_eq!(vjp_with_a_large_row(1e307, true).adjoint_runs, 2 + 2 + 1);
+        assert_eq!(vjp_with_a_large_row(6e307, false).adjoint_runs, 4 + 2);
+        assert_eq!(vjp_with_a_large_row(1e307, true).adjoint_runs, 5);
+    }
+
+    /// The route is decided row by row, never for a block: with a `NaN` in
+    /// row 0's cotangent, or finite values that overflow row 1's combined
+    /// weight, only that row takes the Jacobian's runs, so the product is the
+    /// same bit for bit whatever the block size — that is, whatever the
+    /// host's cores (DBFerPra's review of #577: blocks of 16 rows on one host
+    /// and 8 on another gave rows 16–31 different last bits).
+    #[test]
+    fn the_route_is_decided_per_row_so_the_blocks_change_nothing() {
+        let k = 3;
+        let compiled = model_with_observables(k);
+        let mut with_nan = cotangent(5, k);
+        with_nan[0] = f64::NAN; // row 0
+        let mut overflowing = cotangent(5, k);
+        overflowing[k..2 * k].fill(1e308); // row 1
+        let bits = |values: &[f64]| values.iter().map(|d| d.to_bits()).collect::<Vec<_>>();
+        for v in [with_nan, overflowing] {
+            let mut reference = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+            reference.run_exact(usize::MAX);
+            for block in [1, 2, 3, 4] {
+                let mut run = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+                run.run_exact(block);
+                assert_eq!(run.adjoint_runs, 4 + k, "block {block}");
+                assert_eq!(
+                    bits(&run.by_inputs),
+                    bits(&reference.by_inputs),
+                    "block {block}"
+                );
+                assert_eq!(
+                    bits(&run.by_params),
+                    bits(&reference.by_params),
+                    "block {block}"
+                );
+            }
+            // The rows the value is not in are those of a finite cotangent's
+            // route, one run each, bit for bit.
+            let row = if v[0].is_nan() { 0 } else { 1 };
+            let mut clean = v.clone();
+            clean[row * k..(row + 1) * k].fill(0.5);
+            let mut finite = vjp_run(&compiled, JacobianWrt::Inputs, clean);
+            finite.run_exact(2);
+            assert_eq!(finite.adjoint_runs, 5);
+            let f = compiled.num_features();
+            for r in (0..5).filter(|&r| r != row) {
+                assert_eq!(
+                    bits(&reference.by_inputs[r * f..(r + 1) * f]),
+                    bits(&finite.by_inputs[r * f..(r + 1) * f]),
+                    "row {r}"
+                );
+            }
+        }
     }
 
     #[test]
