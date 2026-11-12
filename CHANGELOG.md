@@ -152,6 +152,17 @@ Entries were curated from the Conventional Commits history. Releases before
   Hygiene checks the queue's candidate commit against `main` with the public
   rules; SonarQube Cloud skips its jobs there, since the quality gate already
   ran on the pull request and the push to `main` reports on the merged commit.
+- Exact native QML gradients are faster where a batch of them used to take the
+  parallel gate kernels (from 12 qubits on, on the 16-thread node measured): a
+  batch of two or more adjoint runs (`NativeStatevectorBackend::run_adjoint`)
+  now runs each one on the sequential gate kernels and leaves the cores to the
+  runs themselves. Forking every short pass of a run onto the shared pool cost
+  more than it saved, and that made the adjoint's cost jump from 10 to 12
+  qubits. On 16 threads with 8 rows, `qml.jacobian(..., exact=True)` is
+  2.3–6.6× faster at 12 qubits and 2.5–3.9× faster at 14, and an exact
+  `Model.fit` epoch is 1.3–2.0× faster (`benchmarks/bench_adjoint.py`). A
+  batch of exactly two runs from about 18 qubits on can be up to ~1.4× slower
+  than before. The results are the same bit for bit (#560).
 
 ### Fixed
 - `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a
