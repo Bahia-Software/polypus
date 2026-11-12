@@ -37,10 +37,7 @@ use pso::PSO;
 use qng::QNG;
 use rotosolve::Rotosolve;
 use spsa::Spsa;
-use targets::{
-    target_from_strings, ProgramFormat, Selection, Target, DEFAULT_BACKEND, DEFAULT_CORES_PER_QPU,
-    DEFAULT_NODES, DEFAULT_SIM_METHOD,
-};
+use targets::{target_from_strings, ProgramFormat, Selection, Target};
 
 use crate::evaluation::{
     CircuitSource, CostObservable, Label, OracleErrorSlot, PyCallbackObservable, PyLabelledCost,
@@ -1051,23 +1048,6 @@ const NATIVE_REJECTS_QISKIT: &str =
     "the native 'polypus' backend cannot execute a Qiskit QuantumCircuit; \
      pass a polypus.Circuit or an OpenQASM 2.0 string, or use backend=\"aer\"";
 
-/// `nodes` and `cores_per_qpu` of `train`/`qml.train`: required with the
-/// strings, unused (the target carries them) with `target=`.
-fn required_allocation(
-    func: &str,
-    selection: &Selection,
-    nodes: Option<u32>,
-    cores_per_qpu: Option<u32>,
-) -> PyResult<(u32, u32)> {
-    if selection.is_typed() {
-        return Ok((DEFAULT_NODES, DEFAULT_CORES_PER_QPU));
-    }
-    Ok((
-        targets::require_arg(func, "nodes", nodes)?,
-        targets::require_arg(func, "cores_per_qpu", cores_per_qpu)?,
-    ))
-}
-
 /// Validate the shot/QPU parameters at the Python-facing boundary, so the
 /// orchestration layer can assume `shots >= 1` and `n_qpus >= 1` (contract
 /// C-3). Rejecting here also avoids the division-by-zero panic that `n_qpus = 0`
@@ -1509,18 +1489,13 @@ pub fn run_quantum_circuit<'py>(
         target.as_ref(),
         infrastructure,
         backend,
-        &[
-            ("backend", backend != DEFAULT_BACKEND),
-            ("sim_method", sim_method != DEFAULT_SIM_METHOD),
-            ("noise_model", noise_model.is_some()),
-            ("fusion", fusion.is_some()),
-            ("nodes", nodes.is_some()),
-            ("cores_per_qpu", cores_per_qpu.is_some()),
-            ("walltime", walltime.is_some()),
-        ],
+        sim_method,
+        noise_model,
+        fusion,
+        nodes,
+        cores_per_qpu,
+        walltime,
     )?;
-    let nodes = nodes.unwrap_or(DEFAULT_NODES);
-    let cores_per_qpu = cores_per_qpu.unwrap_or(DEFAULT_CORES_PER_QPU);
     let (infrastructure, backend) = (selection.infrastructure.clone(), selection.backend.clone());
     // Entry-point trace carrying the full circuit `Debug` repr on every call:
     // large and high-volume, so it stays at `debug` rather than the default log.
@@ -1529,7 +1504,7 @@ pub fn run_quantum_circuit<'py>(
          infrastructure: {infrastructure}, n_qpus: {n_qpus}, backend: {backend}, seed: {seed:?}"
     );
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
+    selection.validate_allocation()?;
     let bound_qc = extract_bound_circuit(&qc)?;
     if selection.is_native() && bound_qc.is_foreign() {
         return Err(crate::exceptions::configuration_error(
@@ -1564,19 +1539,7 @@ pub fn run_quantum_circuit<'py>(
     // id across runs is a real hazard, not a cosmetic one. The `run_{n}_{infra}`
     // prefix is kept for human-readable debuggability.
     let id = unique_id(&format!("run_{}_{}", n_qpus, infrastructure))?;
-    let target = selection.resolve(options.map(OptionsArg::into_inner), |options| {
-        target_from_strings(
-            &infrastructure,
-            &backend,
-            sim_method,
-            noise_model.map(|nm| nm.unbind()),
-            nodes,
-            cores_per_qpu,
-            walltime.as_deref(),
-            fusion,
-            options,
-        )
-    })?;
+    let target = selection.resolve(options.map(OptionsArg::into_inner))?;
     let backend_config = build_backend_config(target)?;
     // Only the native statevector backend consults the gate-parallel threshold,
     // so calibrate it lazily (#351) and surface the one-time default-visible
@@ -1871,21 +1834,18 @@ pub fn train<'py>(
         target.as_ref(),
         infrastructure,
         backend,
-        &[
-            ("backend", backend != DEFAULT_BACKEND),
-            ("sim_method", sim_method != DEFAULT_SIM_METHOD),
-            ("noise_model", noise_model.is_some()),
-            ("fusion", fusion.is_some()),
-            ("nodes", nodes.is_some()),
-            ("cores_per_qpu", cores_per_qpu.is_some()),
-            ("walltime", walltime.is_some()),
-        ],
+        sim_method,
+        noise_model,
+        fusion,
+        nodes,
+        cores_per_qpu,
+        walltime,
     )?;
-    let (nodes, cores_per_qpu) = required_allocation("train", &selection, nodes, cores_per_qpu)?;
+    selection.require_allocation("train")?;
     let id = targets::require_arg("train", "id", id)?;
     let (infrastructure, backend) = (selection.infrastructure.clone(), selection.backend.clone());
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
+    selection.validate_allocation()?;
     validate_id(&id)?;
     // Resolve the seed that drives the optimizer's RNG (contract C-7): explicit
     // kwarg > optimizer object's `seed` field > fresh OS entropy. Unlike
@@ -1932,19 +1892,7 @@ pub fn train<'py>(
     if is_rotosolve(&method) {
         check_rotosolve_circuit(&qc, Some(&circuit_source), None)?;
     }
-    let target = selection.resolve(options.map(OptionsArg::into_inner), |options| {
-        target_from_strings(
-            &infrastructure,
-            &backend,
-            sim_method,
-            noise_model.map(|nm| nm.unbind()),
-            nodes,
-            cores_per_qpu,
-            walltime.as_deref(),
-            fusion,
-            options,
-        )
-    })?;
+    let target = selection.resolve(options.map(OptionsArg::into_inner))?;
     let backend_config = build_backend_config(target)?;
     // As in `run_quantum_circuit`: the native backend's simulator resolves the
     // gate-parallel threshold, so calibrate it lazily before building it (#351).
@@ -2261,20 +2209,18 @@ pub fn qml_train<'py>(
         target.as_ref(),
         infrastructure,
         backend,
-        &[
-            ("backend", backend != DEFAULT_BACKEND),
-            ("sim_method", sim_method != DEFAULT_SIM_METHOD),
-            ("noise_model", noise_model.is_some()),
-            ("nodes", nodes.is_some()),
-            ("cores_per_qpu", cores_per_qpu.is_some()),
-            ("walltime", walltime.is_some()),
-        ],
+        sim_method,
+        noise_model,
+        None,
+        nodes,
+        cores_per_qpu,
+        walltime,
     )?;
-    let (nodes, cores_per_qpu) = required_allocation("train", &selection, nodes, cores_per_qpu)?;
+    selection.require_allocation("train")?;
     let id = targets::require_arg("train", "id", id)?;
     let (infrastructure, backend) = (selection.infrastructure.clone(), selection.backend.clone());
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
+    selection.validate_allocation()?;
     validate_id(&id)?;
     // Native models have their own entry point (plan D4-R).
     qml::reject_native_pieces("train", &feature_map, &ansatz)?;
@@ -2369,19 +2315,7 @@ pub fn qml_train<'py>(
     // an Aer variant here, which never fuses. Pass `None` (no fusion opinion)
     // rather than `Some(true)` — the latter would trip the "fusion=True on a
     // non-fusing backend" rejection for a value the caller never chose.
-    let target = selection.resolve(options.map(OptionsArg::into_inner), |options| {
-        target_from_strings(
-            &infrastructure,
-            &backend,
-            sim_method,
-            noise_model.map(|nm| nm.unbind()),
-            nodes,
-            cores_per_qpu,
-            walltime.as_deref(),
-            None,
-            options,
-        )
-    })?;
+    let target = selection.resolve(options.map(OptionsArg::into_inner))?;
     let backend_config = build_backend_config(target)?;
     // Suffix the caller-supplied `id` with a UUID v4 (see `train` and #75) so
     // concurrent qml.train runs sharing the same `id` never collide on the
@@ -2513,20 +2447,16 @@ pub fn qml_predict<'py>(
         target.as_ref(),
         infrastructure,
         backend,
-        &[
-            ("backend", backend != DEFAULT_BACKEND),
-            ("sim_method", sim_method != DEFAULT_SIM_METHOD),
-            ("noise_model", noise_model.is_some()),
-            ("nodes", nodes.is_some()),
-            ("cores_per_qpu", cores_per_qpu.is_some()),
-            ("walltime", walltime.is_some()),
-        ],
+        sim_method,
+        noise_model,
+        None,
+        nodes,
+        cores_per_qpu,
+        walltime,
     )?;
-    let nodes = nodes.unwrap_or(DEFAULT_NODES);
-    let cores_per_qpu = cores_per_qpu.unwrap_or(DEFAULT_CORES_PER_QPU);
     let (infrastructure, backend) = (selection.infrastructure.clone(), selection.backend.clone());
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
+    selection.validate_allocation()?;
     qml::reject_native_pieces("predict", &feature_map, &ansatz)?;
     // The model is a Qiskit circuit: neither the native backend nor QMIO runs it.
     if selection.is_native() {
@@ -2579,19 +2509,7 @@ pub fn qml_predict<'py>(
     let effective_seed = seed_or_entropy(seed, random_seed)?;
     let id = unique_id(&format!("predict_{}_{}", n_qpus, infrastructure))?;
     // predict has no `options=`; a `Registered` target brings its own.
-    let target = selection.resolve(None, |options| {
-        target_from_strings(
-            &infrastructure,
-            &backend,
-            sim_method,
-            noise_model.map(|nm| nm.unbind()),
-            nodes,
-            cores_per_qpu,
-            walltime.as_deref(),
-            None,
-            options,
-        )
-    })?;
+    let target = selection.resolve(None)?;
     let backend_config = build_backend_config(target)?;
     let config = ExecutionConfig {
         id: id.clone(),
