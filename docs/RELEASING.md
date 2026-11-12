@@ -161,7 +161,7 @@ PyPI: the release gate, every wheel and sdist build and their smoke tests.
   1. Check that every crate is on crates.io:
      `python .github/scripts/publish_crates.py --plan --trusted-publishing`
      must not stop with "not on crates.io yet".
-  2. For each of the thirteen crates, on
+  2. For each of the fourteen crates, on
      `https://crates.io/crates/<crate>/settings`, add a GitHub trusted
      publisher: owner `Bahia-Software`, repository `polypus`, workflow
      filename `release.yml`, environment `crates-io`. A crate left out makes

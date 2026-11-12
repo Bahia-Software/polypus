@@ -83,6 +83,18 @@ Entries were curated from the Conventional Commits history. Releases before
   of `qml.expval`), and pickling of `Model`, so `copy.deepcopy` works: it
   travels as the JSON of its spec, rebuilt through the checks of `qml.load`
   (#502).
+- A call trace for `polypus.train` and `polypus.run_quantum_circuit`
+  (contract C-12): the keyword-only `trace=` (a path to a new file) or
+  `POLYPUS_CALL_TRACE=<directory>` writes one JSON Lines line per planner
+  batch, backend wave, optimizer iteration and QNG metric call, with sizes and
+  times only, capped by `POLYPUS_CALL_TRACE_MAX_MB` (512 MiB by default). It
+  never changes a result.
+- The call trace in Rust: the `trace` module of `polypus-orchestration`, with
+  `CallTracer`, which writes, caps and closes a trace, the types of its lines
+  (`TraceHeader`, `TraceEvent`, `RunStatus`, …), `DEFAULT_MAX_BYTES`, and four
+  decorators, `TracingPlanner`, `TracingBackend`, `TracingObserver` and
+  `TracingVariance`, which record the calls they forward; and
+  `Method::name()`, the optimizer's name that a trace's header records.
 - Multi-qubit Pauli sums and an exact H₂ Hamiltonian in `polypus-physics`
   (#529), the reference for molecular simulation (#528). In
   `hamiltonians`: `PauliString` (text form `"X0 X1 Y2 Y3"`, product with a
@@ -103,11 +115,31 @@ Entries were curated from the Conventional Commits history. Releases before
   PySCF/OpenFermion data in `reference-data/h2-sto3g/` (FCI at 0.7414 Å:
   −1.1372701747 Ha). `constants::BOHR_RADIUS_ANGSTROM`. New dependency:
   `libm` (`erf` for the Boys function).
+- `TrainResult.stop_reason` and `TrainResult.n_evaluations` on `train`,
+  `qml.train` and `Model.fit`. `stop_reason` names what ended the
+  optimizer's loop: `"iteration_budget"`, `"evaluation_budget"` (L-SHADE's
+  schedule, `External`'s `max_evaluations`), `"fitness_tolerance"`,
+  `"parameter_tolerance"` (PSO), `"degenerate"` (CMA-ES),
+  `"optimizer_finished"` (`External`'s empty `ask()`) or `"callback"`.
+  `n_evaluations` counts the candidates scored as a fitness, as
+  `TrainProgress.evaluations` does, plus the re-score of `best_params` on
+  the whole training set when a gradient-free optimizer trains on
+  minibatches; the shifted circuits of an exact gradient (`Adam` in
+  `qml.Model.fit`) and the final batch are not counted. In
+  Rust: `polypus_optimizers::StopReason`, `OptimizationOutcome::stop_reason`
+  and `TrainOutcome::n_evaluations`. Seeded results are unchanged (#431).
 
 ### Changed
 - **BREAKING (Rust):** `polypus_qml::Layer` has a new variant,
   `SimplifiedTwoDesign`, so an exhaustive `match` on it outside its crate
   must handle it (#570).
+- **BREAKING:** for Rust users, `TrainFlow` and `RunCircuitFlow`
+  (`polypus-orchestration`) have a new public field,
+  `trace: Option<Arc<CallTracer>>`, so a struct literal must set it;
+  `trace: None` keeps today's behaviour.
+- **BREAKING (Rust):** `polypus_optimizers::OptimizationOutcome` has a new
+  public field, `stop_reason`, so a struct literal of it outside its crate
+  must set it (#431).
 - **BREAKING (Rust):** `polypus_qml::ValidationError` has two new variants,
   `StronglyEntanglingRangesLength` and `StronglyEntanglingRangeOutOfBounds`,
   so an exhaustive `match` on it outside its crate must handle them (#505).
@@ -137,6 +169,21 @@ Entries were curated from the Conventional Commits history. Releases before
   `polypus-observable`, CMA-ES and SHADE, and `polypus-backend`'s memory guard
   and planner, and property tests check the OpenQASM round trip and that the
   parallel kernels match the sequential ones on random circuits (#409).
+- For contributors: every workspace crate inherits a `[workspace.lints]` table
+  from the root `Cargo.toml` that denies `unsafe_code` and
+  `clippy::undocumented_unsafe_blocks`, so the three `unsafe` sites
+  `docs/ENGINEERING.md` §5 authorises are the only ones that compile, each with
+  its own block-scoped `allow`. `missing_docs` is on in the crates that are
+  already fully documented, and `cargo deny` keeps `pyo3` out of the pure
+  crates (#408).
+- For contributors: the CI, Hygiene and SonarQube Cloud workflows also run on
+  GitHub merge-queue groups, a prerequisite for enabling the queue on `main`.
+  Hygiene checks the queue's candidate commit against `main` with the public
+  rules; SonarQube Cloud skips its jobs there, since the quality gate already
+  ran on the pull request and the push to `main` reports on the merged commit.
+- CUNQA: the seal looks up a family's QPUs with `get_QPUs` once instead of
+  once per wave, and looks them up again after `qdrop` or a failed wave
+  (#437).
 
 ### Fixed
 - `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a

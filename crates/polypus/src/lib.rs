@@ -87,8 +87,10 @@
 //!
 //! `train()` returns a `TrainResult` exposing `result.best_params`
 //! (`list[float]`) plus `result.best_fitness`, `result.iterations_run`,
-//! `result.converged`, and the effective `result.seed` — the full optimization
-//! outcome, not just the parameters. Pass `seed=...` (or set it on the
+//! `result.converged`, `result.fitness_history`, `result.stop_reason`,
+//! `result.n_evaluations`, `result.final_params`, `result.final_fitness` and
+//! the effective `result.seed` — the full optimization outcome, not just the
+//! parameters. Pass `seed=...` (or set it on the
 //! optimizer, e.g. `polypus.DE(..., seed=42)`) to reproduce a run.
 //!
 //! # Authors
@@ -97,6 +99,10 @@
 //! # License
 //! European Union Public Licence (EUPL), version 1.2 or – as soon as they will be approved by the European Commission – subsequent versions of the EUPL.
 
+#![warn(missing_docs)]
+
+/// The VQC optimizers (DE, PSO, QNG) and their oracle traits, re-exported from the
+/// pure-Rust `polypus-optimizers` crate.
 pub mod algorithms;
 mod bindings;
 /// Custom Python exception hierarchy raised across the FFI boundary.

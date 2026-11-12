@@ -89,6 +89,8 @@
 //! ([`JacobianBlock`]). It costs `2 · shifts` circuits per sample, with no
 //! unshifted one.
 
+#![warn(missing_docs)]
+
 mod adjoint;
 mod dataset;
 mod error;

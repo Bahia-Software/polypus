@@ -37,7 +37,7 @@ use std::error::Error;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
-use crate::progress::{Counted, CountedGradient, TrainObserver, Watch};
+use crate::progress::{counted, TrainObserver, Watch};
 
 /// DE configuration, mirroring the `polypus.DE` object minus the shared
 /// execution parameters (`oracle`, `dimensions`, `seed`) dispatch supplies.
@@ -499,23 +499,13 @@ pub fn dispatch_optimizer_observed(
     initial_point: Option<Vec<f64>>,
     observer: Option<&mut dyn TrainObserver>,
 ) -> Result<OptimizationOutcome, OracleError> {
-    let Oracles {
-        evaluation: mut oracle,
-        mut gradient,
-        mut full_evaluation,
-    } = oracles.into();
+    let mut oracles = oracles.into();
     let mut unobserved = Unobserved;
     let mut watch;
     let observer: &mut dyn IterationObserver = match observer {
         Some(observer) => {
             let evaluations = Arc::new(AtomicU64::new(0));
-            oracle = Box::new(Counted::new(oracle, &evaluations));
-            full_evaluation = full_evaluation.map(|full| -> Box<dyn EvaluationOracle> {
-                Box::new(Counted::new(full, &evaluations))
-            });
-            gradient = gradient.map(|exact| -> Box<dyn GradientOracle> {
-                Box::new(CountedGradient::new(exact, &evaluations))
-            });
+            oracles = counted(oracles, &evaluations);
             watch = Watch {
                 observer,
                 evaluations,
@@ -525,6 +515,11 @@ pub fn dispatch_optimizer_observed(
         }
         None => &mut unobserved,
     };
+    let Oracles {
+        evaluation: oracle,
+        gradient,
+        mut full_evaluation,
+    } = oracles;
     let result = match method {
         // Adam tracks its best on the full set itself, so it takes the view and
         // its outcome is not re-scored below.

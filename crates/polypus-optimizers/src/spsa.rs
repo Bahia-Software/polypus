@@ -33,7 +33,7 @@
 use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
 use crate::observer::{IterationObserver, IterationReport};
-use crate::outcome::{OptimizationOutcome, Optimizer};
+use crate::outcome::{OptimizationOutcome, Optimizer, StopReason};
 use crate::rng::with_seeded_rng;
 use crate::util::{check_initial_point, check_oracle_len, measure_last_point, BestMeasured};
 use rand::{Rng, RngExt};
@@ -335,6 +335,7 @@ impl AlgorithmSPSA {
         // `OptimizationOutcome::fitness_history`).
         let mut fitness_history: Vec<f64> = Vec::with_capacity(max_iters as usize);
         let mut iterations_run = 0usize;
+        let mut stop_reason = StopReason::IterationBudget;
 
         for k in 1..=max_iters {
             iterations_run = k as usize;
@@ -402,6 +403,7 @@ impl AlgorithmSPSA {
                 best_params: best.params(),
             };
             if observer.observe(&report).is_break() {
+                stop_reason = StopReason::Callback;
                 break;
             }
         }
@@ -415,6 +417,7 @@ impl AlgorithmSPSA {
             iterations_run,
             converged: false,
             fitness_history,
+            stop_reason,
         })
     }
 }

@@ -76,7 +76,7 @@ it). Lints and builds:
 ```bash
 cargo fmt --all --check
 ruff check && ruff format --check          # ruff pinned in requirements-dev.txt
-cargo deny check                           # licenses + advisories (needs cargo-deny, deny.toml)
+cargo deny check                           # licenses, advisories and bans (needs cargo-deny, deny.toml)
 cargo metadata --locked --format-version 1 > /dev/null   # Cargo.lock matches the manifests
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo clippy --locked -p polypus-infrastructure --features qmio --all-targets -- -D warnings
@@ -252,7 +252,8 @@ the coverage figures: it runs as a separate process spawned by the Rust
 integration tests, which no tool instruments. So are the diagnostic binaries
 under `crates/*/src/bin/`, which are run by hand. Sonar still analyses both
 for issues. On pull requests the `SonarQube Cloud scan` job waits for the
-quality gate and fails with it; pushes to `main` only report. Without the
+quality gate and fails with it; pushes to `main` only report, and merge-queue
+runs skip the workflow (the gate already ran on the PR). Without the
 `SONAR_TOKEN` secret (pull requests from forks) the reports are still built
 but not uploaded, and the job passes without a gate. Python coverage locally,
 with the wheel installed:
@@ -316,10 +317,32 @@ line in the PR, not an exclusion.
 
 ## Lint policy
 
-`clippy.toml` only tunes lint thresholds/behaviour. Lint *levels* are set in CI
-(`-D warnings`) and, optionally, in the `[workspace.lints]` table of the root
-`Cargo.toml`. Do not sprinkle `#[allow(...)]` to silence CI; if a lint is wrong
-for the whole workspace, change the policy in one place and say why in the PR.
+`clippy.toml` only tunes lint thresholds/behaviour. Lint *levels* are set in the
+`[workspace.lints]` table of the root `Cargo.toml`, which every member crate
+inherits with `[lints] workspace = true` (a new crate must add it too), and CI
+runs clippy with `-D warnings` on top. The table denies:
+
+- `clippy::all`, so a Clippy finding fails a local `cargo clippy` as well as CI;
+- `unsafe_code`: `unsafe` is allowed only at the sites `ENGINEERING.md` §5
+  authorises, each with its own block-scoped `#[allow(unsafe_code)]`. A new
+  `unsafe` anywhere else does not compile until it has a benchmark, a
+  `// SAFETY:` comment and maintainer sign-off, and its own `allow`;
+- `clippy::undocumented_unsafe_blocks`: every `unsafe` block, including the
+  authorised ones, needs its `// SAFETY:` comment.
+
+`missing_docs` is not in the table, because with `-D warnings` a workspace-wide
+`warn` would fail every crate that still has undocumented public items. A crate
+turns it on with `#![warn(missing_docs)]` in its `lib.rs` once it is fully
+documented, and must then stay that way.
+
+The workspace boundaries of `ENGINEERING.md` §2 (`pyo3` only in the crates
+allowed to touch Python) are enforced by `cargo deny check`, through the `bans`
+section of `deny.toml`: it names the only crates that may depend directly on
+`pyo3` and on every crate that links it (`pyo3-ffi`, `numpy` and the
+PyO3-touching workspace crates; nothing may depend on `polypus`).
+
+Do not sprinkle `#[allow(...)]` to silence CI; if a lint is wrong for the whole
+workspace, change the policy in one place and say why in the PR.
 
 ## Commit messages
 
@@ -332,7 +355,8 @@ The type+scope prefix feeds the changelog; the subject line explains the
 ## Pull requests
 
 All changes land through a PR against `main` — the branch is protected: at
-least one approving review from someone other than the author, and CI green.
+least one approving review from someone other than the author, CI green, and
+the merge queue (see [Merging](#merging)).
 The PR template asks for three declarations that we take seriously:
 
 1. **Scope** — which module(s) the change targets.
@@ -347,6 +371,26 @@ The PR template asks for three declarations that we take seriously:
 Keep PRs small and single-purpose. If your work naturally produced unrelated
 improvements, split them out — small PRs get reviewed in hours, mixed ones sit
 for days.
+
+### Merging
+
+`main` uses GitHub's merge queue. A PR does not need to be up to date with
+`main`: once it is approved and green, press **Merge when ready** (or run
+`gh pr merge <N> --merge`). The queue tests the PR on top of `main` and of the
+PRs queued ahead of it, runs the required checks on that commit, and merges it
+with a merge commit if they pass. Do not press **Update branch** just to
+refresh CI; rebase only to resolve a conflict.
+
+If the queue removes your PR, open the failed `merge_group` run:
+
+- A real failure, usually a clash with a PR merged ahead of yours: fix it on
+  your branch and queue again.
+- A failure that does not reproduce: open an issue for the flaky test,
+  quarantine it in the same or a follow-up PR, and queue again. A flaky test
+  ejects every PR behind it, so it is not left in place.
+
+Admins can bypass the queue; that is for emergencies only (the queue itself
+is broken, or `main` must be fixed now).
 
 ## Adding things that have a defined shape
 
