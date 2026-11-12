@@ -2,12 +2,14 @@
 """Repository hygiene check for polypus.
 
 Analyses the net difference between two Git trees (never each intermediate
-commit, never the working tree) and reports:
+commit, never the working tree) and the messages of the commits in the
+analysed range, and reports:
 
 * forbidden-name   internal files that must never be committed
 * ignored-file     files added although the versioned .gitignore files ignore them
-* cluster-path, login-host, private-ipv4, private-key, github-token
-                   infrastructure data and credentials on added text lines
+* cluster-path, login-host, internal-host, private-ipv4, private-key,
+  github-token     infrastructure data and credentials on added text lines
+                   and in commit messages
 * private-pattern  maintainers' private regex (HYGIENE_LEAK_PATTERNS)
 * notebook-output  tutorials/**/*.ipynb committed with outputs
 * file-size        blobs larger than 1 MiB
@@ -30,6 +32,9 @@ Policy notes:
   lines are scanned in 4096-character windows overlapping by 256, so every
   match of at most 256 characters is found. Keep each private sub-pattern
   shorter than that.
+* Commit messages are those of base..head (merge-base..head with
+  --comparison merge-base; every commit of head with --base EMPTY), merge
+  commits included. They admit no allow-list exceptions: reword the commit.
 * Matched text, line contents and the private regex are never printed.
 """
 
@@ -63,6 +68,7 @@ PUBLIC_LEAK_RULES = {
         r"|/mnt/lustre(?![\w.-])|/opt/cesga(?![\w.-]))"
     ),
     "login-host": re.compile(r"\blogin\d+\b"),
+    "internal-host": re.compile(r"\bbahia\d+\b", re.I),
     "private-key": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     "github-token": re.compile(
         r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{36,}(?![A-Za-z0-9_])"
@@ -241,6 +247,31 @@ class Git:
             start, count = int(m.group(1)), int(m.group(2) or 1)
             numbers.extend(range(start, start + count))
         return numbers
+
+    def commit_messages(self, base, head):
+        """[(sha, message)] of the commits reachable from head and not from
+        base (every commit of head when base is None), merges included."""
+        revs = [head] if base is None else ["^" + base, head]
+        out = self.out(
+            [
+                "-c",
+                "log.showSignature=false",
+                "log",
+                "-z",
+                "--no-color",
+                "--encoding=UTF-8",
+                "--format=%H%n%B",
+                *revs,
+                "--",
+            ]
+        )
+        messages = []
+        for rec in out.split(b"\0"):
+            if not rec:
+                continue
+            sha, _, body = rec.partition(b"\n")
+            messages.append((sha.decode("ascii"), body))
+        return messages
 
     def is_dirty(self):
         out = self.out(["status", "--porcelain", "-z", "--untracked-files=normal"])
@@ -586,6 +617,7 @@ def markdown_literal(text):
 class Report:
     def __init__(self):
         self.violations = []
+        self.commit_violations = []
         self.errors = []
         self.notes = []
         self.binary_skipped = 0
@@ -594,6 +626,9 @@ class Report:
 
     def violation(self, path, line, rule, message):
         self.violations.append((path, line, rule, message))
+
+    def commit_violation(self, sha, line, rule, message):
+        self.commit_violations.append((sha, line, rule, message))
 
     def emit(self, completed, annotate):
         for path, line, rule, message in self.violations:
@@ -609,6 +644,15 @@ class Report:
             print(
                 "hygiene: violation {}:{} [{}] {}".format(
                     printable(path), line, rule, message
+                )
+            )
+        for sha, line, rule, message in self.commit_violations:
+            text = "[{}] commit {} message line {}: {}".format(rule, sha, line, message)
+            if annotate:
+                print("::error title={}::{}".format(rule, annotation_data(text)))
+            print(
+                "hygiene: violation commit {}:{} [{}] {}".format(
+                    sha, line, rule, message
                 )
             )
         for error in self.errors:
@@ -641,11 +685,11 @@ class Report:
                     self.latin1_decoded
                 )
             )
-        lines.append("violations: {}".format(len(self.violations)))
+        lines.append("violations: {}".format(self.violation_count()))
         lines.append("configuration/operational errors: {}".format(len(self.errors)))
         if self.errors:
             lines.append("result: INCOMPLETE (exit 2)")
-        elif self.violations:
+        elif self.violation_count():
             lines.append("result: VIOLATIONS (exit 1)")
         elif self.private_skipped:
             lines.append("result: public checks passed (private patterns not run)")
@@ -653,15 +697,25 @@ class Report:
             lines.append("result: all checks passed")
         return lines
 
+    def violation_count(self):
+        return len(self.violations) + len(self.commit_violations)
+
     def write_summary(self, target, completed):
         head = "## Repository hygiene\n\n" + "".join(
             "- " + markdown_literal(line) + "\n"
             for line in self.summary_lines(completed)
         )
-        items = [
-            "- `{}` line {}: {}\n".format(rule, line, markdown_literal(path))
-            for path, line, rule, _ in self.violations
-        ] + ["- error: {}\n".format(markdown_literal(e)) for e in self.errors]
+        items = (
+            [
+                "- `{}` line {}: {}\n".format(rule, line, markdown_literal(path))
+                for path, line, rule, _ in self.violations
+            ]
+            + [
+                "- `{}` line {} of the message of commit {}\n".format(rule, line, sha)
+                for sha, line, rule, _ in self.commit_violations
+            ]
+            + ["- error: {}\n".format(markdown_literal(e)) for e in self.errors]
+        )
         body, used = [], len(head.encode("utf-8")) + 200
         for i, item in enumerate(items):
             size = len(item.encode("utf-8"))
@@ -727,6 +781,7 @@ def analyse(args, report):
     completed = []
 
     head = git.resolve_commit(args.head, "head")
+    base = None
     if args.base == EMPTY:
         if args.comparison != "direct":
             raise HygieneError("--base EMPTY requires --comparison direct")
@@ -817,6 +872,15 @@ def analyse(args, report):
                     hint = FIX_HINTS.get(rule) or LEAK_HINT.format(rule)
                     report.violation(path, n, rule, hint)
     completed += ["file-size", "notebook-output", "leaks"]
+
+    for sha, body in git.commit_messages(base, head):
+        text, utf8 = decode_text(body)
+        report.latin1_decoded += not utf8
+        for n, line in enumerate(text.split("\n"), 1):
+            for rule in leak_rules_hit(line.rstrip("\r"), private_regex):
+                hint = FIX_HINTS.get(rule) or LEAK_HINT.format(rule)
+                report.commit_violation(sha, n, rule, hint + "; reword the commit")
+    completed.append("commit-message")
     if private_regex is not None:
         completed.append("private-pattern")
 
@@ -893,7 +957,7 @@ def main(argv=None):
             print("hygiene: error: could not write the step summary")
     if report.errors:
         return 2
-    return 1 if report.violations else 0
+    return 1 if report.violation_count() else 0
 
 
 if __name__ == "__main__":

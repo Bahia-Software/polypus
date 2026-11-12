@@ -168,6 +168,11 @@ Entries were curated from the Conventional Commits history. Releases before
   Hygiene checks the queue's candidate commit against `main` with the public
   rules; SonarQube Cloud skips its jobs there, since the quality gate already
   ran on the pull request and the push to `main` reports on the merged commit.
+- For contributors: the Hygiene check also scans the messages of the commits
+  it analyses (merge base to head on pull requests, base to head on merge-queue
+  groups and pushes to `main`) with the same public rules as file content, plus
+  the private patterns on `main`, and flags internal `bahia<N>` host names
+  alongside login-node names. Commit messages admit no allow-list exceptions.
 
 ### Fixed
 - `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a

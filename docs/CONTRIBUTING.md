@@ -200,9 +200,9 @@ rejects:
 
 - internal notes and local tool configuration that `.gitignore` already
   excludes, and any file added although a versioned `.gitignore` ignores it;
-- infrastructure data and credentials on added lines: cluster file-system
-  paths, login-node names, private IPv4 addresses, private-key headers and
-  GitHub tokens;
+- infrastructure data and credentials on added lines and in the messages
+  of the analysed commits: cluster file-system paths, login-node and internal
+  host names, private IPv4 addresses, private-key headers and GitHub tokens;
 - notebooks under `tutorials/` with outputs or execution counts;
 - blobs larger than 1 MiB;
 - a `CITATION.cff` version different from `Cargo.toml`, or not an earlier
@@ -225,7 +225,9 @@ result; `nbstripout --install` once per clone prevents it.
 
 Legitimate exceptions go in `.github/hygiene-allow.txt`, one per line as
 `RULE<TAB>PATTERN<TAB># reason`: one rule, the narrowest path or glob, and a
-reason. Forbidden names, notebooks, versions and submodules admit none.
+reason. Forbidden names, notebooks, versions, submodules and commit messages
+admit none: merge commits keep every message in the history of `main`, so
+reword the commit instead (`git commit --amend` or `git rebase -i`).
 Changes to the allow list, the script, the workflow or the policy-relevant
 `.gitignore` files need explicit human review.
 

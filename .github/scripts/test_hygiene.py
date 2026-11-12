@@ -32,6 +32,7 @@ def ip(*octets):
 
 CLUSTER = j("/mnt/", "netapp9/", "scratch/run")
 TOKEN = j("gh", "p_", "A1" * 18)
+HOST = j("bah", "ia000")
 KEY = j("-----BEGIN ", "RSA PRIVATE", " KEY-----")
 SECRET_RX = "zz-internal-[0-9]+"
 SECRET_HIT = "zz-internal-42"
@@ -474,6 +475,10 @@ LEAK_POSITIVES = (
         (j("/opt/", "cesga/x"), "cluster-path"),
         (j("ssh log", "in02"), "login-host"),
         (j("log", "in1.example"), "login-host"),
+        (HOST, "internal-host"),
+        (j("ssh ", HOST, ".example"), "internal-host"),
+        (j("Bah", "ia42:"), "internal-host"),
+        (j("(", HOST, ")"), "internal-host"),
         (ip(10, 0, 0, 1), "private-ipv4"),
         (ip(172, 16, 0, 1), "private-ipv4"),
         (ip(172, 31, 255, 255), "private-ipv4"),
@@ -494,6 +499,13 @@ LEAK_NEGATIVES = [
     "https://www.cesga.es/",
     "login_url",
     j("mylog", "in1"),
+    "Bahia-Software",
+    "bahia",
+    j("x", HOST),
+    j(HOST, "x"),
+    j(HOST, "_a"),
+    j("bah", "ia_000"),
+    j("bah", "ia-000"),
     "login",
     j("/ho", "mepage/x/"),
     j("https://example.com/ho", "me/u/"),
@@ -1077,3 +1089,79 @@ def test_net_diff_limitation(repo):
     repo.git("rm", "-q", "CLAUDE.md")
     repo.commit()
     assert repo.run().code == 0
+
+
+def commit_violations(res, rule=None):
+    return [(p, n, r) for p, n, r in res.violations(rule) if p.startswith("commit ")]
+
+
+def test_commit_message_leak_fails(repo):
+    repo.write("a.txt", "x\n")
+    sha = repo.commit(j("fix the run\n\nTested on ", HOST, ".\n"))
+    res = repo.run(env={"GITHUB_ACTIONS": "true"}, summary=True)
+    assert res.code == 1
+    assert res.violations() == [("commit " + sha, 3, "internal-host")]
+    assert "::error title=internal-host::" in res.out
+    assert "::error file=" not in res.out
+    for text in (res.out, res.err, res.summary):
+        assert HOST not in text
+    assert sha in res.summary
+
+
+def test_clean_commit_message_passes(repo):
+    repo.write("a.txt", "x\n")
+    repo.commit("feat: add a\n\nRuns on the login nodes of the cluster.\n")
+    res = repo.run()
+    assert res.code == 0
+    assert "commit-message" in res.out  # listed among the completed checks
+
+
+def test_every_commit_in_the_range_is_scanned(repo):
+    repo.write("a.txt", "x\n")
+    first = repo.commit(j("copy from ", CLUSTER))
+    repo.write("b.txt", "y\n")
+    repo.commit("clean")
+    assert commit_violations(repo.run()) == [("commit " + first, 1, "cluster-path")]
+
+
+def test_commits_outside_the_range_are_not_scanned(repo):
+    repo.write("a.txt", "x\n")
+    start = repo.commit(j("leak ", HOST))  # already on main, before the merge base
+    repo.write("b.txt", "y\n")
+    main = repo.commit(j("main leak ", HOST))
+    repo.git("checkout", "-q", "-b", "feature", start)
+    repo.write("c.txt", "z\n")
+    repo.commit("clean")
+    assert repo.run(main).code == 0
+    assert commit_violations(repo.run(start)) == []
+
+
+def test_merge_commit_message_is_scanned(repo):
+    repo.git("checkout", "-q", "-b", "feature")
+    repo.write("a.txt", "x\n")
+    repo.commit("clean")
+    repo.git("checkout", "-q", "main")
+    repo.git("merge", "-q", "--no-ff", "-m", j("Merge from ", HOST), "feature")
+    merge = repo.git("rev-parse", "HEAD")
+    res = repo.run(None, "--comparison", "direct")
+    assert res.violations() == [("commit " + merge, 1, "internal-host")]
+
+
+def test_private_pattern_in_commit_message_is_redacted(repo):
+    repo.write("a.txt", "x\n")
+    sha = repo.commit(j("deploy to ", SECRET_HIT))
+    res = repo.run(
+        None,
+        "--require-leak-patterns",
+        env={"HYGIENE_LEAK_PATTERNS": SECRET_RX},
+        summary=True,
+    )
+    assert res.violations() == [("commit " + sha, 1, "private-pattern")]
+    for text in (res.out, res.err, res.summary):
+        assert "zz-internal" not in text
+
+
+def test_allow_list_does_not_exempt_commit_messages(repo):
+    repo.write(".github/hygiene-allow.txt", "internal-host\t**/x.txt\t# reason\n")
+    sha = repo.commit(j("leak ", HOST))
+    assert commit_violations(repo.run()) == [("commit " + sha, 1, "internal-host")]
