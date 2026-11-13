@@ -336,9 +336,15 @@ fn build(num_qubits: usize, ops: &[Op], ending: &Ending) -> ParameterizedCircuit
 /// The program of `gates` in the canonical form of C-2 (the one the export
 /// writes): a run `measure q[k] -> c[k]` of every qubit, in order, is
 /// `MeasureAll`, and a barrier that lists every qubit, in order, is the
-/// whole-register barrier. Written here on purpose, without the crate's
-/// `normalized`, so that the test does not agree with the exporter by
-/// construction.
+/// whole-register barrier.
+///
+/// It restates the rule the crate's `normalized` implements (one left-to-right
+/// pass, a full run first, then the barrier), so it is not an independent
+/// oracle: it only keeps the test from calling the code under test. The
+/// independent check is the hand-written expectations of
+/// `full_in_order_runs_are_canonical_on_every_width` below and of
+/// `c2_full_in_order_barrier_and_measure_runs_are_canonical` in
+/// `tests/contracts.rs`, which this function must agree with.
 fn canonical(gates: &[GateInstruction], n: usize) -> Vec<GateInstruction> {
     let mut out = Vec::with_capacity(gates.len());
     let mut i = 0;
@@ -414,6 +420,61 @@ proptest! {
         let imported = ParameterizedCircuit::from_qasm3(&qasm)
             .unwrap_or_else(|e| panic!("{e}\n{qasm}"));
         prop_assert_eq!(imported.to_qasm3().unwrap(), qasm);
+    }
+}
+
+/// The two shapes the OpenQASM 2.0 export writes in canonical form (#568), on
+/// every register width the generator draws. Drawn at random they are rare
+/// beyond one qubit (a full in-order measurement run needs `order`, `k` and
+/// `cbits` to line up at once), so they are pinned here for
+/// `2..=MAX_QUBITS` qubits: the export text, the byte fixed point, and the
+/// read-back against instructions written by hand, which [`canonical`] must
+/// give too.
+#[test]
+fn full_in_order_runs_are_canonical_on_every_width() {
+    use GateInstruction::{Barrier, Measure, MeasureAll, H};
+    for n in 2..=MAX_QUBITS {
+        let every: Vec<usize> = (0..n).collect();
+        let run = |c: ParameterizedCircuit| every.iter().fold(c, |c, &q| c.measure(q, q));
+        let bit_by_bit: String = every
+            .iter()
+            .map(|q| format!("measure q[{q}] -> c[{q}];\n"))
+            .collect();
+        let cases = [
+            // A barrier on every qubit in order, then a full run.
+            (
+                run(ParameterizedCircuit::new(n).h(0).barrier_on(&every)),
+                "h q[0];\nbarrier q;\nmeasure q -> c;\n".to_string(),
+                vec![H(0), Barrier(vec![]), MeasureAll],
+            ),
+            // Two full runs in a row.
+            (
+                run(run(ParameterizedCircuit::new(n))),
+                "measure q -> c;\nmeasure q -> c;\n".to_string(),
+                vec![MeasureAll, MeasureAll],
+            ),
+            // A `creg` wider than the qubits: still written bit by bit.
+            (
+                run(ParameterizedCircuit::new(n).measure(0, n + 1)),
+                format!("measure q[0] -> c[{}];\n{bit_by_bit}", n + 1),
+                vec![
+                    Measure {
+                        qubit: 0,
+                        cbit: n + 1,
+                    },
+                    MeasureAll,
+                ],
+            ),
+        ];
+        for (c, body, expected) in cases {
+            let qasm = c.to_qasm2_with_params(&[]).unwrap();
+            assert!(qasm.ends_with(&body), "n = {n}:\n{qasm}");
+            let imported =
+                ParameterizedCircuit::from_qasm2(&qasm).unwrap_or_else(|e| panic!("{e}\n{qasm}"));
+            assert_eq!(imported.to_qasm2_with_params(&[]).unwrap(), qasm);
+            assert_eq!(imported.gates(), expected.as_slice(), "n = {n}:\n{qasm}");
+            assert_eq!(canonical(c.gates(), n), expected, "n = {n}:\n{qasm}");
+        }
     }
 }
 

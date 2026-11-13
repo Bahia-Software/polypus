@@ -491,8 +491,9 @@ Corollaries:
   normalises to it. The round-trip guarantee is therefore:
   `to_qasm2(from_qasm2(to_qasm2(c)))` is **byte-identical** to `to_qasm2(c)`
   — i.e. output is a fixed point, without assuming arbitrary hand-written input
-  is preserved byte-for-byte. Semantically, `from_qasm2(to_qasm2(c))` always
-  reproduces the same instruction sequence and parameters as `c`, angles
+  is preserved byte-for-byte. Semantically, `from_qasm2(to_qasm2(c))`
+  reproduces the same instruction sequence and parameters as `c` (except for
+  the two shapes below, which come back in their canonical form), angles
   bit-for-bit: an angle is written as the shortest decimal that reads back as
   the same binary64, in the number format of the OpenQASM 3 profile (C-10), so
   a backend receives exactly the circuit's angles (`pi/2` is
