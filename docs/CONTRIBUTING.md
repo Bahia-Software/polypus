@@ -59,7 +59,8 @@ it lives (Cargo enforces it and Clippy picks it up automatically). The
 workspace uses the MSRV-aware resolver (`resolver = "3"`), so `cargo update`
 avoids dependency releases that need a newer Rust than `rust-version`; the
 `msrv` CI job still builds with `--locked` and catches anything that slips
-through. Dependabot does not honour `rust-version`
+through. The `qmio` feature has a higher minimum, Rust 1.89 (`zeromq` 0.7), which the
+same job checks. Dependabot does not honour `rust-version`
 ([dependabot-core#5423](https://github.com/dependabot/dependabot-core/issues/5423)),
 so `.github/dependabot.yml` ignores `uuid >=1.27`, which needs Rust 1.89. Remove
 that `ignore` when `rust-version` is raised to 1.89 or later (#276, #278). If
