@@ -25,6 +25,9 @@ env:
 # pins; `rustup toolchain install` without a name installs it with the
 # components listed there. Those three set RUSTUP_TOOLCHAIN, which overrides
 # the file in every step.
+#
+# Only `test` reads reference-data/ (about 87 MiB, the polypus-physics tests).
+# Every other job checks out without it (#422).
 jobs:
   fmt:
     name: rustfmt
@@ -32,6 +35,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
+      - name: reference-data/ is not checked out
+        run: test ! -e reference-data
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
       - run: cargo fmt --all --check
@@ -44,6 +54,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       - uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89 # v4.1.0
         with:
           # Pin ruff so a new release's changed default rules / formatter output
@@ -61,6 +76,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
@@ -77,6 +97,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
       - name: Verify Cargo.lock is in sync with the manifests
@@ -91,6 +116,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
       - name: Install cargo-machete
@@ -111,6 +141,11 @@ jobs:
       NIGHTLY: nightly-2026-10-22
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       # PyO3's build script needs a Python interpreter.
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -141,6 +176,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.10"
@@ -194,6 +234,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       # PyO3's build script needs to locate a Python interpreter even for a
       # `cargo check`/clippy build of the `polypus` crate.
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -229,6 +274,11 @@ jobs:
       RUSTUP_TOOLCHAIN: "1.85.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
@@ -261,6 +311,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       # The PyO3 crates' build scripts need an interpreter.
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -287,6 +342,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       # The PyO3 crates' build scripts need an interpreter.
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -407,6 +467,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       # PyO3's build script needs a Python interpreter to compile `polypus`.
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -433,6 +498,11 @@ jobs:
         python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
@@ -468,6 +538,11 @@ jobs:
             qiskit: fixtures
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
@@ -588,6 +663,11 @@ jobs:
       MPLBACKEND: Agg
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
@@ -636,6 +716,11 @@ jobs:
       RUSTUP_TOOLCHAIN: nightly-2026-10-22
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       - name: Install Rust ${{ env.RUSTUP_TOOLCHAIN }}
         run: |
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
@@ -671,6 +756,11 @@ jobs:
       RUSTUP_TOOLCHAIN: nightly-2026-10-22
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       - name: Install Rust ${{ env.RUSTUP_TOOLCHAIN }} with Miri
         run: |
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component miri,rust-src --no-self-update
