@@ -1222,9 +1222,15 @@ fn test_builder_circuits_compare_as_before() {
 }
 
 /// Builder circuits — measured bit by bit, with `measure_all`, measured in
-/// part, unmeasured — export byte for byte what they did before the declared
-/// width was kept (`main` at 00ef078), in OpenQASM 2.0 and in the OpenQASM 3
-/// profile, from the parameterised and from the bound circuit.
+/// part, unmeasured — export what they did before the declared width was kept
+/// (`main` at 00ef078), in OpenQASM 2.0 and in the OpenQASM 3 profile, from the
+/// parameterised and from the bound circuit.
+///
+/// The one exception is a measure of every qubit, bit by bit and in order
+/// (`measure(0, 0).measure(1, 1)` on two qubits): the OpenQASM 2.0 export now
+/// writes it in its canonical form, `measure q -> c;`, as the OpenQASM 3 one
+/// always did, so that export → import → export is byte-stable (contract C-2,
+/// #568). It is the same program; only the text differs.
 #[test]
 fn test_builder_exports_are_unchanged_by_the_classical_width() {
     let cases = [
@@ -1234,7 +1240,7 @@ fn test_builder_exports_are_unchanged_by_the_classical_width() {
                 .cx(0, 1)
                 .measure(0, 0)
                 .measure(1, 1),
-            "qreg q[2];\ncreg c[2];\nh q[0];\ncx q[0],q[1];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+            "qreg q[2];\ncreg c[2];\nh q[0];\ncx q[0],q[1];\nmeasure q -> c;\n",
             "qubit[2] q;\nbit[2] c;\nh q[0];\ncx q[0], q[1];\nc = measure q;\n",
         ),
         (

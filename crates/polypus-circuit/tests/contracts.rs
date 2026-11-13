@@ -8,7 +8,11 @@
 //!   comes back as a call of the gate the export defines for it). The
 //!   QIR-vs-simulator unitary equivalence half of C-2, and the matrices of the
 //!   OpenQASM 3 definitions, live in `crates/polypus-sim/tests` (they need the
-//!   simulator).
+//!   simulator). A barrier on every qubit in order and the measurements
+//!   `q[k] -> c[k]` of every qubit in order are written, and read back, as
+//!   `barrier q;` and `measure q -> c;` (the canonical form; `normalized`),
+//!   in OpenQASM 2.0 as in OpenQASM 3; any other barrier or measurement is
+//!   kept as built.
 //! - **C-4 · Terminal measurement placement.** A gate acting on an
 //!   already-measured qubit is rejected by the builder, the QASM importer and
 //!   the QIR exporter (the simulator half lives in the `polypus-sim` tests).
@@ -133,6 +137,108 @@ fn c2_full_vocabulary_roundtrip_is_byte_stable() {
     // The imported instruction sequence reproduces the (bound) original.
     let bound = c.assign_parameters(&[0.4, -0.9]).unwrap();
     assert_eq!(imported.gates(), bound.gates());
+}
+
+/// A builder circuit's OpenQASM 2.0 export is `expected` (the program after the
+/// header), is a fixed point of export → import → export byte for byte, and
+/// reads back as exactly `gates`, written by hand, not derived from the crate's
+/// own canonicalisation.
+fn assert_qasm2_canonical(qc: &ParameterizedCircuit, expected: &str, gates: &[GateInstruction]) {
+    let expected = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\n{expected}");
+    let first = qc.to_qasm2_with_params(&[]).unwrap();
+    assert_eq!(first, expected, "first export");
+    let imported = ParameterizedCircuit::from_qasm2(&first).unwrap();
+    assert_eq!(
+        imported.to_qasm2_with_params(&[]).unwrap(),
+        first,
+        "export → import → export must be a fixed point:\n{first}"
+    );
+    assert_eq!(imported.gates(), gates, "reimported instructions:\n{first}");
+}
+
+/// A barrier that lists every qubit in order, and the measurements
+/// `q[k] -> c[k]` of every qubit in order, are written (and read back) in their
+/// canonical form, `barrier q;` and `measure q -> c;`; every other barrier and
+/// measurement is kept as built. Pinned in #568.
+#[test]
+fn c2_full_in_order_barrier_and_measure_runs_are_canonical() {
+    use GateInstruction::{Barrier, Measure, MeasureAll, H};
+
+    // A barrier on every qubit in order, with 2 and with 3 qubits.
+    assert_qasm2_canonical(
+        &ParameterizedCircuit::new(2).barrier_on(&[0, 1]),
+        "qreg q[2];\nbarrier q;\n",
+        &[Barrier(vec![])],
+    );
+    assert_qasm2_canonical(
+        &ParameterizedCircuit::new(3).barrier_on(&[0, 1, 2]),
+        "qreg q[3];\nbarrier q;\n",
+        &[Barrier(vec![])],
+    );
+
+    // A measure of every qubit in order, with 2 and with 3 qubits.
+    assert_qasm2_canonical(
+        &ParameterizedCircuit::new(2)
+            .h(0)
+            .measure(0, 0)
+            .measure(1, 1),
+        "qreg q[2];\ncreg c[2];\nh q[0];\nmeasure q -> c;\n",
+        &[H(0), MeasureAll],
+    );
+    assert_qasm2_canonical(
+        &ParameterizedCircuit::new(3)
+            .h(0)
+            .measure(0, 0)
+            .measure(1, 1)
+            .measure(2, 2),
+        "qreg q[3];\ncreg c[3];\nh q[0];\nmeasure q -> c;\n",
+        &[H(0), MeasureAll],
+    );
+
+    // Two full runs in a row are two `MeasureAll`.
+    assert_qasm2_canonical(
+        &ParameterizedCircuit::new(2)
+            .measure(0, 0)
+            .measure(1, 1)
+            .measure(0, 0)
+            .measure(1, 1),
+        "qreg q[2];\ncreg c[2];\nmeasure q -> c;\nmeasure q -> c;\n",
+        &[MeasureAll, MeasureAll],
+    );
+
+    // What is not a full run in order stays as built: a barrier out of order,
+    // a partial barrier, measurements into permuted bits, an incomplete run.
+    assert_qasm2_canonical(
+        &ParameterizedCircuit::new(2).barrier_on(&[1, 0]),
+        "qreg q[2];\nbarrier q[1],q[0];\n",
+        &[Barrier(vec![1, 0])],
+    );
+    assert_qasm2_canonical(
+        &ParameterizedCircuit::new(3).barrier_on(&[0, 1]),
+        "qreg q[3];\nbarrier q[0],q[1];\n",
+        &[Barrier(vec![0, 1])],
+    );
+    assert_qasm2_canonical(
+        &ParameterizedCircuit::new(2).measure(0, 1).measure(1, 0),
+        "qreg q[2];\ncreg c[2];\nmeasure q[0] -> c[1];\nmeasure q[1] -> c[0];\n",
+        &[Measure { qubit: 0, cbit: 1 }, Measure { qubit: 1, cbit: 0 }],
+    );
+    assert_qasm2_canonical(
+        &ParameterizedCircuit::new(3).measure(0, 0).measure(1, 1),
+        "qreg q[3];\ncreg c[2];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+        &[Measure { qubit: 0, cbit: 0 }, Measure { qubit: 1, cbit: 1 }],
+    );
+
+    // A `creg` wider than the qubits: `measure q -> c;` would be invalid, so
+    // the run is still written qubit by qubit (and is still a fixed point).
+    assert_qasm2_canonical(
+        &ParameterizedCircuit::new(2)
+            .measure(0, 3)
+            .measure(0, 0)
+            .measure(1, 1),
+        "qreg q[2];\ncreg c[4];\nmeasure q[0] -> c[3];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+        &[Measure { qubit: 0, cbit: 3 }, MeasureAll],
+    );
 }
 
 /// `ConcreteCircuit::inverse` is an operation over the whole vocabulary: every

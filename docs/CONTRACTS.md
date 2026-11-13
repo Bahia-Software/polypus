@@ -491,8 +491,9 @@ Corollaries:
   normalises to it. The round-trip guarantee is therefore:
   `to_qasm2(from_qasm2(to_qasm2(c)))` is **byte-identical** to `to_qasm2(c)`
   — i.e. output is a fixed point, without assuming arbitrary hand-written input
-  is preserved byte-for-byte. Semantically, `from_qasm2(to_qasm2(c))` always
-  reproduces the same instruction sequence and parameters as `c`, angles
+  is preserved byte-for-byte. Semantically, `from_qasm2(to_qasm2(c))`
+  reproduces the same instruction sequence and parameters as `c` (except for
+  the two shapes below, which come back in their canonical form), angles
   bit-for-bit: an angle is written as the shortest decimal that reads back as
   the same binary64, in the number format of the OpenQASM 3 profile (C-10), so
   a backend receives exactly the circuit's angles (`pi/2` is
@@ -502,7 +503,16 @@ Corollaries:
   that format, canonical spelling) is re-emitted byte-identically:
   `to_qasm2(from_qasm2(s)) == s`. The OpenQASM 3 export has the same
   fixed-point guarantee, `to_qasm3(from_qasm3(to_qasm3(c))) == to_qasm3(c)`,
-  for its own canonical form (C-10).
+  for its own canonical form (C-10). Both exporters write the canonical form
+  of two shapes the importers normalise: a barrier that lists every qubit in
+  order is written as `barrier q;`, and the measurements `q[k] -> c[k]` of
+  every qubit in order as `measure q -> c;` (bit by bit when the register is
+  wider than `num_qubits`, see *Classical width*). For these two shapes the
+  read-back reproduces the canonical instructions (`Barrier([])`,
+  `MeasureAll`), not necessarily the builder's; any other barrier or
+  measurement, out of order or partial, is kept as built (issue #568). Enforced
+  by `c2_full_in_order_barrier_and_measure_runs_are_canonical` in
+  `crates/polypus-circuit/tests/contracts.rs`.
 - **Classical width.** A circuit has one classical register, `c`, as wide as
   `clbits_width()`: the classical bits the imported program declares (all its
   `creg`s, or its `bit` registers in OpenQASM 3, flattened in declaration

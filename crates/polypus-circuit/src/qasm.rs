@@ -28,6 +28,7 @@ use crate::error::CircuitError;
 use crate::expr::{fmt_number, print, Dialect, ExprArena};
 use crate::gate::{GateInstruction, GateParam};
 use crate::naming::{reserved, DefinitionNames};
+use crate::qasm_import::normalized;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
@@ -237,6 +238,11 @@ fn write_definition(
 /// `params` supplies values for any unresolved [`GateParam::Param`], and
 /// `exprs` holds the expressions of any [`GateParam::Expr`], evaluated with
 /// them; pass an empty slice and arena for fully concrete circuits.
+///
+/// A barrier that lists every qubit in order and the `measure q[k] -> c[k]` of
+/// every qubit in order are written in their canonical form, `barrier q;` and
+/// `measure q -> c;`, exactly as the importer reads them back (contract C-2),
+/// so `to_qasm2(from_qasm2(to_qasm2(c)))` is `to_qasm2(c)` byte for byte.
 pub(crate) fn write_qasm2(
     num_qubits: usize,
     num_clbits: usize,
@@ -265,8 +271,8 @@ pub(crate) fn write_qasm2(
     // Calls of declared gates resolve their angles apart: `angle` holds `stack`.
     let mut call_stack = Vec::new();
 
-    for gate in gates {
-        match gate {
+    for gate in normalized(gates, num_qubits) {
+        match &*gate {
             GateInstruction::H(q) => {
                 let _ = writeln!(out, "h q[{q}];");
             }
