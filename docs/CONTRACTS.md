@@ -502,7 +502,16 @@ Corollaries:
   that format, canonical spelling) is re-emitted byte-identically:
   `to_qasm2(from_qasm2(s)) == s`. The OpenQASM 3 export has the same
   fixed-point guarantee, `to_qasm3(from_qasm3(to_qasm3(c))) == to_qasm3(c)`,
-  for its own canonical form (C-10).
+  for its own canonical form (C-10). Both exporters write the canonical form
+  of two shapes the importers normalise: a barrier that lists every qubit in
+  order is written as `barrier q;`, and the measurements `q[k] -> c[k]` of
+  every qubit in order as `measure q -> c;` (bit by bit when the register is
+  wider than `num_qubits`, see *Classical width*). For these two shapes the
+  read-back reproduces the canonical instructions (`Barrier([])`,
+  `MeasureAll`), not necessarily the builder's; any other barrier or
+  measurement, out of order or partial, is kept as built (issue #568). Enforced
+  by `c2_full_in_order_barrier_and_measure_runs_are_canonical` in
+  `crates/polypus-circuit/tests/contracts.rs`.
 - **Classical width.** A circuit has one classical register, `c`, as wide as
   `clbits_width()`: the classical bits the imported program declares (all its
   `creg`s, or its `bit` registers in OpenQASM 3, flattened in declaration

@@ -2,7 +2,9 @@
 //! for circuits generated over the whole vocabulary, with arbitrary finite
 //! angles, the export is a fixed point of export → import → export, in
 //! OpenQASM 2.0 and in the OpenQASM 3 profile (C-10), and the OpenQASM 2.0
-//! import gives back the same instructions, angles bit for bit.
+//! import gives back the same instructions, angles bit for bit, in canonical
+//! form (a barrier on every qubit in order is the whole-register barrier, and
+//! the measurements `q[k] -> c[k]` of every qubit in order are `MeasureAll`).
 //!
 //! `tests/contracts.rs` pins the vocabulary gate by gate and in one fixed
 //! circuit; this file checks the same guarantees on arbitrary sequences, so
@@ -315,43 +317,56 @@ fn build(num_qubits: usize, ops: &[Op], ending: &Ending) -> ParameterizedCircuit
                 GateInstruction::Custom(call)
             }
             Op::Barrier { qubits, k } => match k {
-                Some(k) if !lists_every_qubit_in_order(&qubits[..*k], num_qubits) => {
-                    GateInstruction::Barrier(qubits[..*k].to_vec())
-                }
-                _ => GateInstruction::Barrier(Vec::new()),
+                Some(k) => GateInstruction::Barrier(qubits[..*k].to_vec()),
+                None => GateInstruction::Barrier(Vec::new()),
             },
         };
         c.try_push(gate).expect("a generated instruction is valid");
     }
     match ending {
-        Ending::Some { order, cbits, k }
-            if !(lists_every_qubit_in_order(&order[..*k], num_qubits)
-                && cbits[..*k] == order[..*k]) =>
-        {
-            order[..*k]
-                .iter()
-                .zip(cbits)
-                .fold(c, |c, (&q, &b)| c.measure(q, b))
-        }
+        Ending::Some { order, cbits, k } => order[..*k]
+            .iter()
+            .zip(cbits)
+            .fold(c, |c, (&q, &b)| c.measure(q, b)),
         Ending::Nothing => c,
-        _ => c.measure_all(),
+        Ending::MeasureAll => c.measure_all(),
     }
 }
 
-/// Whether `qubits` is `0, 1, …, num_qubits - 1`.
-///
-/// A barrier on exactly those qubits, and measurements `q[k] -> c[k]` of
-/// exactly those qubits in that order, are not yet a fixed point of the
-/// OpenQASM 2.0 round trip: the exporter writes them as built
-/// (`barrier q[0],q[1];`, one `measure` per qubit), and the importer reads
-/// them back in canonical form (`barrier q;`, `measure q -> c;`), which the
-/// next export writes. The OpenQASM 3 exporter writes the canonical form
-/// (`normalized` in `qasm_import.rs`); the 2.0 one does not (#568). Until it
-/// does, the generator builds those two shapes in their canonical form
-/// directly; everything else, every other operand list and order included, is
-/// drawn as is.
-fn lists_every_qubit_in_order(qubits: &[usize], num_qubits: usize) -> bool {
-    qubits.len() == num_qubits && qubits.iter().enumerate().all(|(i, &q)| i == q)
+/// The program of `gates` in the canonical form of C-2 (the one the export
+/// writes): a run `measure q[k] -> c[k]` of every qubit, in order, is
+/// `MeasureAll`, and a barrier that lists every qubit, in order, is the
+/// whole-register barrier. Written here on purpose, without the crate's
+/// `normalized`, so that the test does not agree with the exporter by
+/// construction.
+fn canonical(gates: &[GateInstruction], n: usize) -> Vec<GateInstruction> {
+    let mut out = Vec::with_capacity(gates.len());
+    let mut i = 0;
+    while i < gates.len() {
+        let full_run = n > 0
+            && i + n <= gates.len()
+            && (0..n).all(|k| {
+                matches!(
+                    gates[i + k],
+                    GateInstruction::Measure { qubit, cbit } if qubit == k && cbit == k
+                )
+            });
+        if full_run {
+            out.push(GateInstruction::MeasureAll);
+            i += n;
+            continue;
+        }
+        match &gates[i] {
+            GateInstruction::Barrier(v)
+                if !v.is_empty() && v.len() == n && v.iter().enumerate().all(|(k, &q)| q == k) =>
+            {
+                out.push(GateInstruction::Barrier(Vec::new()));
+            }
+            other => out.push(other.clone()),
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Fixed cases and a fixed seed: every run, and CI, checks the same circuits.
@@ -384,7 +399,12 @@ proptest! {
         let imported = ParameterizedCircuit::from_qasm2(&qasm)
             .unwrap_or_else(|e| panic!("{e}\n{qasm}"));
         prop_assert_eq!(imported.to_qasm2_with_params(&[]).unwrap(), qasm.clone());
-        prop_assert_eq!(exactly(imported.gates()), exactly(c.gates()), "{}", qasm);
+        prop_assert_eq!(
+            exactly(imported.gates()),
+            exactly(&canonical(c.gates(), n)),
+            "{}",
+            qasm
+        );
     }
 
     #[test]
