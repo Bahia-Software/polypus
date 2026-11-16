@@ -664,6 +664,256 @@ class TestCountArguments:
             build(Ansatz(2))
 
 
+def _qml(name):
+    """``polypus.qml.<name>``, imported when the test runs."""
+    import polypus.qml as qml
+
+    return getattr(qml, name)
+
+
+class TestQubitCountsAndPositions:
+    """``num_qubits`` and a Pauli position are counts like ``reps``: a negative
+    or oversized one is a ``ValueError`` where it is written, never PyO3's
+    ``OverflowError``, and another type is still a ``TypeError`` (contract
+    C-11). In the ``[(pauli, position), …]`` form the ``ValueError`` names the
+    factor and the term (of an ``Observable``) or observable (of a
+    ``Readout``) it is in; any other malformed list keeps the ``TypeError``
+    naming the forms."""
+
+    @pytest.mark.parametrize("cls", ["Encoder", "Ansatz"])
+    @pytest.mark.parametrize(
+        ("value", "match"),
+        [
+            pytest.param(-1, "non-negative integer, got -1", id="negative"),
+            pytest.param(2**70, f"at most {2**64 - 1}, got {2**70}", id="beyond-usize"),
+        ],
+    )
+    def test_an_out_of_range_qubit_count_is_a_value_error(self, cls, value, match):
+        with pytest.raises(ValueError, match=match):
+            _qml(cls)(value)
+
+    @pytest.mark.parametrize("cls", ["Encoder", "Ansatz"])
+    def test_zero_qubits_keeps_its_own_message(self, cls):
+        with pytest.raises(ValueError, match=f"{cls} needs at least one qubit"):
+            _qml(cls)(0)
+
+    @pytest.mark.parametrize("cls", ["Encoder", "Ansatz"])
+    @pytest.mark.parametrize("value", ["3", 3.0], ids=["str", "float"])
+    def test_a_qubit_count_of_another_type_is_a_type_error(self, cls, value):
+        with pytest.raises(TypeError):
+            _qml(cls)(value)
+
+    @pytest.mark.parametrize("name", ["Z", "X", "Y"])
+    @pytest.mark.parametrize(
+        ("value", "match"),
+        [
+            pytest.param(-1, "non-negative integer, got -1", id="negative"),
+            pytest.param(2**70, f"at most {2**64 - 1}, got {2**70}", id="beyond-usize"),
+        ],
+    )
+    def test_an_out_of_range_position_is_a_value_error(self, name, value, match):
+        with pytest.raises(ValueError, match=match):
+            _qml(name)(value)
+
+    @pytest.mark.parametrize("name", ["Z", "X", "Y"])
+    @pytest.mark.parametrize("value", ["0", 0.0], ids=["str", "float"])
+    def test_a_position_of_another_type_is_a_type_error(self, name, value):
+        with pytest.raises(TypeError):
+            _qml(name)(value)
+
+    @pytest.mark.parametrize(
+        ("factors", "match"),
+        [
+            pytest.param(
+                [("z", -1)],
+                r'position of factor 0 \("z"\) of WHOSE 0 is out of range: '
+                r"expected a non-negative integer, got -1",
+                id="negative",
+            ),
+            pytest.param(
+                [("z", 0), ("x", 2**70)],
+                rf'position of factor 1 \("x"\) of WHOSE 0 .* got {2**70}',
+                id="beyond-usize",
+            ),
+            # Read in order: the first bad factor decides.
+            pytest.param(
+                [("z", -1), ("z",)],
+                r"position of factor 0 .* of WHOSE 0 .* got -1",
+                id="position-before-a-malformed-factor",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("where", ["readout", "observable"])
+    def test_an_out_of_range_position_in_a_list_is_a_value_error(
+        self, where, factors, match
+    ):
+        from polypus.qml import Observable, Readout
+
+        whose = "observable" if where == "readout" else "term"
+        with pytest.raises(ValueError, match=match.replace("WHOSE", whose)):
+            if where == "readout":
+                Readout([factors])
+            else:
+                Observable([(1.0, factors)])
+
+    def test_the_message_names_the_term_that_is_not_the_first(self):
+        from polypus.qml import Observable
+
+        with pytest.raises(
+            ValueError, match=r'factor 0 \("z"\) of term 1 is out of range'
+        ):
+            Observable([(1.0, [("z", 0)]), (1.0, [("z", -1)])])
+
+    def test_the_message_names_the_observable_that_is_not_the_first(self):
+        from polypus.qml import Readout, Z
+
+        with pytest.raises(
+            ValueError, match=r'factor 0 \("z"\) of observable 1 is out of range'
+        ):
+            Readout([Z(0), [("z", -1)]])
+
+    @pytest.mark.parametrize(
+        "factors",
+        [
+            pytest.param([("z",)], id="no-position"),
+            pytest.param([("z", "0")], id="str-position"),
+            pytest.param([("z", 0.5)], id="float-position"),
+            pytest.param("zz", id="str"),
+            # Read in order: the malformed factor comes first.
+            pytest.param([("z",), ("z", -1)], id="malformed-before-a-bad-position"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("where", "match"),
+        [
+            ("readout", "each observable must be"),
+            ("observable", "a Pauli term must be"),
+        ],
+    )
+    def test_any_other_malformed_list_is_still_a_type_error(
+        self, where, match, factors
+    ):
+        from polypus.qml import Observable, Readout
+
+        with pytest.raises(TypeError, match=match):
+            if where == "readout":
+                Readout([factors])
+            else:
+                Observable([(1.0, factors)])
+
+
+class _Index:
+    """An integer only through ``__index__``: no ``__lt__``, and its ``str`` is
+    not the integer, so a count must be described by what ``__index__``
+    returns."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __index__(self):
+        return self.value
+
+
+class TestIndexObjects:
+    """An object with ``__index__`` (a NumPy integer, say) is the integer it
+    returns: out of range, it is the same ``ValueError`` as that integer, with
+    that integer in the message, never a ``TypeError`` from comparing or
+    printing the object (contract C-11)."""
+
+    @pytest.mark.parametrize(
+        ("call", "match"),
+        [
+            pytest.param(
+                lambda: _qml("Z")(_Index(-1)), "non-negative integer, got -1", id="Z"
+            ),
+            pytest.param(
+                lambda: _qml("Encoder")(_Index(2**70)), f"got {2**70}", id="Encoder"
+            ),
+            pytest.param(lambda: _qml("Ansatz")(_Index(-1)), "got -1", id="Ansatz"),
+            pytest.param(
+                lambda: _qml("Readout")([[("z", _Index(-1))]]),
+                "of observable 0 is out of range: .* got -1",
+                id="Readout-list",
+            ),
+            pytest.param(
+                lambda: _qml("Observable")([(1.0, [("z", _Index(-1))])]),
+                "of term 0 is out of range: .* got -1",
+                id="Observable-list",
+            ),
+        ],
+    )
+    def test_an_out_of_range_index_object_is_a_value_error(self, call, match):
+        with pytest.raises(ValueError, match=match):
+            call()
+
+    def test_an_out_of_range_reps_leaves_the_ansatz_unchanged(self):
+        from polypus.qml import Ansatz
+
+        ansatz = Ansatz(2).real_amplitudes(1)
+        with pytest.raises(ValueError, match="non-negative integer, got -1"):
+            ansatz.hardware_efficient(_Index(-1))
+        assert (ansatz.num_layers, ansatz.num_params) == (1, 4)
+
+    def test_one_in_range_is_its_integer(self):
+        from polypus.qml import Ansatz, Z
+
+        assert repr(Z(_Index(3))) == repr(Z(3)) == "Z(3)"
+        assert Ansatz(_Index(2)).num_qubits == 2
+
+
+_BOOL_IDS = ["True", "False"]
+
+
+class TestBoolIsNotACount:
+    """A ``bool`` is an ``int`` to Python but never a count of the native API:
+    ``num_qubits``, ``reps``, ``ranges`` and a Pauli position refuse one with a
+    ``TypeError`` (contract C-11), as ``final_shots`` does, instead of reading
+    ``True`` as 1. A builder call that raises leaves the ``Ansatz`` as it was."""
+
+    @pytest.mark.parametrize("flag", [True, False], ids=_BOOL_IDS)
+    @pytest.mark.parametrize("name", ["Encoder", "Ansatz", "Z", "X", "Y"])
+    def test_a_qubit_count_or_position(self, name, flag):
+        with pytest.raises(
+            TypeError, match=f"expected an integer, got a bool \\({flag}\\)"
+        ):
+            _qml(name)(flag)
+
+    @pytest.mark.parametrize("flag", [True, False], ids=_BOOL_IDS)
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda a, flag: a.hardware_efficient(flag),
+            lambda a, flag: a.real_amplitudes(flag),
+            lambda a, flag: a.strongly_entangling(1, ranges=[flag]),
+        ],
+        ids=["hardware-efficient", "real-amplitudes", "strongly-entangling-ranges"],
+    )
+    def test_a_builder_count(self, build, flag):
+        from polypus.qml import Ansatz
+
+        ansatz = Ansatz(2).real_amplitudes(1)
+        with pytest.raises(TypeError, match="got a bool"):
+            build(ansatz, flag)
+        assert (ansatz.num_layers, ansatz.num_params) == (1, 4)
+
+    @pytest.mark.parametrize("flag", [True, False], ids=_BOOL_IDS)
+    @pytest.mark.parametrize(
+        ("where", "match"),
+        [
+            ("readout", "each observable must be"),
+            ("observable", "a Pauli term must be"),
+        ],
+    )
+    def test_a_position_in_a_list(self, where, match, flag):
+        from polypus.qml import Observable, Readout
+
+        with pytest.raises(TypeError, match=match):
+            if where == "readout":
+                Readout([[("z", flag)]])
+            else:
+                Observable([(1.0, [("z", flag)])])
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Readout observables, against closed forms
 # ─────────────────────────────────────────────────────────────────────────────

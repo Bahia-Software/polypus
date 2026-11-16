@@ -25,7 +25,7 @@ use pyo3::exceptions::{
     PyTypeError, PyValueError,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyModule, PyTuple, PyType};
+use pyo3::types::{PyBool, PyDict, PyList, PyModule, PyTuple, PyType};
 
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 use polypus_qml::{
@@ -72,12 +72,66 @@ fn validation_to_config_err(e: ValidationError) -> PyErr {
     configuration_error(e.to_string())
 }
 
-/// A count argument of a builder method, such as `reps`: a Python `int` that
-/// fits in a `usize`. A negative or oversized one is a `ValueError` (contract
-/// C-11), not the `OverflowError` PyO3's own conversion raises; any other type
-/// keeps its `TypeError`. On Python 3.11 and later, PyO3 adds a note naming
-/// the argument to whatever this raises (it shows in the traceback, not in
-/// `str(e)`).
+/// An integer (or an `__index__` one) that does not fit in a `usize`, as
+/// [`extract_count`] finds it: the integer (what `__index__` returns, for an
+/// object that is not an `int`) as Python prints it, and its sign, which picks
+/// the message.
+struct OutOfRangeCount {
+    shown: String,
+    negative: bool,
+}
+
+impl OutOfRangeCount {
+    /// Why a count cannot be this value, the text of [`CountArg`]'s
+    /// `ValueError`.
+    fn message(&self) -> String {
+        let shown = &self.shown;
+        if self.negative {
+            format!("expected a non-negative integer, got {shown}")
+        } else {
+            format!("expected an integer of at most {}, got {shown}", usize::MAX)
+        }
+    }
+}
+
+/// `ob` as a `usize`, the conversion every count-like argument of the native
+/// API shares (contract C-11): the count when it fits, an [`OutOfRangeCount`]
+/// for an integer outside `usize`, which each caller refuses in its own words
+/// instead of PyO3's `OverflowError`, and PyO3's own error for anything else
+/// (a `TypeError` for another type).
+///
+/// A `bool` is not a count, although Python makes it an `int`: it is a
+/// `TypeError`, as `final_shots` treats one. An object with `__index__` (a
+/// NumPy integer, say) is the integer it returns: an out-of-range one is
+/// described by that integer, never compared or printed as the object itself,
+/// which may support neither.
+fn extract_count(ob: &Bound<'_, PyAny>) -> PyResult<Result<usize, OutOfRangeCount>> {
+    let py = ob.py();
+    if ob.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(format!(
+            "expected an integer, got a bool ({})",
+            ob.str()?
+        )));
+    }
+    match ob.extract::<usize>() {
+        Ok(count) => Ok(Ok(count)),
+        Err(err) if err.is_instance_of::<PyOverflowError>(py) => {
+            let index = PyModule::import(py, "operator")?.call_method1("index", (ob,))?;
+            Ok(Err(OutOfRangeCount {
+                shown: index.str()?.to_string(),
+                negative: index.lt(0)?,
+            }))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// A count argument, such as `reps` or `num_qubits`: a Python `int` that fits
+/// in a `usize`. A negative or oversized one is a `ValueError` (contract
+/// C-11), not the `OverflowError` PyO3's own conversion raises; a `bool` or
+/// any other type is a `TypeError`. On Python 3.11 and later, PyO3 adds a
+/// note naming the argument to whatever this raises (it shows in the
+/// traceback, not in `str(e)`).
 ///
 /// A local newtype, like [`AngleArg`](super::circuit::AngleArg), because
 /// `FromPyObject` and `usize` are both foreign to this crate.
@@ -87,19 +141,39 @@ impl<'a, 'py> FromPyObject<'a, 'py> for CountArg {
     type Error = PyErr;
 
     fn extract(ob: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
-        match ob.extract::<usize>() {
+        match extract_count(&ob)? {
             Ok(count) => Ok(CountArg(count)),
-            // An integer (or an `__index__` one) outside `usize`: its sign picks
-            // the message.
-            Err(err) if err.is_instance_of::<PyOverflowError>(ob.py()) => {
-                let shown = ob.str()?;
-                Err(PyValueError::new_err(if ob.lt(0)? {
-                    format!("expected a non-negative integer, got {shown}")
-                } else {
-                    format!("expected an integer of at most {}, got {shown}", usize::MAX)
-                }))
-            }
-            Err(err) => Err(err),
+            Err(out_of_range) => Err(PyValueError::new_err(out_of_range.message())),
+        }
+    }
+}
+
+/// `Model.fit`'s `batch_size`: an integer that fits in a `usize`, or one that
+/// does not (negative or oversized), kept so that `fit` refuses it where it
+/// refuses `0` or a size as large as the training set, with the same
+/// `polypus.ConfigurationError` (contract C-11) rather than PyO3's
+/// `OverflowError`. A `bool` or any other type is a `TypeError`.
+enum BatchSizeArg {
+    Size(usize),
+    OutOfRange(OutOfRangeCount),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for BatchSizeArg {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        Ok(match extract_count(&ob)? {
+            Ok(size) => BatchSizeArg::Size(size),
+            Err(out_of_range) => BatchSizeArg::OutOfRange(out_of_range),
+        })
+    }
+}
+
+impl std::fmt::Display for BatchSizeArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BatchSizeArg::Size(size) => write!(f, "{size}"),
+            BatchSizeArg::OutOfRange(out_of_range) => f.write_str(&out_of_range.shown),
         }
     }
 }
@@ -345,31 +419,33 @@ impl PauliTerm {
     }
 }
 
-/// `polypus.qml.Z(position)`: Pauli `Z` on one logical qubit.
+/// `polypus.qml.Z(position)`: Pauli `Z` on one logical qubit. The position is a
+/// count argument: a negative or oversized one is a `ValueError` (C-11).
 #[pyfunction(name = "Z")]
-pub fn pauli_z(position: usize) -> PauliTerm {
-    PauliTerm::single("z", position)
+fn pauli_z(position: CountArg) -> PauliTerm {
+    PauliTerm::single("z", position.0)
 }
 
 /// `polypus.qml.X(position)`: Pauli `X` on one logical qubit. A readout may mix
 /// bases only if it still fits one measurement basis, which `train` checks.
 #[pyfunction(name = "X")]
-pub fn pauli_x(position: usize) -> PauliTerm {
-    PauliTerm::single("x", position)
+fn pauli_x(position: CountArg) -> PauliTerm {
+    PauliTerm::single("x", position.0)
 }
 
 /// `polypus.qml.Y(position)`: Pauli `Y` on one logical qubit, with the same
 /// single-basis rule as [`pauli_x`].
 #[pyfunction(name = "Y")]
-pub fn pauli_y(position: usize) -> PauliTerm {
-    PauliTerm::single("y", position)
+fn pauli_y(position: CountArg) -> PauliTerm {
+    PauliTerm::single("y", position.0)
 }
 
 /// A weighted sum of Pauli products, `O = Σ cᵢ·Pᵢ`, for a readout that needs
 /// coefficients or several terms (a cost Hamiltonian, say). Built from
 /// `[(coefficient, term), …]`, each term a [`PauliTerm`] or a
-/// `[(pauli, position), …]` list. A non-finite coefficient, an unknown Pauli or
-/// a position repeated within a term is a `ValueError`.
+/// `[(pauli, position), …]` list. A non-finite coefficient, an unknown Pauli, a
+/// position repeated within a term or a negative or oversized position is a
+/// `ValueError`.
 #[pyclass(module = "polypus.qml", name = "Observable", frozen)]
 pub struct PyObservable {
     inner: Observable,
@@ -380,8 +456,9 @@ impl PyObservable {
     #[new]
     fn new(terms: Vec<(f64, Bound<'_, PyAny>)>) -> PyResult<Self> {
         let mut parsed = Vec::with_capacity(terms.len());
-        for (coefficient, term) in terms {
-            parsed.push((coefficient, parse_pauli_string(&term_factors(&term)?)?));
+        for (at, (coefficient, term)) in terms.iter().enumerate() {
+            let factors = term_factors(term, ("term", at))?;
+            parsed.push((*coefficient, parse_pauli_string(&factors)?));
         }
         let inner = Observable::new(parsed).map_err(validation_to_py_err)?;
         Ok(PyObservable { inner })
@@ -399,29 +476,69 @@ impl PyObservable {
 
 /// The factors of one coefficient-free term: a [`PauliTerm`] or the
 /// `[(pauli, position), …]` list it stands for.
-fn term_factors(term: &Bound<'_, PyAny>) -> PyResult<Vec<(String, usize)>> {
+///
+/// A list is read factor by factor, in order, and the first bad factor decides
+/// the error: one that is not a `(str, int)` pair is the `TypeError` naming the
+/// forms, and a position that is a count out of range (negative, or larger
+/// than a `usize`) is a `ValueError`, as `Z(-1)` is (contract C-11), naming the
+/// factor and `whose`: the term of an `Observable` or the observable of a
+/// `Readout` the list is, as `("term", 1)` or `("observable", 1)`.
+/// An unknown Pauli or a repeated position is found later, by
+/// [`parse_pauli_string`], once every factor has been read. Any other exception
+/// (one raised inside a custom `__index__`, say) propagates unchanged.
+fn term_factors(term: &Bound<'_, PyAny>, whose: (&str, usize)) -> PyResult<Vec<(String, usize)>> {
     if let Ok(term) = term.cast::<PauliTerm>() {
         return Ok(term.get().factors.clone());
     }
-    term.extract::<Vec<(String, usize)>>().map_err(|_| {
+    let not_a_term = || {
         PyTypeError::new_err(
             "a Pauli term must be a polypus.qml.PauliTerm (e.g. Z(0) @ Z(1)) or a list of \
              (pauli, position) factors (e.g. [(\"z\", 0), (\"z\", 1)])",
         )
-    })
+    };
+    let py = term.py();
+    let items = term
+        .extract::<Vec<Bound<'_, PyAny>>>()
+        .map_err(|_| not_a_term())?;
+    let mut factors = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let (pauli, position) = item
+            .extract::<(String, Bound<'_, PyAny>)>()
+            .map_err(|_| not_a_term())?;
+        match extract_count(&position) {
+            Ok(Ok(position)) => factors.push((pauli, position)),
+            Ok(Err(out_of_range)) => {
+                let (kind, at) = whose;
+                return Err(PyValueError::new_err(format!(
+                    "the position of factor {index} ({pauli:?}) of {kind} {at} is out of \
+                     range: {}",
+                    out_of_range.message()
+                )));
+            }
+            Err(err) if err.is_instance_of::<PyTypeError>(py) => return Err(not_a_term()),
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(factors)
 }
 
-/// One readout observable: an [`Observable`](PyObservable) as it is, or a
-/// coefficient-free term with coefficient `1.0`.
-fn extract_observable(observable: &Bound<'_, PyAny>) -> PyResult<Observable> {
+/// Observable `at` of a readout: an [`Observable`](PyObservable) as it is, or
+/// a coefficient-free term with coefficient `1.0`. A term that is not one of
+/// the three forms is the `TypeError` naming them; any other error of
+/// [`term_factors`] (an out-of-range position's `ValueError`) is its own.
+fn extract_observable(observable: &Bound<'_, PyAny>, at: usize) -> PyResult<Observable> {
     if let Ok(weighted) = observable.cast::<PyObservable>() {
         return Ok(weighted.get().inner.clone());
     }
-    let factors = term_factors(observable).map_err(|_| {
-        PyTypeError::new_err(
-            "each observable must be a polypus.qml.PauliTerm (e.g. Z(0) @ Z(1)), a \
-             polypus.qml.Observable, or a list of (pauli, position) factors",
-        )
+    let factors = term_factors(observable, ("observable", at)).map_err(|err| {
+        if err.is_instance_of::<PyTypeError>(observable.py()) {
+            PyTypeError::new_err(
+                "each observable must be a polypus.qml.PauliTerm (e.g. Z(0) @ Z(1)), a \
+                 polypus.qml.Observable, or a list of (pauli, position) factors",
+            )
+        } else {
+            err
+        }
     })?;
     unit_observable(&factors)
 }
@@ -515,7 +632,8 @@ pub struct Encoder {
 #[pymethods]
 impl Encoder {
     #[new]
-    fn new(num_qubits: usize) -> PyResult<Self> {
+    fn new(num_qubits: CountArg) -> PyResult<Self> {
+        let CountArg(num_qubits) = num_qubits;
         check_num_qubits("Encoder", num_qubits)?;
         Ok(Encoder {
             stack: Layers {
@@ -607,7 +725,8 @@ pub struct Ansatz {
 #[pymethods]
 impl Ansatz {
     #[new]
-    fn new(num_qubits: usize) -> PyResult<Self> {
+    fn new(num_qubits: CountArg) -> PyResult<Self> {
+        let CountArg(num_qubits) = num_qubits;
         check_num_qubits("Ansatz", num_qubits)?;
         Ok(Ansatz {
             stack: Layers {
@@ -832,7 +951,8 @@ impl PyReadout {
         let decision = parse_decision(decision, threshold)?;
         let observables = observables
             .iter()
-            .map(extract_observable)
+            .enumerate()
+            .map(|(at, observable)| extract_observable(observable, at))
             .collect::<PyResult<Vec<_>>>()?;
         let inner = Readout::new(observables, decision).map_err(validation_to_py_err)?;
         Ok(PyReadout { inner })
@@ -1210,7 +1330,7 @@ impl Model {
         seed: Option<u64>,
         id: &str,
         exact: bool,
-        batch_size: Option<usize>,
+        batch_size: Option<BatchSizeArg>,
         initial_point: Option<Vec<f64>>,
         final_shots: Option<Bound<'py, PyAny>>,
         callback: Option<Bound<'py, PyAny>>,
@@ -1257,15 +1377,19 @@ impl Model {
         }
         let problem = QmlProblem::new(compiled, dataset, loss).map_err(validation_to_config_err)?;
         let num_samples = problem.num_circuits();
-        // A batch as large as the training set is the run without minibatches.
+        // A batch as large as the training set is the run without minibatches;
+        // a negative or oversized integer is refused here too, with the same
+        // message (C-11).
         let minibatch = match batch_size {
-            Some(size) if size == 0 || size >= num_samples => {
+            Some(BatchSizeArg::Size(size)) if (1..num_samples).contains(&size) => {
+                Some(MinibatchConfig::new(size, effective_seed))
+            }
+            Some(size) => {
                 return Err(configuration_error(format!(
                     "batch_size must satisfy 1 <= batch_size < {num_samples} (the number of \
                      training samples), got {size}"
                 )));
             }
-            Some(size) => Some(MinibatchConfig::new(size, effective_seed)),
             None => None,
         };
         let exact = exact.then(|| Arc::new(NativeStatevectorBackend::new(effective_seed)));
@@ -3765,6 +3889,8 @@ mod tests {
             };
             assert_eq!(extract("3").unwrap(), 3);
             assert_eq!(extract("2**64 - 1").unwrap(), usize::MAX);
+            assert_eq!(extract(&index_only("3")).unwrap(), 3);
+            let (index_minus_one, index_huge) = (index_only("-1"), index_only("2**70"));
             for (source, message) in [
                 ("-1", "expected a non-negative integer, got -1"),
                 (
@@ -3772,6 +3898,13 @@ mod tests {
                     "expected a non-negative integer, got -1180591620717411303424",
                 ),
                 ("2**64", "got 18446744073709551616"),
+                // An object with only `__index__`, neither comparable nor
+                // printed as its integer: described by the integer it returns.
+                (
+                    index_minus_one.as_str(),
+                    "expected a non-negative integer, got -1",
+                ),
+                (index_huge.as_str(), "got 1180591620717411303424"),
             ] {
                 let err = extract(source).unwrap_err();
                 assert!(err.is_instance_of::<PyValueError>(py), "{source}: {err}");
@@ -3780,10 +3913,141 @@ mod tests {
                     "{source}: {err}"
                 );
             }
-            // Another type keeps its `TypeError`.
-            for source in ["'3'", "3.0", "None"] {
+            // Another type keeps its `TypeError`, and a `bool`, although an
+            // `int` to Python, is one too.
+            for source in ["'3'", "3.0", "None", "True", "False"] {
                 let err = extract(source).unwrap_err();
                 assert!(err.is_instance_of::<PyTypeError>(py), "{source}: {err}");
+            }
+            for (source, shown) in [("True", "True"), ("False", "False")] {
+                let message = extract(source).unwrap_err().value(py).to_string();
+                assert_eq!(
+                    message,
+                    format!("expected an integer, got a bool ({shown})")
+                );
+            }
+        });
+    }
+
+    /// A Python expression for an object whose only integer protocol is
+    /// `__index__`, returning `value`: no `__lt__`, and a `str` that is not
+    /// the integer.
+    fn index_only(value: &str) -> String {
+        format!("type('IndexOnly', (), {{'__index__': lambda self: {value}}})()")
+    }
+
+    #[test]
+    fn a_batch_size_out_of_range_is_kept_for_fit_to_refuse() {
+        Python::initialize();
+        Python::attach(|py| {
+            let extract = |source: &str| {
+                let value = py.eval(&std::ffi::CString::new(source).unwrap(), None, None)?;
+                value.extract::<BatchSizeArg>()
+            };
+            // In range for a `usize`: kept as the size, which `fit` then checks
+            // against the training set.
+            for (source, size) in [("0", 0), ("4", 4), ("2**64 - 1", usize::MAX)] {
+                match extract(source).unwrap() {
+                    BatchSizeArg::Size(got) => assert_eq!(got, size, "{source}"),
+                    BatchSizeArg::OutOfRange(_) => panic!("{source}: out of range"),
+                }
+            }
+            // Outside it: kept, never PyO3's `OverflowError`, and shown as
+            // Python prints it in `fit`'s message.
+            let index_minus_one = index_only("-1");
+            for (source, shown) in [
+                ("-1", "-1"),
+                ("2**64", "18446744073709551616"),
+                (index_minus_one.as_str(), "-1"),
+            ] {
+                let arg = extract(source).unwrap();
+                assert!(
+                    matches!(arg, BatchSizeArg::OutOfRange(_)),
+                    "{source}: in range"
+                );
+                assert_eq!(arg.to_string(), shown);
+            }
+            // Another type keeps its `TypeError`, a `bool` included.
+            for source in ["'2'", "2.0", "True", "False"] {
+                let err = extract(source).err().unwrap();
+                assert!(err.is_instance_of::<PyTypeError>(py), "{source}: {err}");
+            }
+        });
+    }
+
+    #[test]
+    fn a_pauli_position_out_of_range_is_a_value_error_naming_it() {
+        Python::initialize();
+        Python::attach(|py| {
+            let eval = |source: &str| {
+                py.eval(&std::ffi::CString::new(source).unwrap(), None, None)
+                    .unwrap()
+            };
+            let factors = |source: &str| term_factors(&eval(source), ("term", 2));
+            let observable = |source: &str| extract_observable(&eval(source), 3).map(|_| ());
+
+            assert_eq!(
+                factors("[('z', 0), ('x', 2**64 - 1)]").unwrap(),
+                vec![("z".to_string(), 0), ("x".to_string(), usize::MAX)]
+            );
+            let index_minus_one = format!("[('z', {})]", index_only("-1"));
+            for (source, message) in [
+                (
+                    "[('z', -1)]",
+                    "factor 0 (\"z\") of {} is out of range: expected a \
+                     non-negative integer, got -1",
+                ),
+                (
+                    "[('z', 0), ('x', 2**64)]",
+                    "factor 1 (\"x\") of {} is out of range: expected an integer of at \
+                     most 18446744073709551615, got 18446744073709551616",
+                ),
+                // The first bad factor decides: the position before the pair.
+                (
+                    "[('z', -1), ('z',)]",
+                    "factor 0 (\"z\") of {} is out of range: expected a \
+                     non-negative integer, got -1",
+                ),
+                // A Pauli is shown escaped.
+                ("[('\"', -1)]", "factor 0 (\"\\\"\") of {} is out of range"),
+                // An `__index__` object is described by its integer.
+                (
+                    index_minus_one.as_str(),
+                    "factor 0 (\"z\") of {} is out of range: expected a \
+                     non-negative integer, got -1",
+                ),
+            ] {
+                for (err, whose) in [
+                    (factors(source).unwrap_err(), "term 2"),
+                    (observable(source).unwrap_err(), "observable 3"),
+                ] {
+                    let message = format!("the position of {}", message.replace("{}", whose));
+                    assert!(err.is_instance_of::<PyValueError>(py), "{source}: {err}");
+                    assert!(
+                        err.value(py).to_string().contains(&message),
+                        "{source}: {err} (expected {message})"
+                    );
+                }
+            }
+            // Anything else that is not a list of `(str, int)` pairs keeps the
+            // `TypeError` naming the forms, also when it comes first.
+            for source in [
+                "[('z',)]",
+                "[('z', '0')]",
+                "[('z', 0.5)]",
+                "'zz'",
+                "[('z',), ('z', -1)]",
+                "[('z', True)]",
+            ] {
+                let err = factors(source).unwrap_err();
+                assert!(err.is_instance_of::<PyTypeError>(py), "{source}: {err}");
+                assert!(err.value(py).to_string().contains("a Pauli term must be"));
+                let err = observable(source).unwrap_err();
+                assert!(err.is_instance_of::<PyTypeError>(py), "{source}: {err}");
+                assert!(err
+                    .value(py)
+                    .to_string()
+                    .contains("each observable must be"));
             }
         });
     }
