@@ -13,7 +13,8 @@ merged after a release never builds as that release.
 For a release (`--tag vX.Y.Z` and/or `--publish`):
   * the version is `X.Y.Z`, never `-dev`;
   * the tag is `v` + that version;
-  * CHANGELOG.md has a `## [X.Y.Z] - YYYY-MM-DD` section;
+  * CHANGELOG.md has a `## [X.Y.Z] - YYYY-MM-DD` section, and changelog.d/
+    holds no fragment left out of it (merged after `towncrier build`);
   * CITATION.cff has that `version` and `date-released`.
 
     python .github/scripts/release_check.py                        # branch
@@ -41,6 +42,10 @@ TAG = re.compile("v" + RELEASE)
 CHANGELOG_SECTION = re.compile(
     r"^## \[([^\]]+)\](?: - ([0-9]{4}-[0-9]{2}-[0-9]{2}))?[ \t]*$", re.M
 )
+
+
+# Files of changelog.d/ that are not fragments.
+CHANGELOG_SCAFFOLDING = {".gitkeep", "template.md.j2"}
 
 
 def cff_field(text, key):
@@ -110,6 +115,14 @@ def check(root, tag=None, publish=False):
     date = dates.get(version)
     if not date:
         errors.append(f"CHANGELOG.md has no '## [{version}] - YYYY-MM-DD' section")
+    fragments = root / "changelog.d"
+    if fragments.is_dir():
+        for path in sorted(fragments.iterdir()):
+            if path.name not in CHANGELOG_SCAFFOLDING:
+                errors.append(
+                    f"changelog.d/{path.name} is not in CHANGELOG.md: run towncrier "
+                    "build again (docs/RELEASING.md)"
+                )
     cff = (root / "CITATION.cff").read_text(encoding="utf-8")
     cff_version = cff_field(cff, "version")
     if cff_version != version:

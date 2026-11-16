@@ -382,7 +382,9 @@ assembles the files into `CHANGELOG.md` with
   leading `- `. Keep the issue reference in the text, as in `(#504)`, and
   mark breaking changes **BREAKING** at the start.
 - Preview the next release section:
-  `pipx run towncrier==26.9.0 build --draft --version next`.
+  `pipx run --spec towncrier==26.9.0 towncrier build --draft --version next`.
+  A misnamed file fails that command, and the same check in CI. Within a
+  section, entries are ordered by issue number, not by file suffix.
 
 ## Pull requests
 

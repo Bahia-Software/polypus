@@ -53,7 +53,8 @@ tag or a manual run with `target=pypi` unless:
 - the workspace version is `X.Y.Z`, with no `-dev` suffix;
 - a tag is `v` + that version;
 - every internal pin in `[workspace.dependencies]` equals that version;
-- `CHANGELOG.md` has a `## [X.Y.Z] - YYYY-MM-DD` section;
+- `CHANGELOG.md` has a `## [X.Y.Z] - YYYY-MM-DD` section and `changelog.d/`
+  holds no fragment left out of it;
 - `CITATION.cff` has the same `version` and `date-released`;
 - `ci.yml` has a successful push run for the tagged commit.
 
@@ -79,7 +80,7 @@ every pull request: an `X.Y.Z` or `X.Y.Z-dev` version, the pins, and no
       BibTeX entry in `README.md`.
    2. Assemble the changelog fragments into `CHANGELOG.md`:
       ```bash
-      pipx run towncrier==26.9.0 build --version X.Y.Z --date YYYY-MM-DD --yes
+      pipx run --spec towncrier==26.9.0 towncrier build --version X.Y.Z --date YYYY-MM-DD --yes
       ```
       It writes `## [X.Y.Z] - YYYY-MM-DD` under the empty
       `## [Unreleased]` and removes the fragments from `changelog.d/`
