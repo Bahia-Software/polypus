@@ -244,6 +244,11 @@ impl ParameterizedCircuit {
     ///   program declares (the sum of its `creg`s), trailing unmeasured bits
     ///   included: every backend keys the counts at that width, as Aer does
     ///   for the source (contract C-3). See [`clbits_width`](Self::clbits_width).
+    /// - A barrier that lists every qubit in order reads back as the
+    ///   whole-register barrier ([`GateInstruction::Barrier`] with no
+    ///   operands), and a run `measure q[k] -> c[k]` of every qubit in order as
+    ///   one [`GateInstruction::MeasureAll`]: the canonical form the export
+    ///   writes (`barrier q;`, `measure q -> c;`), contract C-2.
     ///
     /// # Errors
     ///
@@ -1077,7 +1082,9 @@ impl ParameterizedCircuit {
     }
 
     /// Bind `params` and serialize to OpenQASM 2.0 in one step.
-    /// Equivalent to `self.assign_parameters(params)?.try_to_qasm2()`.
+    /// Equivalent to `self.assign_parameters(params)?.try_to_qasm2()`, so the
+    /// output is canonical in the same way (see
+    /// [`ConcreteCircuit::try_to_qasm2`]).
     ///
     /// # Errors
     ///
@@ -1411,6 +1418,14 @@ impl ConcreteCircuit {
 
     /// Serialize to OpenQASM 2.0, or report why the circuit cannot be
     /// written in it.
+    ///
+    /// The output is canonical: `to_qasm2(from_qasm2(to_qasm2(c)))` is
+    /// `to_qasm2(c)` byte for byte (contract C-2). A barrier that lists every
+    /// qubit in order is written as `barrier q;`, and a run
+    /// `measure q[k] -> c[k]` of every qubit in order as `measure q -> c;`
+    /// (bit by bit when the classical register is wider than the qubits);
+    /// [`ParameterizedCircuit::from_qasm2`] reads them back as the
+    /// whole-register barrier and [`GateInstruction::MeasureAll`].
     ///
     /// # Errors
     ///
