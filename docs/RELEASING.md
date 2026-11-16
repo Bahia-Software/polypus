@@ -77,11 +77,16 @@ every pull request: an `X.Y.Z` or `X.Y.Z-dev` version, the pins, and no
       The second line refreshes the lockfiles of the backend templates, which
       depend on the workspace crates by path. Also set the `version` of the
       BibTeX entry in `README.md`.
-   2. In `CHANGELOG.md`, rename `## [Unreleased]` to
-      `## [X.Y.Z] - YYYY-MM-DD`, add an empty `## [Unreleased]` above it, and
-      update the comparison links at the end. A release with **BREAKING**
-      entries opens with a short *Upgrading from X.(Y-1)* subsection, grouped
-      by audience, that points to those entries.
+   2. Assemble the changelog fragments into `CHANGELOG.md`:
+      ```bash
+      pipx run towncrier==26.9.0 build --version X.Y.Z --date YYYY-MM-DD --yes
+      ```
+      It writes `## [X.Y.Z] - YYYY-MM-DD` under the empty
+      `## [Unreleased]` and removes the fragments from `changelog.d/`
+      (`git rm`). Then update the comparison links at the end. A release with
+      **BREAKING** entries opens with a short *Upgrading from X.(Y-1)*
+      subsection, written by hand, grouped by audience, that points to those
+      entries.
    3. In `CITATION.cff`, set `version:` to `X.Y.Z` and `date-released:` to the
       CHANGELOG date. `.zenodo.json` carries no version. Validate:
       ```bash

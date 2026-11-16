@@ -365,6 +365,25 @@ We use [Conventional Commits](https://www.conventionalcommits.org):
 The type+scope prefix feeds the changelog; the subject line explains the
 *intent*, not the action ("Update" tells a reviewer nothing).
 
+## Changelog entries
+
+A user-visible change adds one file to [`changelog.d/`](../changelog.d)
+instead of editing [`CHANGELOG.md`](../CHANGELOG.md); the release pull request
+assembles the files into `CHANGELOG.md` with
+[towncrier](https://towncrier.readthedocs.io/). Pull requests that all edited
+`CHANGELOG.md` used to conflict with each other on the same lines.
+
+- Name: `<issue>.<type>.md` (`504.added.md`), or `+<short-slug>.<type>.md`
+  when there is no issue. A second entry of the same issue and type is
+  `504.added.1.md`.
+- Type: `added`, `changed`, `deprecated`, `removed`, `fixed` or
+  `documentation`, the `### ` subsection the entry goes under.
+- Content: one entry, as it should read in the changelog, without the
+  leading `- `. Keep the issue reference in the text, as in `(#504)`, and
+  mark breaking changes **BREAKING** at the start.
+- Preview the next release section:
+  `pipx run towncrier==26.9.0 build --draft --version next`.
+
 ## Pull requests
 
 All changes land through a PR against `main` — the branch is protected: at
@@ -449,7 +468,7 @@ version is `0.x`), with `cargo set-version --workspace` and the backend
 templates' lockfiles refreshed as in [`docs/RELEASING.md`](RELEASING.md#release-steps);
 the `semver` CI job (cargo-semver-checks against the last published version)
 fails otherwise.
-Mark the change **BREAKING** in `CHANGELOG.md`. The release checklist lives
+Mark the change **BREAKING** in its changelog fragment. The release checklist lives
 in [`docs/RELEASING.md`](RELEASING.md).
 
 ## AI-assisted development
