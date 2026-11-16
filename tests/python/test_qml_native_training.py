@@ -89,6 +89,17 @@ class TestFit:
         assert r1.fitness_history == r2.fitness_history
 
 
+class _Index:
+    """An integer only through ``__index__``: no ``__lt__``, and its ``str`` is
+    not the integer."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __index__(self):
+        return self.value
+
+
 class TestFitRejections:
     """Everything here is rejected before a backend exists."""
 
@@ -160,6 +171,63 @@ class TestFitRejections:
     def test_batch_size_must_be_smaller_than_the_dataset(self, size):
         with pytest.raises(ValueError, match="batch_size"):
             _fit(batch_size=size)
+
+    @pytest.mark.parametrize(
+        ("size", "shown"),
+        [
+            pytest.param(-1, -1, id="negative"),
+            pytest.param(2**70, 2**70, id="beyond-usize"),
+            pytest.param(_Index(-1), -1, id="index-object"),
+            pytest.param(0, 0, id="0"),
+            pytest.param(6, 6, id="6"),
+            pytest.param(7, 7, id="7"),
+        ],
+    )
+    def test_an_out_of_range_batch_size_is_one_configuration_error(
+        self, seam_calls, size, shown
+    ):
+        # A negative or oversized integer is refused like 0 or a size as large
+        # as the dataset: the same `ConfigurationError` and message, never
+        # PyO3's `OverflowError`, before any backend exists (C-11). An
+        # `__index__` object is shown as its integer. The model is left as it
+        # was.
+        import polypus
+
+        model = make_model()
+        # `Model` has no `num_layers` getter; its `repr` carries the count.
+        before = (
+            repr(model),
+            model.num_params,
+            model.num_qubits,
+            model.num_observables,
+        )
+        with pytest.raises(polypus.ConfigurationError) as raised:
+            _fit(model, batch_size=size, **_CUNQA)
+        assert type(raised.value) is polypus.ConfigurationError
+        assert str(raised.value) == (
+            "batch_size must satisfy 1 <= batch_size < 6 (the number of training "
+            f"samples), got {shown}"
+        )
+        assert seam_calls == []
+        after = (repr(model), model.num_params, model.num_qubits, model.num_observables)
+        assert after == before
+
+    @pytest.mark.parametrize(
+        ("size", "match"),
+        [
+            pytest.param("2", None, id="str"),
+            pytest.param(2.0, None, id="float"),
+        ],
+    )
+    def test_a_batch_size_of_another_type_is_a_type_error(
+        self, seam_calls, size, match
+    ):
+        import polypus
+
+        with pytest.raises(TypeError, match=match) as raised:
+            _fit(batch_size=size, **_CUNQA)
+        assert not isinstance(raised.value, polypus.ConfigurationError)
+        assert seam_calls == []
 
     def test_the_default_backend_is_the_native_simulator(self):
         # The native simulator is noiseless, so a noise model without a backend

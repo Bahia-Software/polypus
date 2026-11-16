@@ -218,6 +218,17 @@ Entries were curated from the Conventional Commits history. Releases before
   after such a parameter count, and a saved file edited to one, fail the same
   way. In `polypus-qml`, `QuantumModel::compile` returns the new
   `ValidationError::TooManyParams` instead of panicking (#505).
+- The rest of the native QML API's integer arguments followed: a negative or
+  oversized `num_qubits` of `polypus.qml.Encoder`/`Ansatz`, or position of
+  `Z`/`X`/`Y`, raised `OverflowError`, and the same position in a
+  `[(pauli, position), …]` list (a `Readout` observable or an `Observable`
+  term) a `TypeError` that did not name it; all are now a `ValueError`, the
+  list form naming the term or observable and the factor. `Model.fit` with a
+  negative or oversized `batch_size` raised `OverflowError`; it is now the
+  `polypus.ConfigurationError` that `0` already raised, before any backend
+  exists. An object with `__index__` (a NumPy integer) is read as the integer
+  it returns, which an out-of-range message shows. Another type is still a
+  `TypeError` (#571).
 
 ### Documentation
 - The documentation site (MkDocs Material) is published at the Pages root,

@@ -2558,11 +2558,17 @@ that does not depend on the data is checked where it is written, as a plain
 - `Model` checks that the `Encoder` and the `Ansatz` have the same width, that
   some layer loads the data, that the layers reserve trainable parameters, and
   that the readout's positions exist among the qubits still active at the end;
-- a count argument (`reps`) that is negative or larger than a `usize` holds is
-  refused at the call, before the layer is checked, and a parameter count that
-  does not fit in a `usize` (a huge `reps`, or any layer after one) is
-  `ValidationError::TooManyParams`; both are a `ValueError` that leaves the
-  object as it was, never PyO3's `OverflowError` or a panic.
+- a count argument that is negative or larger than a `usize` holds is
+  refused at the call, before the layer is checked: `reps`, the
+  `num_qubits` of `Encoder`/`Ansatz` (where `0` is refused too, with its own
+  message), and a Pauli position, in `Z`/`X`/`Y` and in the
+  `[(pauli, position), …]` list (below). A parameter count that does not fit
+  in a `usize` (a huge `reps`, or any layer after one) is
+  `ValidationError::TooManyParams`. Both are a `ValueError` that leaves the
+  object as it was, never PyO3's `OverflowError` or a panic. A count of
+  another type (a `str`, a `float`) is a `TypeError`; an object
+  with `__index__` (a NumPy integer) is the integer it returns, which an
+  out-of-range message shows.
 
 What depends on the data — how many features the encoders can carry — is
 checked when the model meets a dataset. `num_params` and `num_observables` (the
@@ -2580,9 +2586,14 @@ or several terms) or a `[(pauli, position), …]` list, the literal spelling of 
 `PauliTerm`. They are told apart by type, never by the shape of the tuples, and
 may be mixed. Positions are logical: they index the qubits still active after
 any pooling. A non-finite coefficient, an unknown Pauli or a position repeated
-in one product is a `ValueError` (`Z(0) @ Z(0)` raises at the `@`); anything
-else is a `TypeError` naming the three forms. `"argmax"` reads one observable
-per class (at least two); the other decisions predict from the first.
+in one product is a `ValueError` (`Z(0) @ Z(0)` raises at the `@`), and so is
+a negative or oversized position, `Z(-1)` or `[("z", -1)]` (in the list form
+the message names the term or observable and the factor); anything else is a
+`TypeError` naming the three forms. A list is read factor by factor, and the
+first malformed factor or out-of-range position decides which of the two it
+is; an unknown Pauli or a repeated position is checked once every factor has
+been read. `"argmax"` reads one observable per class (at least two); the
+other decisions predict from the first.
 `threshold` is required by `"threshold"` and rejected by every other decision.
 
 **Measurement basis (single group).** A readout may measure `X`/`Y`: the model
@@ -2642,7 +2653,9 @@ is also a `ValueError` (#418), as `train`'s do:
 - **`exact=True`** replaces sampling with exact probabilities (so `shots` does
   not matter) and needs `infrastructure="local"` with `backend="polypus"`.
 - **`batch_size`** must satisfy `1 <= batch_size < number of samples`; the
-  reported `best_fitness` is on every sample (C-5).
+  reported `best_fitness` is on every sample (C-5). A negative integer, or one
+  larger than a `usize` holds, is refused with the same message, never PyO3's
+  `OverflowError`; a `batch_size` that is not an integer is a `TypeError`.
 - **`initial_point`** (keyword-only, default `None`) is C-5's starting point,
   with `num_params` as `dimensions`: its checks, after the optimizer's
   configuration (checked with or without a point), are `train`'s, with its
