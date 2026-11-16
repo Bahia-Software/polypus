@@ -1,19 +1,21 @@
 """The exact gradients of native QML by adjoint differentiation (#503).
 
-With ``exact=True`` on the native backend, ``qml.jacobian``, the backward pass
-of ``polypus.torch.QuantumLayer`` and Adam's gradient in ``Model.fit`` come from
-the adjoint: one differentiation per row (and observable), two statevectors
-each, instead of two shifted circuits per trainable gate. When the memory
-budget holds one statevector of the model's width but not two, they fall back to
-the parameter shift, logged at ``info`` (contract C-11 (e)/(f); M2 of the
-issue). There is no switch between the two: ``POLYPUS_MEM_BUDGET`` decides, so
-each case runs in a child process twice — with a budget that holds two
-statevectors, and with one that holds one — and the two exact results must
-agree to rounding. That the second really took the shift rule is read off its
-``info`` record. The ``QuantumLayer`` case needs PyTorch, so it lives in
+With ``exact=True`` on the native backend, ``qml.jacobian``, ``qml.vjp`` (#559)
+and through it the backward pass of ``polypus.torch.QuantumLayer``, and Adam's
+gradient in ``Model.fit`` come from the adjoint: one differentiation per row
+(and observable, for ``qml.jacobian``), two statevectors each, instead of two
+shifted circuits per trainable gate. When the memory budget holds one
+statevector of the model's width but not two, they fall back to the parameter
+shift, logged at ``info`` (contract C-11 (e)/(f); M2 of the issue). There is no
+switch between the two: ``POLYPUS_MEM_BUDGET`` decides, so each case runs in a
+child process twice — with a budget that holds two statevectors, and with one
+that holds one — and the two exact results must agree to rounding. That the
+second really took the shift rule is read off its ``info`` record. The
+``QuantumLayer`` case needs PyTorch, so it lives in
 ``test_torch_quantum_layer.py``.
 """
 
+import pytest
 from qml_adjoint_helpers import (
     NOT_EVEN_ONE,
     adjoint_and_shift,
@@ -33,11 +35,30 @@ def test_qml_jacobian_is_the_same_by_the_adjoint_and_by_the_shift():
     assert_close(adjoint, shift)
 
 
-def test_without_memory_for_one_statevector_the_error_is_the_exact_paths():
+VJP = """
+cotangent = [[1.0, -0.5], [0.25, 2.0], [-1.0, 0.75]]
+by_params, by_inputs = qml.vjp(model, rows, params, cotangent, wrt="both", exact=True)
+print("RESULT", json.dumps([by_params.tolist(), by_inputs.tolist()]))
+"""
+
+
+def test_qml_vjp_is_the_same_by_the_adjoint_and_by_the_shift():
+    adjoint, shift = adjoint_and_shift(VJP)
+    assert_close(adjoint, shift)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        "qml.jacobian(model, rows, params, exact=True)",
+        "qml.vjp(model, rows, params, [[1.0, 1.0]] * 3, exact=True)",
+    ],
+)
+def test_without_memory_for_one_statevector_the_error_is_the_exact_paths(call):
     process = run_child(
-        """
+        f"""
         try:
-            qml.jacobian(model, rows, params, exact=True)
+            {call}
         except polypus.InsufficientMemoryError as e:
             print("RESULT", json.dumps(str(e)))
         """,

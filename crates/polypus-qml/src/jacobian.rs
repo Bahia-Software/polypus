@@ -25,12 +25,20 @@
 //! (with [`Both`](JacobianWrt::Both)). No unshifted circuit is needed: the
 //! expectations themselves are the business of
 //! [`CompiledModel::expectations_from_counts`].
+//!
+//! **Vector-Jacobian product.** A caller that only needs the Jacobian
+//! contracted with a cotangent `v` (one weight per sample and observable, as a
+//! reverse-mode autodiff backward pass hands it) gets a [`Vjp`]: by
+//! [`Jacobian::vjp`] from any Jacobian, or, by adjoint differentiation, from
+//! **one** run per sample whatever the number of observables
+//! ([`JacobianBlock::vjp_runs`]): `Σ_o v_o ∂⟨O_o⟩/∂θ = ∂⟨Σ_o v_o O_o⟩/∂θ`, the
+//! derivative of one diagonal observable.
 
 use std::collections::HashMap;
 
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 
-use crate::adjoint::{check_rows, AdjointRun};
+use crate::adjoint::{check_rows, AdjointRun, DiagonalObservable};
 use crate::error::QmlError;
 use crate::model::{CompiledModel, InputTrace};
 use crate::observables::BitstringWeight;
@@ -283,6 +291,21 @@ impl ExpectationJacobian {
     pub fn jacobian_from_adjoint(&self, derivatives: &[Vec<f64>]) -> Result<Jacobian, QmlError> {
         self.all().jacobian_from_adjoint(derivatives)
     }
+
+    /// [`all`](Self::all)`().vjp_runs(theta, cotangent)`.
+    pub fn vjp_runs(&self, theta: &[f64], cotangent: &[f64]) -> Result<Vec<AdjointRun>, QmlError> {
+        self.all().vjp_runs(theta, cotangent)
+    }
+
+    /// [`all`](Self::all)`().vjp_weight_bounds(cotangent)`.
+    pub fn vjp_weight_bounds(&self, cotangent: &[f64]) -> Result<Vec<f64>, QmlError> {
+        self.all().vjp_weight_bounds(cotangent)
+    }
+
+    /// [`all`](Self::all)`().vjp_from_adjoint(derivatives)`.
+    pub fn vjp_from_adjoint(&self, derivatives: &[Vec<f64>]) -> Result<Vjp, QmlError> {
+        self.all().vjp_from_adjoint(derivatives)
+    }
 }
 
 /// Consecutive samples of an [`ExpectationJacobian`], from
@@ -311,26 +334,11 @@ impl JacobianBlock<'_> {
     /// of the wrong length is
     /// [`QmlError::Circuit`]`(`[`CircuitError::WrongNumberOfParams`]`)`.
     pub fn circuits(&self, theta: &[f64]) -> Result<Vec<ConcreteCircuit>, QmlError> {
-        let num_params = self.jacobian.num_params();
-        if theta.len() != num_params {
-            return Err(QmlError::Circuit(CircuitError::WrongNumberOfParams {
-                expected: num_params,
-                got: theta.len(),
-            }));
-        }
+        self.check_theta(theta)?;
         let shift = std::f64::consts::FRAC_PI_2;
         let mut circuits = Vec::with_capacity(self.num_circuits());
         for sample in self.samples {
-            // Each slot at its unshifted value: the parameter it reads, or the
-            // angle the encoder computed from the sample.
-            let mut values: Vec<f64> = sample
-                .slots
-                .iter()
-                .map(|slot| match slot {
-                    Slot::Param(k) => theta[*k],
-                    Slot::Input { angle, .. } => *angle,
-                })
-                .collect();
+            let mut values = unshifted_values(sample, theta);
             for &slot in &self.jacobian.shifted {
                 let base = values[slot];
                 for delta in [shift, -shift] {
@@ -399,17 +407,15 @@ impl JacobianBlock<'_> {
     fn zero_jacobian(&self) -> Jacobian {
         let jacobian = self.jacobian;
         let (n, k) = (self.samples.len(), jacobian.num_observables());
-        let (num_params, num_features) = (jacobian.num_params(), jacobian.num_features());
         Jacobian {
             num_samples: n,
             num_observables: k,
-            num_params,
-            num_features,
-            params: jacobian.wrt.params().then(|| vec![0.0; n * k * num_params]),
-            inputs: jacobian
-                .wrt
-                .inputs()
-                .then(|| vec![0.0; n * k * num_features]),
+            parts: Parts::zeros(
+                jacobian.wrt,
+                n * k,
+                jacobian.num_params(),
+                jacobian.num_features(),
+            ),
         }
     }
 
@@ -428,38 +434,11 @@ impl JacobianBlock<'_> {
     /// wrong length is
     /// [`QmlError::Circuit`]`(`[`CircuitError::WrongNumberOfParams`]`)`.
     pub fn adjoint_runs(&self, theta: &[f64]) -> Result<Vec<AdjointRun>, QmlError> {
-        let num_params = self.jacobian.num_params();
-        if theta.len() != num_params {
-            return Err(QmlError::Circuit(CircuitError::WrongNumberOfParams {
-                expected: num_params,
-                got: theta.len(),
-            }));
-        }
-        let observables = self
-            .jacobian
-            .model
-            .resolved_readout()
-            .observables()
-            .iter()
-            .map(|observable| observable.diagonal())
-            .collect::<Result<Vec<_>, QmlError>>()?;
+        self.check_theta(theta)?;
+        let observables = self.diagonal_observables()?;
         let mut runs = Vec::with_capacity(self.num_adjoint_runs());
         for sample in self.samples {
-            let values: Vec<f64> = sample
-                .slots
-                .iter()
-                .map(|slot| match slot {
-                    Slot::Param(k) => theta[*k],
-                    Slot::Input { angle, .. } => *angle,
-                })
-                .collect();
-            let circuit = sample.template.assign_parameters(&values)?;
-            let wrt: Vec<usize> = self
-                .jacobian
-                .shifted
-                .iter()
-                .map(|&slot| sample.positions[slot])
-                .collect();
+            let (circuit, wrt) = self.unshifted_run(sample, theta)?;
             for observable in &observables {
                 runs.push(AdjointRun {
                     circuit: circuit.clone(),
@@ -493,6 +472,220 @@ impl JacobianBlock<'_> {
         }
         Ok(out)
     }
+
+    /// The number of adjoint runs of the block's vector-Jacobian product:
+    /// `num_samples()`, one per sample whatever the number of observables.
+    pub fn num_vjp_runs(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// The block's [adjoint runs](crate::AdjointRun) for the vector-Jacobian
+    /// product with `cotangent` at `theta`: **one per sample**, in order, each
+    /// the circuit and gates of [`adjoint_runs`](Self::adjoint_runs) with the
+    /// observable `Σ_o v[s][o] · O_o`, so its derivatives are
+    /// `Σ_o v[s][o] · ∂⟨O_o⟩/∂(gate)` — what contracting the Jacobian with `v`
+    /// gives, from one run instead of `num_observables` of them. Read the
+    /// results with [`vjp_from_adjoint`](Self::vjp_from_adjoint).
+    ///
+    /// `cotangent` is `v` over the block's samples, flat and row-major,
+    /// `(num_samples, num_observables)`; its values are taken as they are,
+    /// non-finite ones included. A non-finite value, or values large enough
+    /// to overflow the combined weight, leave a run's observable with a
+    /// non-finite [`weight_bound`](crate::DiagonalObservable::weight_bound),
+    /// and some basis states weighed as non-finite, which a simulator may
+    /// refuse (the native one does). A caller that wants the cotangent to
+    /// reach the product as the contraction does differentiates those samples
+    /// by [`adjoint_runs`](Self::adjoint_runs) and contracts with
+    /// [`Jacobian::vjp`] instead, sample by sample (one-sample
+    /// [blocks](ExpectationJacobian::block)), so that a sample's product does
+    /// not depend on the others': [`vjp_weight_bounds`](Self::vjp_weight_bounds)
+    /// gives each sample's bound before any run is built. A `theta` of the
+    /// wrong length is
+    /// [`QmlError::Circuit`]`(`[`CircuitError::WrongNumberOfParams`]`)`; a
+    /// `cotangent` of the wrong length, [`QmlError::CountsLengthMismatch`].
+    pub fn vjp_runs(&self, theta: &[f64], cotangent: &[f64]) -> Result<Vec<AdjointRun>, QmlError> {
+        self.check_theta(theta)?;
+        let k = self.jacobian.num_observables();
+        check_cotangent(cotangent, self.samples.len(), k)?;
+        let observables = self.diagonal_observables()?;
+        let mut runs = Vec::with_capacity(self.num_vjp_runs());
+        for (sample, weights) in self.samples.iter().zip(cotangent.chunks_exact(k.max(1))) {
+            let (circuit, wrt) = self.unshifted_run(sample, theta)?;
+            runs.push(AdjointRun {
+                circuit,
+                wrt,
+                observable: DiagonalObservable::combine(weights, &observables),
+            });
+        }
+        Ok(runs)
+    }
+
+    /// For each sample of the block, in order, the
+    /// [`weight_bound`](crate::DiagonalObservable::weight_bound) of the
+    /// observable `Σ_o v[s][o] · O_o` that [`vjp_runs`](Self::vjp_runs) gives
+    /// its run with `cotangent` — the same value, from the cotangent and the
+    /// readout alone, without binding a circuit. A caller that refuses some
+    /// observables (a non-finite bound, or one past a limit of its own) decides
+    /// with it, sample by sample, which runs to build — `vjp_runs` or
+    /// [`adjoint_runs`](Self::adjoint_runs) of a one-sample
+    /// [block](ExpectationJacobian::block) — before building any. A
+    /// `cotangent` of the wrong length is [`QmlError::CountsLengthMismatch`].
+    pub fn vjp_weight_bounds(&self, cotangent: &[f64]) -> Result<Vec<f64>, QmlError> {
+        let k = self.jacobian.num_observables();
+        check_cotangent(cotangent, self.samples.len(), k)?;
+        let observables = self.diagonal_observables()?;
+        Ok((0..self.samples.len())
+            .map(|s| {
+                DiagonalObservable::combine(&cotangent[s * k..(s + 1) * k], &observables)
+                    .weight_bound()
+            })
+            .collect())
+    }
+
+    /// The block's [`Vjp`] from the derivatives of the runs of
+    /// [`vjp_runs`](Self::vjp_runs): one row per sample, in order, one
+    /// derivative per shifted gate, each going where
+    /// [`jacobian_from_adjoint`](Self::jacobian_from_adjoint) sends it (to the
+    /// parameter its gate reads, or to each feature it reads times that
+    /// feature's chain-rule factor). The wrong number of rows, or a row of the
+    /// wrong length, is [`QmlError::CountsLengthMismatch`].
+    pub fn vjp_from_adjoint(&self, derivatives: &[Vec<f64>]) -> Result<Vjp, QmlError> {
+        let jacobian = self.jacobian;
+        check_rows(derivatives, self.num_vjp_runs(), jacobian.shifted.len())?;
+        let mut out = Vjp::zeros(
+            jacobian.wrt,
+            self.samples.len(),
+            jacobian.num_params(),
+            jacobian.num_features(),
+        );
+        for ((s, sample), row) in self.samples.iter().enumerate().zip(derivatives) {
+            for (&derivative, &slot) in row.iter().zip(&jacobian.shifted) {
+                out.add(s, &sample.slots[slot], derivative);
+            }
+        }
+        Ok(out)
+    }
+
+    /// `theta`'s length against the model's.
+    fn check_theta(&self, theta: &[f64]) -> Result<(), QmlError> {
+        let num_params = self.jacobian.num_params();
+        if theta.len() != num_params {
+            return Err(QmlError::Circuit(CircuitError::WrongNumberOfParams {
+                expected: num_params,
+                got: theta.len(),
+            }));
+        }
+        Ok(())
+    }
+
+    /// Every readout observable as the diagonal operator it is on the
+    /// measured state, in order.
+    fn diagonal_observables(&self) -> Result<Vec<DiagonalObservable>, QmlError> {
+        self.jacobian
+            .model
+            .resolved_readout()
+            .observables()
+            .iter()
+            .map(|observable| observable.diagonal())
+            .collect()
+    }
+
+    /// `sample`'s untied template bound at the unshifted values, and the
+    /// positions in it of the gates the shift rule would move, in gate order.
+    fn unshifted_run(
+        &self,
+        sample: &UntiedSample,
+        theta: &[f64],
+    ) -> Result<(ConcreteCircuit, Vec<usize>), QmlError> {
+        let circuit = sample
+            .template
+            .assign_parameters(&unshifted_values(sample, theta))?;
+        let wrt = self
+            .jacobian
+            .shifted
+            .iter()
+            .map(|&slot| sample.positions[slot])
+            .collect();
+        Ok((circuit, wrt))
+    }
+}
+
+/// Each of `sample`'s slots at its unshifted value: the parameter it reads, or
+/// the angle the encoder computed from the sample.
+fn unshifted_values(sample: &UntiedSample, theta: &[f64]) -> Vec<f64> {
+    sample
+        .slots
+        .iter()
+        .map(|slot| match slot {
+            Slot::Param(k) => theta[*k],
+            Slot::Input { angle, .. } => *angle,
+        })
+        .collect()
+}
+
+/// A cotangent of `samples · observables` values, or
+/// [`QmlError::CountsLengthMismatch`] with that expected length.
+fn check_cotangent(cotangent: &[f64], samples: usize, observables: usize) -> Result<(), QmlError> {
+    let expected = samples * observables;
+    if cotangent.len() != expected {
+        return Err(QmlError::CountsLengthMismatch {
+            expected,
+            got: cotangent.len(),
+        });
+    }
+    Ok(())
+}
+
+/// What [`Jacobian`] and [`Vjp`] hold alike: the parts `wrt` asked for, flat
+/// and row-major, `num_params` and `num_features` wide, and where a gate's
+/// derivative goes in a row. One body for both, so the two bookkeepings cannot
+/// drift apart: a [`Jacobian`] row is a `(sample, observable)` pair, a [`Vjp`]
+/// row a sample.
+#[derive(Debug, Clone, PartialEq)]
+struct Parts {
+    num_params: usize,
+    num_features: usize,
+    params: Option<Vec<f64>>,
+    inputs: Option<Vec<f64>>,
+}
+
+impl Parts {
+    /// `rows` rows of zeros in each part `wrt` asks for, `None` for the other.
+    fn zeros(wrt: JacobianWrt, rows: usize, num_params: usize, num_features: usize) -> Self {
+        Parts {
+            num_params,
+            num_features,
+            params: wrt.params().then(|| vec![0.0; rows * num_params]),
+            inputs: wrt.inputs().then(|| vec![0.0; rows * num_features]),
+        }
+    }
+
+    /// Add the derivative with respect to one gate's angle to row `row` where
+    /// it belongs: to the parameter the gate reads, or to each feature it
+    /// reads times that feature's chain-rule factor. A slot of a part not held
+    /// is skipped (only the slots `wrt` asks for are differentiated).
+    fn add(&mut self, row: usize, slot: &Slot, derivative: f64) {
+        match (slot, &mut self.params, &mut self.inputs) {
+            (Slot::Param(p), Some(params), _) => {
+                params[row * self.num_params + p] += derivative;
+            }
+            (Slot::Input { features, .. }, _, Some(inputs)) => {
+                for &(f, factor) in features {
+                    inputs[row * self.num_features + f] += factor * derivative;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The entry at `column` of row `row` of a part, or `None` when the part
+    /// is not held or the column is out of range (the caller checks the row).
+    fn entry(part: Option<&[f64]>, width: usize, row: usize, column: usize) -> Option<f64> {
+        if column >= width {
+            return None;
+        }
+        part?.get(row * width + column).copied()
+    }
 }
 
 /// The Jacobian of every readout observable's expectation over some samples:
@@ -509,31 +702,16 @@ impl JacobianBlock<'_> {
 pub struct Jacobian {
     num_samples: usize,
     num_observables: usize,
-    num_params: usize,
-    num_features: usize,
-    params: Option<Vec<f64>>,
-    inputs: Option<Vec<f64>>,
+    /// One row per `(sample, observable)`, sample-major.
+    parts: Parts,
 }
 
 impl Jacobian {
     /// Add the derivative of `⟨O_o⟩(x_s)` with respect to one gate's angle
-    /// where it belongs: to the parameter the gate reads, or to each feature
-    /// it reads times that feature's chain-rule factor. A slot of a part this
-    /// Jacobian does not hold is skipped (only the slots `wrt` asks for are
-    /// differentiated).
+    /// where it belongs ([`Parts::add`]).
     fn add(&mut self, s: usize, o: usize, slot: &Slot, derivative: f64) {
-        let k = self.num_observables;
-        match (slot, &mut self.params, &mut self.inputs) {
-            (Slot::Param(p), Some(params), _) => {
-                params[(s * k + o) * self.num_params + p] += derivative;
-            }
-            (Slot::Input { features, .. }, _, Some(inputs)) => {
-                for &(f, factor) in features {
-                    inputs[(s * k + o) * self.num_features + f] += factor * derivative;
-                }
-            }
-            _ => {}
-        }
+        self.parts
+            .add(s * self.num_observables + o, slot, derivative);
     }
 
     /// The number of samples: both parts' first axis.
@@ -548,55 +726,154 @@ impl Jacobian {
 
     /// The number of trainable parameters: the parameter part's last axis.
     pub fn num_params(&self) -> usize {
-        self.num_params
+        self.parts.num_params
     }
 
     /// The number of features: the input part's last axis.
     pub fn num_features(&self) -> usize {
-        self.num_features
+        self.parts.num_features
     }
 
     /// The Jacobian with respect to the parameters, flat and row-major, if
     /// asked for.
     pub fn params(&self) -> Option<&[f64]> {
-        self.params.as_deref()
+        self.parts.params.as_deref()
     }
 
     /// The Jacobian with respect to the inputs, flat and row-major, if asked
     /// for.
     pub fn inputs(&self) -> Option<&[f64]> {
-        self.inputs.as_deref()
+        self.parts.inputs.as_deref()
     }
 
     /// `∂⟨O_observable⟩(x_sample, θ)/∂θ_param`, or `None` when out of range or
     /// not asked for.
     pub fn param(&self, sample: usize, observable: usize, param: usize) -> Option<f64> {
-        if sample >= self.num_samples
-            || observable >= self.num_observables
-            || param >= self.num_params
-        {
-            return None;
-        }
-        let index = (sample * self.num_observables + observable) * self.num_params + param;
-        self.params.as_ref()?.get(index).copied()
+        let row = self.row(sample, observable)?;
+        Parts::entry(self.params(), self.num_params(), row, param)
     }
 
     /// `∂⟨O_observable⟩(x_sample, θ)/∂x_{sample,feature}`, or `None` when out of
     /// range or not asked for.
     pub fn input(&self, sample: usize, observable: usize, feature: usize) -> Option<f64> {
-        if sample >= self.num_samples
-            || observable >= self.num_observables
-            || feature >= self.num_features
-        {
-            return None;
-        }
-        let index = (sample * self.num_observables + observable) * self.num_features + feature;
-        self.inputs.as_ref()?.get(index).copied()
+        let row = self.row(sample, observable)?;
+        Parts::entry(self.inputs(), self.num_features(), row, feature)
+    }
+
+    /// The row of `(sample, observable)`, or `None` when either is out of range.
+    fn row(&self, sample: usize, observable: usize) -> Option<usize> {
+        (sample < self.num_samples && observable < self.num_observables)
+            .then(|| sample * self.num_observables + observable)
     }
 
     /// The two parts, `(params, inputs)`, each `None` if not asked for.
     pub fn into_parts(self) -> (Option<Vec<f64>>, Option<Vec<f64>>) {
-        (self.params, self.inputs)
+        (self.parts.params, self.parts.inputs)
+    }
+
+    /// The vector-Jacobian product with `cotangent`, `v`, flat and row-major
+    /// `(num_samples, num_observables)`: per sample `s`,
+    /// `Σ_o v[s][o] · J[s][o][·]`, summed over the observables in order, for
+    /// each part this Jacobian holds. Values are taken as they are: a
+    /// non-finite one propagates as the products and sums give it (`NaN · 0`
+    /// is `NaN`). The [`Vjp`] that [`JacobianBlock::vjp_runs`] gives by
+    /// adjoint differentiation, from this Jacobian (one read from shifted
+    /// circuits, say). A `cotangent` of the wrong length is
+    /// [`QmlError::CountsLengthMismatch`].
+    pub fn vjp(&self, cotangent: &[f64]) -> Result<Vjp, QmlError> {
+        let (n, k) = (self.num_samples, self.num_observables);
+        check_cotangent(cotangent, n, k)?;
+        let contract = |part: &[f64], columns: usize| {
+            let mut out = vec![0.0; n * columns];
+            for s in 0..n {
+                let row = &mut out[s * columns..(s + 1) * columns];
+                for o in 0..k {
+                    let weight = cotangent[s * k + o];
+                    let derivatives = &part[(s * k + o) * columns..(s * k + o + 1) * columns];
+                    for (sum, &derivative) in row.iter_mut().zip(derivatives) {
+                        *sum += weight * derivative;
+                    }
+                }
+            }
+            out
+        };
+        let (num_params, num_features) = (self.num_params(), self.num_features());
+        Ok(Vjp {
+            num_samples: n,
+            parts: Parts {
+                num_params,
+                num_features,
+                params: self.params().map(|part| contract(part, num_params)),
+                inputs: self.inputs().map(|part| contract(part, num_features)),
+            },
+        })
+    }
+}
+
+/// A vector-Jacobian product over some samples: for each sample `x_s`, the
+/// derivative of `Σ_o v[s][o] · ⟨O_o⟩(x_s, θ)` for a cotangent `v`, with
+/// respect to the parameters, the inputs or both, as the [`JacobianWrt`] of
+/// the [`ExpectationJacobian`] it comes from says. From
+/// [`Jacobian::vjp`] or, by adjoint differentiation,
+/// [`JacobianBlock::vjp_from_adjoint`].
+///
+/// Each part is flat and row-major, **one row per sample**: `params` has shape
+/// `(num_samples, num_params)` and `inputs` `(num_samples, num_features)`, a
+/// part not asked for `None`. The gradient of `Σ_s Σ_o v[s][o] · ⟨O_o⟩(x_s)`
+/// with respect to `θ` is the sum of the `params` rows; blocks concatenate,
+/// row for row, like their Jacobians.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Vjp {
+    num_samples: usize,
+    /// One row per sample.
+    parts: Parts,
+}
+
+impl Vjp {
+    /// All zero, with the parts `wrt` asks for.
+    fn zeros(wrt: JacobianWrt, n: usize, num_params: usize, num_features: usize) -> Self {
+        Vjp {
+            num_samples: n,
+            parts: Parts::zeros(wrt, n, num_params, num_features),
+        }
+    }
+
+    /// Add the derivative of sample `s`'s weighted expectation with respect to
+    /// one gate's angle where [`Jacobian::add`] would ([`Parts::add`]).
+    fn add(&mut self, s: usize, slot: &Slot, derivative: f64) {
+        self.parts.add(s, slot, derivative);
+    }
+
+    /// The number of samples: both parts' first axis.
+    pub fn num_samples(&self) -> usize {
+        self.num_samples
+    }
+
+    /// The number of trainable parameters: the parameter part's last axis.
+    pub fn num_params(&self) -> usize {
+        self.parts.num_params
+    }
+
+    /// The number of features: the input part's last axis.
+    pub fn num_features(&self) -> usize {
+        self.parts.num_features
+    }
+
+    /// The product with respect to the parameters, `(num_samples,
+    /// num_params)`, flat and row-major, if asked for.
+    pub fn params(&self) -> Option<&[f64]> {
+        self.parts.params.as_deref()
+    }
+
+    /// The product with respect to the inputs, `(num_samples, num_features)`,
+    /// flat and row-major, if asked for.
+    pub fn inputs(&self) -> Option<&[f64]> {
+        self.parts.inputs.as_deref()
+    }
+
+    /// The two parts, `(params, inputs)`, each `None` if not asked for.
+    pub fn into_parts(self) -> (Option<Vec<f64>>, Option<Vec<f64>>) {
+        (self.parts.params, self.parts.inputs)
     }
 }
 

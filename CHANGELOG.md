@@ -11,7 +11,251 @@ Entries were curated from the Conventional Commits history. Releases before
 
 ## [Unreleased]
 
-<!-- towncrier release notes start -->
+### Added
+- `polypus.qml.kernel_matrix(encoder, x1, x2=None, *, ...)`, the fidelity
+  quantum kernel `K[i, j] = |⟨φ(x1_i)|φ(x2_j)⟩|²` of a native `Encoder` as a
+  `float64` NumPy array, ready for scikit-learn's
+  `SVC(kernel="precomputed")`. With `exact=True` it takes the inner products of
+  the native simulator's statevectors, each state simulated once when they fit
+  in the memory budget; with shots, the `0…0` frequency of one
+  compute-uncompute circuit (`U(x1_i)` then `U(x2_j)†`) per entry. Without
+  `x2` only the upper triangle, diagonal included, runs (`N(N+1)/2` circuits)
+  and the matrix is symmetric bit for bit; the diagonal is executed, not set
+  to 1. It takes `qml.expval`'s execution arguments and rules, checks
+  everything before a backend exists, and runs the pairs in blocks over one
+  backend per call. In `polypus-circuit`: `ConcreteCircuit::inverse`,
+  `CircuitError::NotInvertible`, and `GateInstruction::push_inverse`, public:
+  the one inverse table of the workspace, which the native simulator's
+  adjoint gradient now steps back through too (`csx`, `rc3x` and `c3sqrtx` are
+  inverted through their decomposition). In `polypus-qml`: `FeatureMap`,
+  `FeatureStates` and `FidelityKernel`, and the variants
+  `ValidationError::TrainableLayerInFeatureMap`, `QmlError::KernelTooLarge`
+  and `QmlError::StateWidthMismatch`. In `polypus-infrastructure`:
+  `NativeStatevectorBackend::fidelity_matrix`, which counts its matrix
+  against the memory budget and, with room for one statevector beside it but
+  not two, computes each entry from one statevector instead of refusing. In
+  `polypus-backend`: `InsufficientMemoryForResult` and the
+  `BackendError::InsufficientMemoryForResult` variant (`BackendError` is
+  `#[non_exhaustive]`), raised in Python as
+  `polypus.InsufficientMemoryError` when a result leaves no room for its
+  statevectors. See `examples/qml_kernel_svc.py` (#504).
+- `polypus.qml.Ansatz.strongly_entangling(reps, ranges=None, entangler="cx")`,
+  PennyLane's `StronglyEntanglingLayers`: per layer, a general rotation on
+  every qubit, emitted as `Rz(φ)`, `Ry(θ)`, `Rz(ω)`, in that order, so the
+  exact parameter-shift gradient still applies, then an entangler (`"cx"` or
+  `"cz"`) from each qubit `i` to `(i + r) mod n`, with PennyLane's default
+  ranges or one per layer; `3·n·reps` parameters. A range outside `1..=n−1`
+  for the qubits active at that point is a `ValueError` at the call, and the
+  layer saves and loads with `TrainedModel.save`/`qml.load` (format version
+  still 1). In `polypus-qml`: `StronglyEntanglingAnsatz`,
+  `Layer::StronglyEntangling`, `QuantumModel::strongly_entangling` and the
+  `ValidationError` variants `StronglyEntanglingRangesLength` and
+  `StronglyEntanglingRangeOutOfBounds`. The QML guide shows how `EfficientSU2`
+  and `BasicEntanglerLayers` map onto `hardware_efficient` (#505).
+- `polypus.qml.expval(model, x, params, *, ...)` and
+  `polypus.qml.jacobian(model, x, params, *, wrt="params", ...)` for a training
+  loop of your own over a native `Model`: the expectation of every readout
+  observable per row as a `float64` NumPy array `(rows, observables)`, and its
+  exact parameter-shift Jacobian with respect to the parameters
+  (`(rows, observables, num_params)`), the inputs of angle and IQP encoders
+  (`(rows, observables, features)`) or both (`wrt="both"`, a tuple). They take
+  `TrainedModel.run`'s execution arguments, check everything before a backend
+  exists, and run the rows in blocks over one backend per call. In
+  `polypus-qml`: `CompiledModel::jacobian` with `ExpectationJacobian`,
+  `JacobianBlock`, `Jacobian` and `JacobianWrt`,
+  `CompiledModel::expectations_from_counts`/`expectations_from_probabilities`
+  and `num_observables`, and `QmlError::NoInputGradient`. In
+  `polypus-evaluation`: `window_size` and `candidate_window_size`, the
+  `QmlOracle`'s window policy, now public, which also sizes the primitives'
+  blocks. See `examples/qml_expval_jacobian_loop.py`.
+- `polypus.torch.QuantumLayer(model, *, initial_params=None, seed=None, ...)`,
+  a `torch.nn.Module` over a native `qml.Model` for hybrid quantum-classical
+  networks: forward = `qml.expval` over the batch, backward = one `qml.vjp`
+  call with the incoming gradient (parameters, inputs or both; #559), so
+  it trains with any `torch.optim` optimizer; float32 networks work as is (the
+  computation is float64 on the CPU), and a `seed` derives one per backend call
+  so a training replays. `polypus.torch.from_trained(trained, ...)` starts one
+  from a `TrainedModel`. PyTorch is the new optional extra
+  `pip install "polypus-quantum[torch]"` (`torch>=2.14.1,<3`); `import polypus`
+  does not import it (#502). See `examples/qml_torch_hybrid.py`.
+- Exact gradients of native QML by adjoint differentiation (#503): with
+  `exact=True` on the native backend, `Model.fit`'s Adam gradient,
+  `qml.jacobian` and `polypus.torch.QuantumLayer`'s backward pass take about
+  three simulations per row (and observable) whatever the number of
+  parameters, instead of two circuits per trainable gate; no API changes.
+  The result is the parameter-shift gradient to rounding; shots keep the
+  parameter shift, and so does exact mode when the memory budget holds one
+  statevector of the model's width but not the two the adjoint needs (logged
+  at `info` once per fit or `qml.jacobian` call). A Ctrl+C now also stops an
+  exact `qml.jacobian` inside a block. In `polypus-sim`:
+  `StatevectorSimulator::adjoint_gradient`, `AdjointGradient`,
+  `ADJOINT_STATEVECTORS` and four `SimError` variants (`GateIndexOutOfRange`,
+  `NotDifferentiable`, `PartialMeasurement`, `NonFiniteWeight`). In
+  `polypus-qml`: `QmlProblem::adjoint_runs`/`gradient_from_adjoint`,
+  `JacobianBlock::adjoint_runs`/`num_adjoint_runs`/`jacobian_from_adjoint` (and
+  `ExpectationJacobian`'s), `AdjointRun` and `DiagonalObservable`. In
+  `polypus-infrastructure`: `NativeStatevectorBackend::adjoint_fits`/
+  `run_adjoint` and `AdjointTask`. `benchmarks/bench_adjoint.py` measures it.
+- `polypus.qml.Model.num_observables`, the readout's observables (the columns
+  of `qml.expval`), and pickling of `Model`, so `copy.deepcopy` works: it
+  travels as the JSON of its spec, rebuilt through the checks of `qml.load`
+  (#502).
+- `polypus.qml.vjp(model, x, params, cotangent, *, wrt="params", ...)`, the
+  vector-Jacobian product of `qml.jacobian` with a `(rows, observables)`
+  cotangent, what a reverse-mode backward pass needs: `(num_params,)` summed
+  over the rows for `wrt="params"`, `(rows, features)` for `"inputs"`, the
+  tuple for `"both"`. With `exact=True` it takes one adjoint run per row
+  whatever the number of observables (`qml.jacobian` takes one per row and
+  observable), so the exact backward pass of `polypus.torch.QuantumLayer`,
+  which now calls it, is up to `K` times cheaper for a `K`-observable readout;
+  with shots it runs `qml.jacobian`'s circuits and gives its contraction for
+  the same `seed`. The layer's gradients move in the last bits, no more:
+  exactly, they come from one combined observable instead of one run per
+  observable, and with shots the parameter product is summed in row order.
+  The cotangent's shape is checked right after `params` (a
+  `polypus.ConfigurationError`, as is a complex one) and its values are read
+  as `x`'s are (a string or `None` is the same `TypeError`); a `NaN` or an
+  infinity in it propagates as through the contraction, and changes only its
+  own row's route. `qml.jacobian` does not change. In `polypus-qml`:
+  `Jacobian::vjp`, `JacobianBlock::vjp_runs`/`num_vjp_runs`/
+  `vjp_weight_bounds`/`vjp_from_adjoint` (and
+  `ExpectationJacobian`'s), `Vjp` and `DiagonalObservable::weight_bound`.
+  `benchmarks/bench_vjp.py` measures it (#559, ADR 0008).
+- A call trace for `polypus.train` and `polypus.run_quantum_circuit`
+  (contract C-12): the keyword-only `trace=` (a path to a new file) or
+  `POLYPUS_CALL_TRACE=<directory>` writes one JSON Lines line per planner
+  batch, backend wave, optimizer iteration and QNG metric call, with sizes and
+  times only, capped by `POLYPUS_CALL_TRACE_MAX_MB` (512 MiB by default). It
+  never changes a result.
+- The call trace in Rust: the `trace` module of `polypus-orchestration`, with
+  `CallTracer`, which writes, caps and closes a trace, the types of its lines
+  (`TraceHeader`, `TraceEvent`, `RunStatus`, …), `DEFAULT_MAX_BYTES`, and four
+  decorators, `TracingPlanner`, `TracingBackend`, `TracingObserver` and
+  `TracingVariance`, which record the calls they forward; and
+  `Method::name()`, the optimizer's name that a trace's header records.
+- Multi-qubit Pauli sums and an exact H₂ Hamiltonian in `polypus-physics`
+  (#529), the reference for molecular simulation (#528). In
+  `hamiltonians`: `PauliString` (text form `"X0 X1 Y2 Y3"`, product with a
+  `Phase`), `PauliSum::new`/`simplified`/`chop`; `PauliSum::to_dense_real`,
+  `eigenvalues` and `ground_energy` (little-endian basis, up to
+  `MAX_DENSE_QUBITS` = 10, real matrices only; symmetric to within
+  `SYMMETRY_TOLERANCE` relative to the largest entry); `FermionOperator` and
+  `FermionHamiltonian` from spatial integrals (spin-orbitals in block order;
+  integral symmetries checked to `INTEGRAL_SYMMETRY_TOLERANCE` and
+  symmetrized); `FermionOperator::to_qubits` with `QubitMapping::JordanWigner`
+  or `Parity` (Hermitian to within `HERMITICITY_TOLERANCE` times the sum of
+  the operator's |coefficients|); `PauliSum::taper` and `parity_reduction_qubits`, which fix the
+  parities of `N↑` and `N`, not their values (exact for H₂; sector
+  diagonalization for larger molecules is #535). A new `chemistry` module:
+  STO-3G integrals over normalized s-type contracted Gaussians and
+  `H2Molecule` in `H2Encoding::JordanWigner` (4 qubits) or `ParityTapered`
+  (2 qubits), which implements `PhysicsHamiltonian`. Validated against
+  PySCF/OpenFermion data in `reference-data/h2-sto3g/` (FCI at 0.7414 Å:
+  −1.1372701747 Ha). `constants::BOHR_RADIUS_ANGSTROM`. New dependency:
+  `libm` (`erf` for the Boys function).
+- `TrainResult.stop_reason` and `TrainResult.n_evaluations` on `train`,
+  `qml.train` and `Model.fit`. `stop_reason` names what ended the
+  optimizer's loop: `"iteration_budget"`, `"evaluation_budget"` (L-SHADE's
+  schedule, `External`'s `max_evaluations`), `"fitness_tolerance"`,
+  `"parameter_tolerance"` (PSO), `"degenerate"` (CMA-ES),
+  `"optimizer_finished"` (`External`'s empty `ask()`) or `"callback"`.
+  `n_evaluations` counts the candidates scored as a fitness, as
+  `TrainProgress.evaluations` does, plus the re-score of `best_params` on
+  the whole training set when a gradient-free optimizer trains on
+  minibatches; the shifted circuits of an exact gradient (`Adam` in
+  `qml.Model.fit`) and the final batch are not counted. In
+  Rust: `polypus_optimizers::StopReason`, `OptimizationOutcome::stop_reason`
+  and `TrainOutcome::n_evaluations`. Seeded results are unchanged (#431).
+
+### Changed
+- **BREAKING (Rust):** `polypus_qml::ValidationError` has a new variant,
+  `TrainableLayerInFeatureMap`, so an exhaustive `match` on it outside its
+  crate must handle it (#504).
+- **BREAKING (Rust):** `polypus_qml::QmlError` has two new variants,
+  `KernelTooLarge` and `StateWidthMismatch`, so an exhaustive `match` on it
+  outside its crate must handle them (#504).
+- **BREAKING:** for Rust users, `TrainFlow` and `RunCircuitFlow`
+  (`polypus-orchestration`) have a new public field,
+  `trace: Option<Arc<CallTracer>>`, so a struct literal must set it;
+  `trace: None` keeps today's behaviour.
+- **BREAKING (Rust):** `polypus_optimizers::OptimizationOutcome` has a new
+  public field, `stop_reason`, so a struct literal of it outside its crate
+  must set it (#431).
+- **BREAKING (Rust):** `polypus_qml::ValidationError` has two new variants,
+  `StronglyEntanglingRangesLength` and `StronglyEntanglingRangeOutOfBounds`,
+  so an exhaustive `match` on it outside its crate must handle them (#505).
+- **BREAKING (Rust):** `polypus_physics::hamiltonians::PauliTerm` is
+  `{ coefficient, string: PauliString }` instead of a single Pauli on one
+  qubit (`qubit`, `axis`), and `PauliSum`'s fields are private: build it with
+  `PauliSum::new`, which validates, and read it with `num_qubits()` and
+  `terms()` (#529).
+- **BREAKING (Rust):** `PauliAxis`, `PauliTerm` and `PauliSum` moved from
+  `hamiltonians::photon_polarization` to `hamiltonians::pauli`; the old
+  paths `hamiltonians::photon_polarization::{PauliAxis, PauliTerm, PauliSum}`
+  no longer exist. Import them from `polypus_physics::hamiltonians` (#529).
+- **BREAKING (Rust):** `photon_polarization_hamiltonian` returns
+  `Result<PauliSum, PhysicsError>`, rejecting non-finite parameters (#529).
+- **BREAKING (Rust):** `polypus_physics::error::PhysicsError` has new
+  variants, `InvalidPauliSum`, `UnsupportedOperation`,
+  `InvalidFermionOperator` and `InvalidIntegrals`, so an exhaustive `match`
+  on it outside its crate must handle them (#529).
+- **BREAKING (Rust):** `polypus_qml::ValidationError` has a new variant,
+  `TooManyParams`, so an exhaustive `match` on it outside its crate must
+  handle it (#505).
+- CI reports how well the tests check the code, not only what they run: the
+  SonarQube Cloud workflow's coverage jobs write Rust line coverage per crate
+  in their summary, and a weekly `mutation.yml` runs `cargo mutants` over the
+  pure-Rust crates (report only) and comments the score per crate on a
+  tracking issue. New tests catch the mutants that survived in
+  `polypus-observable`, CMA-ES and SHADE, and `polypus-backend`'s memory guard
+  and planner, and property tests check the OpenQASM round trip and that the
+  parallel kernels match the sequential ones on random circuits (#409).
+- For contributors: every workspace crate inherits a `[workspace.lints]` table
+  from the root `Cargo.toml` that denies `unsafe_code` and
+  `clippy::undocumented_unsafe_blocks`, so the three `unsafe` sites
+  `docs/ENGINEERING.md` §5 authorises are the only ones that compile, each with
+  its own block-scoped `allow`. `missing_docs` is on in the crates that are
+  already fully documented, and `cargo deny` keeps `pyo3` out of the pure
+  crates (#408).
+- For contributors: the CI, Hygiene and SonarQube Cloud workflows also run on
+  GitHub merge-queue groups, a prerequisite for enabling the queue on `main`.
+  Hygiene checks the queue's candidate commit against `main` with the public
+  rules; SonarQube Cloud skips its jobs there, since the quality gate already
+  ran on the pull request and the push to `main` reports on the merged commit.
+- CUNQA: the seal looks up a family's QPUs with `get_QPUs` once instead of
+  once per wave, and looks them up again after `qdrop` or a failed wave
+  (#437).
+- **BREAKING (build):** the `qmio` feature needs Rust 1.89: `zeromq` goes from
+  0.6 to 0.7, which raised its MSRV. Default features keep Rust 1.85. The
+  QMIO reply-size cap is still checked after the reply is received; 0.7 has
+  no receive size limit yet (#383).
+
+### Fixed
+- `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a
+  negative `reps` raised `OverflowError`, and with a `reps` whose parameter
+  count does not fit in 64 bits a `PanicException` (which `except Exception`
+  does not catch); both, and any integer too large for a count, are now a
+  `ValueError` at the call that leaves the `Ansatz` as it was. A layer added
+  after such a parameter count, and a saved file edited to one, fail the same
+  way. In `polypus-qml`, `QuantumModel::compile` returns the new
+  `ValidationError::TooManyParams` instead of panicking (#505).
+- The OpenQASM 2.0 export of a barrier on every qubit in order and of the
+  measurements `q[k] -> c[k]` of every qubit in order is now written as
+  `barrier q;` and `measure q -> c;`, the form the importer reads them back
+  in, as the OpenQASM 3 export already did. So
+  `to_qasm2(from_qasm2(to_qasm2(c)))` is byte-identical to `to_qasm2(c)` for
+  these circuits too (contract C-2), and the exported text of those two shapes
+  changes for the same program (#568).
+
+### Documentation
+- The documentation site (MkDocs Material) is published at the Pages root,
+  with the rustdoc of every crate under `/rust/`. Only the crate index pages
+  of the old rustdoc URLs (`.../polypus/<crate>/`) redirect to
+  `.../polypus/rust/<crate>/`; deeper rustdoc links change. The
+  `documentation` link of the `polypus` crate points at its new rustdoc home.
+- The site takes the Polypus cyan and octopus mark, Inter and JetBrains Mono
+  served from the site itself (no third-party font requests), and a new
+  landing page with a tabbed quickstart.
 
 ## [0.8.0] - 2026-10-30
 
