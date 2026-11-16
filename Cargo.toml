@@ -102,8 +102,9 @@ nix                = { version = "0.31", features = ["signal", "process"] }
 pyo3               = "0.29"
 numpy              = "0.29"
 # Data parallelism (the sim's gate kernels, the observables' aggregation, the
-# native backend's population parallelism).
-rayon              = "1"
+# native backend's population parallelism). 1.7: `rayon::yield_local`, which a
+# `polypus-infrastructure` test uses to see which gate kernels a window ran on.
+rayon              = "1.7"
 # Complex amplitudes of the statevector; pyo3's `num-complex` feature converts
 # the same type, so both must stay on one major.
 num-complex        = "0.4.6"

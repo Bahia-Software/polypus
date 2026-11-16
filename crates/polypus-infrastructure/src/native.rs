@@ -2438,13 +2438,80 @@ mod tests {
         assert!(!pair.fusion);
     }
 
+    /// `run_adjoint_with_cap` runs each window on those kernels, seen from the
+    /// inside: on a one-thread pool, the weight of each run's first amplitude
+    /// runs whatever work that thread has queued. The parallel kernels queue
+    /// their reduction's other blocks there, so those run while the first
+    /// block is still under way; the sequential kernels queue nothing of the
+    /// run's own, and its blocks run one after the other. A lone run is the
+    /// control that the probe sees the parallel kernels at all.
+    #[test]
+    fn run_adjoint_with_cap_runs_each_window_on_the_adjoints_gate_kernels() {
+        // Whether any later block of this run's reduction started while its
+        // first block (amplitudes 0..4096) was under way.
+        #[derive(Default)]
+        struct Probe {
+            in_first_block: AtomicBool,
+            overlapped: AtomicBool,
+        }
+        impl Probe {
+            fn weight(&self, b: usize) -> f64 {
+                if b == 0 {
+                    self.in_first_block.store(true, Ordering::SeqCst);
+                    while rayon::yield_local() == Some(rayon::Yield::Executed) {}
+                } else if b >= 4096 && self.in_first_block.load(Ordering::SeqCst) {
+                    self.overlapped.store(true, Ordering::SeqCst);
+                }
+                if b == 4095 {
+                    self.in_first_block.store(false, Ordering::SeqCst);
+                }
+                z0(b)
+            }
+        }
+
+        let n = 14;
+        let circuits: Vec<ConcreteCircuit> = (0..2)
+            .map(|i| spread_adjoint_circuit(n, 0.2 + 0.45 * i as f64))
+            .collect();
+        let wrt = [n + 1, n + 3];
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        // Every gate on the parallel kernels, unless the window says otherwise.
+        let mut backend = NativeStatevectorBackend::new(0);
+        backend.simulator.parallel_threshold = 0;
+        let overlapped = |runs: usize| -> Vec<bool> {
+            let probes: Vec<Probe> = (0..runs).map(|_| Probe::default()).collect();
+            let tasks: Vec<AdjointTask<'_, _>> = circuits[..runs]
+                .iter()
+                .zip(&probes)
+                .map(|(circuit, probe)| AdjointTask {
+                    circuit,
+                    wrt: &wrt,
+                    weight: move |b: usize| probe.weight(b),
+                })
+                .collect();
+            pool.install(|| backend.run_adjoint_with_cap(&tasks, None, usize::MAX))
+                .unwrap();
+            probes
+                .iter()
+                .map(|probe| probe.overlapped.load(Ordering::SeqCst))
+                .collect()
+        };
+        assert_eq!(overlapped(1), [true], "a lone run, parallel kernels");
+        assert_eq!(overlapped(2), [false, false], "a window of two, sequential");
+    }
+
     /// [`adjoint_circuit`] after an `Ry` of its own angle on every one of the
     /// `n` qubits, so the amplitude spreads over the whole register: the
-    /// differentiated rotations are at `n + 1`, `n + 3` and `n + 4`.
+    /// differentiated rotations are at `n + 1`, `n + 3` and `n + 4`. The `Ry`
+    /// angles stay clear of `0` and `π` for the angles and widths used here, so
+    /// no qubit is left without amplitude in either of its states.
     fn spread_adjoint_circuit(n: usize, angle: f64) -> ConcreteCircuit {
         let mut circuit = ParameterizedCircuit::new(n);
         for q in 0..n {
-            circuit = circuit.ry(q, angle + 0.17 * q as f64);
+            circuit = circuit.ry(q, angle + 0.1 * q as f64);
         }
         circuit = circuit.h(0).ry(0, angle).cx(0, 1);
         circuit = circuit.rz(1, 0.3 * angle).rx(0, -angle).measure_all();
@@ -2454,11 +2521,13 @@ mod tests {
     /// The rows are the same bits whatever kernels run them: a backend whose
     /// threshold sends every gate of a lone run to the parallel kernels, one
     /// that keeps them all sequential, any window size, and the simulator's
-    /// own gradient on either path. 13 qubits with amplitude on every one, so
-    /// the reductions sum two non-zero blocks of 4096 amplitudes.
+    /// own gradient on either path. 14 qubits with amplitude on every one, so
+    /// the reductions sum four non-zero blocks of 4096 amplitudes: with two,
+    /// any order of adding them gives the same bits, and a combine out of
+    /// order could not fail the test.
     #[test]
     fn adjoint_rows_do_not_depend_on_the_gate_kernels() {
-        let n = 13;
+        let n = 14;
         let circuits: Vec<ConcreteCircuit> = (0..4)
             .map(|i| spread_adjoint_circuit(n, 0.2 + 0.45 * i as f64))
             .collect();
@@ -2482,10 +2551,13 @@ mod tests {
         let expected: Vec<Vec<f64>> = circuits
             .iter()
             .map(|circuit| {
-                // The second reduction block must hold amplitude, or its sum
-                // would be zero in any order and prove nothing.
+                // Every reduction block must hold amplitude, or its partial
+                // sum would be zero and the order of the four unobservable.
                 let state = sequential.run(circuit).unwrap();
-                assert!(state.amplitudes()[4096..].iter().any(|a| a.norm() > 1e-3));
+                for block in state.amplitudes().chunks(4096) {
+                    assert!(block.iter().any(|a| a.norm() > 1e-3));
+                }
+                assert_eq!(state.amplitudes().len(), 4 * 4096);
                 let seq = sequential
                     .adjoint_gradient(circuit, &wrt, z0, None)
                     .unwrap()
