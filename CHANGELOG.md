@@ -234,6 +234,13 @@ Entries were curated from the Conventional Commits history. Releases before
   exists. An object with `__index__` (a NumPy integer) is read as the integer
   it returns, which an out-of-range message shows. Another type is still a
   `TypeError` (#571).
+- The OpenQASM 2.0 export of a barrier on every qubit in order and of the
+  measurements `q[k] -> c[k]` of every qubit in order is now written as
+  `barrier q;` and `measure q -> c;`, the form the importer reads them back
+  in, as the OpenQASM 3 export already did. So
+  `to_qasm2(from_qasm2(to_qasm2(c)))` is byte-identical to `to_qasm2(c)` for
+  these circuits too (contract C-2), and the exported text of those two shapes
+  changes for the same program (#568).
 
 ### Documentation
 - The documentation site (MkDocs Material) is published at the Pages root,
