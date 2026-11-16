@@ -373,7 +373,9 @@ A user-visible change adds one file to [`changelog.d/`](../changelog.d)
 instead of editing [`CHANGELOG.md`](../CHANGELOG.md); the release pull request
 assembles the files into `CHANGELOG.md` with
 [towncrier](https://towncrier.readthedocs.io/). Pull requests that all edited
-`CHANGELOG.md` used to conflict with each other on the same lines.
+`CHANGELOG.md` used to conflict with each other on the same lines. The
+hygiene check rejects a `CHANGELOG.md` edit while `Cargo.toml` carries an
+`X.Y.Z-dev` version.
 
 - Name: `<issue>.<type>.md` (`504.added.md`), or `+<short-slug>.<type>.md`
   when there is no issue. A second entry of the same issue and type is

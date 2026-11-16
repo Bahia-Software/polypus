@@ -884,6 +884,72 @@ def test_cff_unsupported_forms(text):
         hygiene.cff_version(text)
 
 
+# ---------------------------------------------------------------- changelog ---
+
+DEV_CARGO = CARGO.replace('"1.2.3"', '"1.2.4-dev"')
+CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-01-01\n\n- x\n"
+
+
+def dev_base(repo):
+    repo.write("Cargo.toml", DEV_CARGO)
+    repo.write("CHANGELOG.md", CHANGELOG)
+    repo.base = repo.commit("dev base")
+
+
+def test_changelog_edit_on_dev_version_fails(repo):
+    dev_base(repo)
+    repo.write(
+        "CHANGELOG.md",
+        CHANGELOG.replace("## [Unreleased]\n", "## [Unreleased]\n\n- y\n"),
+    )
+    repo.commit()
+    res = repo.run()
+    assert res.code == 1
+    assert res.violations("changelog-edit") == [("CHANGELOG.md", 1, "changelog-edit")]
+    assert "changelog.d/" in res.out
+
+
+def test_changelog_line_removal_on_dev_version_fails(repo):
+    dev_base(repo)
+    repo.write("CHANGELOG.md", CHANGELOG.replace("- x\n", ""))
+    repo.commit()
+    assert repo.run().violations("changelog-edit") == [
+        ("CHANGELOG.md", 1, "changelog-edit")
+    ]
+
+
+def test_release_version_allows_changelog_edit(repo):
+    dev_base(repo)
+    repo.write("Cargo.toml", CARGO.replace('"1.2.3"', '"1.2.4"'))
+    repo.write("CITATION.cff", CFF.replace("1.2.3", "1.2.4"))
+    repo.write(
+        "CHANGELOG.md",
+        CHANGELOG.replace("## [1.2.3]", "## [1.2.4] - 2026-02-01\n\n- y\n\n## [1.2.3]"),
+    )
+    repo.commit()
+    res = repo.run()
+    assert res.code == 0, res.all
+
+
+def test_adding_changelog_fragment_passes(repo):
+    dev_base(repo)
+    repo.write("changelog.d/1.added.md", "A thing (#1).\n")
+    repo.commit()
+    res = repo.run()
+    assert res.code == 0, res.all
+
+
+def test_changelog_edit_cannot_be_exempted(repo):
+    dev_base(repo)
+    repo.write(
+        ".github/hygiene-allow.txt",
+        ALLOW_HEADER + "changelog-edit\tCHANGELOG.md\t# r\n",
+    )
+    repo.write("CHANGELOG.md", CHANGELOG + "\n")
+    repo.commit()
+    assert repo.run().code in (1, 2)
+
+
 # -------------------------------------------------- revisions and robustness ---
 
 
