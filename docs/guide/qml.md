@@ -308,6 +308,30 @@ optimizer = torch.optim.Adam(net.parameters(), lr=0.1)
 - **Cost.** Every forward pass and every backward pass opens and closes a backend: two per training step, so on CUNQA two `qraise` allocations per step. Prefer `exact=True` on the local simulator while you develop.
 - **Limits.** No second derivatives (no `create_graph=True` through the layer), no `torch.compile` and no `torch.vmap`. Save the `state_dict`; `copy.deepcopy(layer)` works too.
 
+### Quantum kernels: `qml.kernel_matrix`
+
+A quantum kernel compares two samples by how much the states an encoder prepares for them overlap: `K(x, y) = |⟨φ(x)|φ(y)⟩|²`, with `|φ(x)⟩ = U(x)|0…0⟩`. `qml.kernel_matrix(encoder, x1, x2=None)` returns that Gram matrix as a NumPy array (`float64`, shape `(len(x1), len(x2))`), ready for any kernel method that takes a precomputed kernel, such as scikit-learn's support vector machine:
+
+```python
+from sklearn.svm import SVC
+
+encoder = qml.Encoder(2).iqp_encoder()
+k_train = qml.kernel_matrix(encoder, x_train, exact=True)  # (train, train)
+k_test = qml.kernel_matrix(encoder, x_test, x_train, exact=True)  # (test, train)
+svm = SVC(kernel="precomputed").fit(k_train, y_train)
+accuracy = svm.score(k_test, y_test)
+```
+
+[`examples/qml_kernel_svc.py`](../../examples/qml_kernel_svc.py) trains this SVM on data no straight line separates, exactly and with shots, and checks its accuracy. scikit-learn is not a dependency of Polypus: `pip install -r requirements-examples.txt` brings it.
+
+- **Arguments.** `encoder` is a `qml.Encoder`, every layer of which loads the data; anything else (an `Ansatz`, a `Model`, a `TrainedModel`) is a `TypeError`: trainable kernels, with an ansatz inside the feature map, are not supported. `x1` and `x2` are rows or `Dataset`s (labels are not used) of the same width, checked as `qml.expval` checks its rows; each rejection is a `polypus.ConfigurationError` that names `x1` or `x2`. The execution arguments are `qml.expval`'s, with its rules.
+- **`exact` or shots.** With `exact=True` (local native simulator only) the kernel comes from the inner products of the statevectors: each sample's state is simulated once when they all fit in the memory budget, otherwise in tiles. The matrix itself counts against the budget (8 bytes an entry): when what it leaves holds one statevector of the encoder's width but not the two an inner product needs, each entry is computed from one statevector instead, by the circuit below, and the log says so once at `info` level; when it leaves no room even for one, the call raises `polypus.InsufficientMemoryError`, the same exception as a statevector that does not fit, before anything runs. Compute fewer rows of `x1` at a time (`np.vstack` of the pieces is the same matrix, bit for bit, while each piece takes the inner products) or raise `POLYPUS_MEM_BUDGET`. With shots, each entry is the frequency of `0…0` in the circuit `U(x1_i)` followed by `U(x2_j)†` (one `measure_all`), an unbiased estimate with standard error `√(K(1−K)/shots)`. The two give the same kernel up to rounding and shot noise.
+- **Cost.** Without `x2`, the matrix of `x1` with itself is symmetric: only the upper triangle, diagonal included, runs, `N(N+1)/2` circuits for `N` rows, and the lower half is its mirror, so `K == K.T` exactly. With `x2`, every entry runs, `N·M` circuits, even if `x2` is `x1` (nothing compares them). Exactly, it is `N` simulations (or `N + M`) instead of circuits, as long as the states fit in memory.
+- **The diagonal.** `K(x, x)` is executed like any other entry, never set to `1`: it is `1` to rounding exactly, and below `1` on noisy hardware or with a noise model, which is information about the device.
+- **Positive semi-definite.** The exact Gram matrix is PSD (to rounding); one estimated with shots may not be, by a little. scikit-learn's `SVC` accepts it as it is. If your method needs a PSD matrix, clip its negative eigenvalues (`w, v = np.linalg.eigh(K); K = (v * np.maximum(w, 0)) @ v.T`), or add a small multiple of the identity, or use more shots; Polypus leaves the matrix as measured.
+- **Scaling the features.** Like any encoder, the kernel is only as good as the angles it gets. Angle encoders take the feature itself as the angle; IQP encoders also take **products** of features (`Rzz(x_i·x_j)`), which grow quadratically with the range: scale the features to a modest interval first, such as `[-1, 1]` or `[0, π]` (`Dataset.scale_features_to`, and `scale_features_with` the training set's ranges for the test set). A range too wide makes every pair of samples look unrelated, and the matrix tends to the identity.
+- **Execution.** A call opens one backend (one allocation on CUNQA) and runs the pairs in blocks sized like `qml.expval`'s rows; Ctrl+C stops it between blocks and, with `exact=True`, inside the inner products. Exactly, a call on some rows of `x1` gives those rows of the whole matrix, bit for bit. With shots, pass `seed=` to repeat a call.
+
 ### Data
 
 `qml.Dataset(x, y=None)` checks the rows once (non-empty, equal width, finite) and keeps the labels with them. It splits reproducibly and scales features:

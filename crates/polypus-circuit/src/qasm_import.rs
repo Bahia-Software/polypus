@@ -670,7 +670,9 @@ pub(crate) fn check_terminal(
 ///   barrier.
 ///
 /// Both rewrites are semantically identity; they exist so that
-/// export → import → export is byte-stable. The importers rewrite their
+/// export → import → export is byte-stable, in OpenQASM 2.0 and 3 alike: the
+/// exporters of both write this canonical form ([`normalized`]), so the
+/// importers and the exporters agree on it. The importers rewrite their
 /// instructions in place, never holding a second copy of them.
 pub(crate) fn normalize(gates: &mut Vec<GateInstruction>, n: usize) {
     let (mut read, mut write) = (0, 0);
@@ -690,7 +692,8 @@ pub(crate) fn normalize(gates: &mut Vec<GateInstruction>, n: usize) {
 }
 
 /// The instructions of [`normalize`], without copying the ones it keeps: for
-/// an export, which only borrows the circuit.
+/// an export (the OpenQASM 2.0 and the OpenQASM 3 one), which only borrows the
+/// circuit.
 pub(crate) fn normalized(
     gates: &[GateInstruction],
     n: usize,

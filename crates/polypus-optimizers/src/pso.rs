@@ -3,7 +3,7 @@
 use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
 use crate::observer::{IterationObserver, IterationReport};
-use crate::outcome::{OptimizationOutcome, Optimizer};
+use crate::outcome::{OptimizationOutcome, Optimizer, StopReason};
 use crate::rng::with_seeded_rng;
 use crate::util::{
     argmax, check_initial_point, check_oracle_len, population_converged, rows_to_candidates,
@@ -149,6 +149,7 @@ impl AlgorithmPSO {
 
         let mut iterations_run = 0usize;
         let mut converged = false;
+        let mut stop_reason = StopReason::IterationBudget;
         // Global best fitness at the end of each generation (see
         // `OptimizationOutcome::fitness_history`).
         let mut fitness_history: Vec<f64> = Vec::with_capacity(max_gen);
@@ -207,10 +208,12 @@ impl AlgorithmPSO {
                 best_params: &global_best_pos,
             };
             if observer.observe(&report).is_break() {
+                stop_reason = StopReason::Callback;
                 break;
             }
             if population_converged(&positions, tolerance, generation) {
                 converged = true;
+                stop_reason = StopReason::ParameterTolerance;
                 break;
             }
         }
@@ -221,6 +224,7 @@ impl AlgorithmPSO {
             iterations_run,
             converged,
             fitness_history,
+            stop_reason,
         })
     }
 }

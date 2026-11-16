@@ -38,10 +38,10 @@
 //! The accepted reply size is capped ([`QmioBackend::max_reply_bytes`]), but
 //! **that cap is not a memory-exhaustion defence**. It is checked only after
 //! `recv` has received and buffered the entire message, so it bounds what is
-//! kept and parsed, not what a hostile peer can make the process allocate: the
-//! pinned `zeromq` 0.6.0 exposes no `ZMQ_MAXMSGSIZE` equivalent and reserves the
+//! kept and parsed, not what a hostile peer can make the process allocate:
+//! `zeromq` 0.7.0 still exposes no `ZMQ_MAXMSGSIZE` equivalent and reserves the
 //! frame buffer from the length announced in the peer's ZMTP header. Closing
-//! that gap needs an upstream size limit in `zeromq`; until then the backend
+//! that gap needs an upstream size limit in `zeromq` (#383); until then the backend
 //! relies on the transport being a trusted peer. The ZMQ traffic itself is
 //! neither encrypted nor authenticated; the assumed threat model is documented
 //! in `docs/backends.md` ("QMIO transport threat model").
@@ -300,7 +300,8 @@ impl std::error::Error for QmioError {}
 /// Point the backend only at an endpoint you trust, over a network you trust.
 /// The ZeroMQ link is neither encrypted nor authenticated, and the reply-size
 /// cap (`max_reply_bytes`, 64 MiB) is checked only
-/// after the whole reply has been received: a hostile or broken peer can make
+/// after the whole reply has been received (`zeromq` 0.7.0 has no receive size
+/// limit): a hostile or broken peer can make
 /// the process allocate as much memory as its frame headers announce before
 /// the cap rejects the reply. The reply *content* is validated (see the module's
 /// `## Security` section); its size in memory is not bounded. Off CESGA's
@@ -581,7 +582,8 @@ impl QmioBackend {
                     }
                 }
 
-                // The request has now been delivered. Receive, bounded by the
+                // The request has been accepted for sending (`zeromq` queues it
+                // locally; it may already have reached the server). Receive, bounded by the
                 // timeout — but from here a failure means the QPU may already have
                 // executed the request, so the result is UNKNOWN: we discard the
                 // stuck socket but must NOT resend (a blind retry risks a double

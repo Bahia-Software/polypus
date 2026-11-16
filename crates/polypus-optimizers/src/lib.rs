@@ -128,7 +128,7 @@ pub use external::{AlgorithmExternal, AlgorithmExternalArgs, AskTell, AskTellErr
 pub use finite_difference::FiniteDifferenceGradient;
 pub use objective::{EvaluationOracle, GradientOracle, VarianceOracle};
 pub use observer::{IterationObserver, IterationReport, Unobserved};
-pub use outcome::{OptimizationOutcome, Optimizer};
+pub use outcome::{OptimizationOutcome, Optimizer, StopReason};
 pub use pso::{AlgorithmPSO, AlgorithmPSOArgs};
 pub use quantum_natural_gradient::{AlgorithmQNG, AlgorithmQNGArgs};
 pub use rotosolve::{AlgorithmRotosolve, AlgorithmRotosolveArgs};

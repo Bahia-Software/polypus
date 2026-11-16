@@ -2,7 +2,7 @@
 
 use crate::error::SimError;
 use crate::{gates, kernels, C64, DEFAULT_PARALLEL_THRESHOLD, MAX_QUBITS};
-use polypus_circuit::{GateInstruction, GateParam};
+use polypus_circuit::{CircuitError, GateInstruction, GateParam};
 
 /// A dense quantum state over `n` qubits: `2^n` complex amplitudes in the
 /// computational basis, indexed **little-endian** (qubit 0 is the
@@ -625,189 +625,39 @@ impl Statevector {
         Ok(())
     }
 
-    /// Apply the inverse `U†` of one circuit instruction in place: the step
-    /// back that adjoint differentiation takes through the circuit
-    /// ([`StatevectorSimulator::adjoint_gradient`](crate::StatevectorSimulator::adjoint_gradient)).
+    /// Append to `out` the instructions that undo `gate` on this register, in
+    /// the order they are applied: the step back that adjoint differentiation
+    /// takes through the circuit
+    /// ([`StatevectorSimulator::adjoint_gradient`](crate::StatevectorSimulator::adjoint_gradient)),
+    /// which applies them with [`apply`](Self::apply), so the kernels and the
+    /// errors are exactly its.
     ///
-    /// Each inverse is another instruction of the vocabulary wherever there is
-    /// one — a gate that is its own inverse, `S`↔`Sdg`, `T`↔`Tdg`, `Sx`↔`Sxdg`,
-    /// a rotation by `−θ`, `U(θ, φ, λ)† = U(−θ, −λ, −φ)` (the controlled `u`
-    /// forms likewise, `Cu`'s phase `γ` negated, and `U2(φ, λ)` as
-    /// `U(−π/2, −λ, −φ)`) — applied through [`apply`](Self::apply), so the
-    /// kernels and the errors are exactly its. The vocabulary has no `csxdg`,
-    /// so `Csx` applies `Sx†` on the controlled kernel; `Rccx`, `Rc3x` and
-    /// `C3sqrtx` (whose inverses are not in the vocabulary) and the calls of
-    /// declared gates are undone part by part, inverting their lowering or
-    /// expansion in reverse order. `Barrier`, `Measure` and `MeasureAll` are
-    /// no-ops here as in `apply`; a gate the simulator does not know is
-    /// [`SimError::UnsupportedInstruction`]. Composing the vocabulary with no
-    /// new gate keeps `polypus-circuit` unchanged.
+    /// The inverses are `polypus-circuit`'s own table,
+    /// [`GateInstruction::push_inverse`] (the one `ConcreteCircuit::inverse`
+    /// builds on), so the adjoint and the quantum kernel's uncompute undo every
+    /// instruction alike. What only a simulator undoes is handled here:
+    /// `Barrier`, `Measure` and `MeasureAll`, no-ops for the state as in
+    /// `apply`, are kept as they are, and a call of a declared gate is undone
+    /// through its expansion, from its last instruction to its first. A gate the
+    /// table does not know is [`SimError::UnsupportedInstruction`].
     ///
     /// # Errors
     ///
-    /// The same as [`apply`](Self::apply) on the same instruction.
-    pub(crate) fn apply_inverse(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
+    /// The same as [`apply`](Self::apply) on the same instruction: an operand
+    /// outside the register or named twice first, then an angle that is still
+    /// a free parameter or an expression. A non-finite angle stays non-finite in
+    /// the inverse, which `apply` then rejects as it rejects the gate. On an
+    /// error, `out` may already hold part of the inverse; discard it.
+    pub(crate) fn push_inverse(
+        &self,
+        gate: &GateInstruction,
+        out: &mut Vec<GateInstruction>,
+    ) -> Result<(), SimError> {
         use GateInstruction as G;
-        // An unresolved angle passes through unchanged, so `apply` rejects it
-        // with exactly the error the forward gate got.
-        let neg = |p: &GateParam| match p {
-            GateParam::Fixed(v) => GateParam::Fixed(-v),
-            other => *other,
-        };
+        self.check_operands(gate)?;
         match gate {
-            G::H(_)
-            | G::X(_)
-            | G::Y(_)
-            | G::Z(_)
-            | G::Id(_)
-            | G::Cx(..)
-            | G::Cz(..)
-            | G::Swap(..)
-            | G::Cy(..)
-            | G::Ch(..)
-            | G::Ccx(..)
-            | G::Cswap(..)
-            | G::C3x(..)
-            | G::C4x(..)
-            | G::U0 { .. }
-            | G::Barrier(_)
-            | G::Measure { .. }
-            | G::MeasureAll => self.apply(gate),
-            G::S(q) => self.apply(&G::Sdg(*q)),
-            G::Sdg(q) => self.apply(&G::S(*q)),
-            G::T(q) => self.apply(&G::Tdg(*q)),
-            G::Tdg(q) => self.apply(&G::T(*q)),
-            G::Sx(q) => self.apply(&G::Sxdg(*q)),
-            G::Sxdg(q) => self.apply(&G::Sx(*q)),
-            G::Rx { qubit, theta } => self.apply(&G::Rx {
-                qubit: *qubit,
-                theta: neg(theta),
-            }),
-            G::Ry { qubit, theta } => self.apply(&G::Ry {
-                qubit: *qubit,
-                theta: neg(theta),
-            }),
-            G::Rz { qubit, theta } => self.apply(&G::Rz {
-                qubit: *qubit,
-                theta: neg(theta),
-            }),
-            G::Rzz { q0, q1, theta } => self.apply(&G::Rzz {
-                q0: *q0,
-                q1: *q1,
-                theta: neg(theta),
-            }),
-            G::Rxx { q0, q1, theta } => self.apply(&G::Rxx {
-                q0: *q0,
-                q1: *q1,
-                theta: neg(theta),
-            }),
-            G::Cp { q0, q1, theta } => self.apply(&G::Cp {
-                q0: *q0,
-                q1: *q1,
-                theta: neg(theta),
-            }),
-            G::Cu1 { q0, q1, theta } => self.apply(&G::Cu1 {
-                q0: *q0,
-                q1: *q1,
-                theta: neg(theta),
-            }),
-            G::Crx {
-                control,
-                target,
-                theta,
-            } => self.apply(&G::Crx {
-                control: *control,
-                target: *target,
-                theta: neg(theta),
-            }),
-            G::Cry {
-                control,
-                target,
-                theta,
-            } => self.apply(&G::Cry {
-                control: *control,
-                target: *target,
-                theta: neg(theta),
-            }),
-            G::Crz {
-                control,
-                target,
-                theta,
-            } => self.apply(&G::Crz {
-                control: *control,
-                target: *target,
-                theta: neg(theta),
-            }),
-            G::P { qubit, lam } => self.apply(&G::P {
-                qubit: *qubit,
-                lam: neg(lam),
-            }),
-            G::U1 { qubit, lam } => self.apply(&G::U1 {
-                qubit: *qubit,
-                lam: neg(lam),
-            }),
-            G::U {
-                qubit,
-                theta,
-                phi,
-                lam,
-            }
-            | G::UGate {
-                qubit,
-                theta,
-                phi,
-                lam,
-            } => self.apply(&G::U {
-                qubit: *qubit,
-                theta: neg(theta),
-                phi: neg(lam),
-                lam: neg(phi),
-            }),
-            G::U2 { qubit, phi, lam } => self.apply(&G::U {
-                qubit: *qubit,
-                theta: GateParam::Fixed(-std::f64::consts::FRAC_PI_2),
-                phi: neg(lam),
-                lam: neg(phi),
-            }),
-            G::Cu3 {
-                control,
-                target,
-                theta,
-                phi,
-                lam,
-            } => self.apply(&G::Cu3 {
-                control: *control,
-                target: *target,
-                theta: neg(theta),
-                phi: neg(lam),
-                lam: neg(phi),
-            }),
-            G::Cu {
-                control,
-                target,
-                theta,
-                phi,
-                lam,
-                gamma,
-            } => self.apply(&G::Cu {
-                control: *control,
-                target: *target,
-                theta: neg(theta),
-                phi: neg(lam),
-                lam: neg(phi),
-                gamma: neg(gamma),
-            }),
-            G::Csx(c, t) => {
-                self.check_operands(gate)?;
-                let par = self.use_parallel();
-                kernels::apply_controlled_1q(&mut self.data, self.n, *c, *t, &gates::sxdg(), par);
-                Ok(())
-            }
-            G::Rccx(..) | G::Rc3x(..) | G::C3sqrtx(..) => {
-                self.check_operands(gate)?;
-                for part in gate.lowering().into_iter().flatten().rev() {
-                    self.apply_inverse(&part)?;
-                }
+            G::Barrier(_) | G::Measure { .. } | G::MeasureAll => {
+                out.push(gate.clone());
                 Ok(())
             }
             // As in `apply`: the call's own angles first, then its expansion,
@@ -818,17 +668,36 @@ impl Statevector {
                 }
                 let expanded = call.expand(&[]).map_err(|_| SimError::NonFiniteAmplitude)?;
                 for g in expanded.iter().rev() {
-                    self.apply_inverse(g)?;
+                    self.push_inverse(g, out)?;
                 }
                 Ok(())
             }
-            // `GateInstruction` is `#[non_exhaustive]`; the vocabulary test of
-            // the adjoint (`apply_inverse_undoes_every_instruction_kind`) flags
-            // a gate missing here.
-            other => Err(SimError::UnsupportedInstruction {
-                instruction: format!("{other:?}"),
+            _ => gate.push_inverse(0, out).map_err(|e| match e {
+                CircuitError::ParamIndexOutOfBounds { index, .. } => {
+                    SimError::UnboundParameter { index }
+                }
+                CircuitError::UnknownExpression => SimError::UnboundExpression,
+                _ => SimError::UnsupportedInstruction {
+                    instruction: format!("{gate:?}"),
+                },
             }),
         }
+    }
+
+    /// Apply the inverse `U†` of one circuit instruction in place: the
+    /// instructions [`push_inverse`](Self::push_inverse) gives, in order. For
+    /// the tests; the adjoint builds each inverse once and applies it to both
+    /// of its states.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`apply`](Self::apply) on the same instruction; the state is
+    /// untouched when the instruction itself is invalid.
+    #[cfg(test)]
+    pub(crate) fn apply_inverse(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
+        let mut inverse = Vec::new();
+        self.push_inverse(gate, &mut inverse)?;
+        inverse.iter().try_for_each(|part| self.apply(part))
     }
 
     /// Apply a run of consecutive diagonal operators in roughly one main-memory
@@ -1025,7 +894,7 @@ mod tests {
     /// one after the other they leave a generic state where it was. The list
     /// must cover every kind, so a gate added to `polypus-circuit` fails here
     /// until the adjoint can step back through it (the wildcard arm of
-    /// `apply_inverse` would otherwise make it `UnsupportedInstruction` only
+    /// `push_inverse` would otherwise make it `UnsupportedInstruction` only
     /// at run time).
     #[test]
     fn apply_inverse_undoes_every_instruction_kind() {
@@ -1088,6 +957,24 @@ mod tests {
                 num_qubits: 2
             })
         );
+    }
+
+    /// An inverse of several instructions (`csx`'s is `h`, `cp`, `h` on its
+    /// target) is checked whole before any part is applied: a control outside
+    /// the register fails with the state untouched, as `apply` leaves it.
+    #[test]
+    fn an_invalid_several_part_inverse_leaves_the_state_untouched() {
+        let start = generic_state();
+        let n = start.n;
+        let mut sv = start.clone();
+        assert_eq!(
+            sv.apply_inverse(&GateInstruction::Csx(n, 0)),
+            Err(SimError::QubitIndexOutOfRange {
+                qubit: n,
+                num_qubits: n
+            })
+        );
+        assert_eq!(sv, start);
     }
 
     /// The classifier must accept exactly the nine instructions `apply`

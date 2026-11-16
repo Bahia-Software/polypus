@@ -34,6 +34,7 @@ from . import (
     _FloatVector,
     _Method,
     _Options,
+    _Target,
     _TrainCallback,
 )
 
@@ -49,6 +50,7 @@ __all__ = [
     "load",
     "expval",
     "jacobian",
+    "kernel_matrix",
     "Dataset",
     "PauliTerm",
     "Observable",
@@ -385,6 +387,28 @@ def jacobian(
     npt.NDArray[np.float64], tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]
 ]: ...
 
+# The fidelity kernel |<phi(x1_i)|phi(x2_j)>|^2 of an Encoder's states: shape
+# (len(x1), len(x2)), or (len(x1), len(x1)) and symmetric for x2=None.
+def kernel_matrix(
+    encoder: Encoder,
+    x1: Union[_DatasetRows, Dataset],
+    x2: Optional[Union[_DatasetRows, Dataset]] = None,
+    *,
+    shots: int = 1024,
+    infrastructure: str = "local",
+    n_qpus: int = 1,
+    nodes: int = 1,
+    cores_per_qpu: int = 2,
+    walltime: Optional[str] = None,
+    options: Optional[dict[str, str]] = None,
+    sim_method: str = "automatic",
+    noise_model: Optional[NoiseModel] = None,
+    backend: Optional[str] = None,
+    # Omitted: drawn and logged, not returned; must be omitted on "qmio".
+    seed: Optional[int] = None,
+    exact: bool = False,
+) -> npt.NDArray[np.float64]: ...
+
 @final
 class ExactResult:
     # One `dict[str, float]` per row, keyed like counts.
@@ -444,10 +468,11 @@ def train(
     n_qpus: int,
     dimensions: int,
     expectation_function: _QmlObjective,
-    infrastructure: str,
-    nodes: int,
-    cores_per_qpu: int,
-    id: str,
+    # Required unless `target` is given; `id` is always required.
+    infrastructure: Optional[str] = None,
+    nodes: Optional[int] = None,
+    cores_per_qpu: Optional[int] = None,
+    id: Optional[str] = None,
     sim_method: str = "automatic",
     noise_model: Optional[NoiseModel] = None,
     backend: str = "aer",
@@ -459,6 +484,7 @@ def train(
     initial_point: Optional[_FloatVector] = None,
     final_shots: Optional[SupportsIndex] = None,
     callback: Optional[_TrainCallback] = None,
+    target: Optional[_Target] = None,
 ) -> TrainResult: ...
 def predict(
     feature_map: QuantumCircuit,
@@ -466,7 +492,7 @@ def predict(
     x: _FeatureRows,
     params: _FloatVector,
     shots: int,
-    infrastructure: str,
+    infrastructure: Optional[str] = None,  # required unless `target` is given
     n_qpus: int = 1,
     nodes: int = 1,
     cores_per_qpu: int = 2,
@@ -475,4 +501,6 @@ def predict(
     backend: str = "aer",
     seed: Optional[int] = None,
     walltime: Optional[str] = None,
+    *,
+    target: Optional[_Target] = None,
 ) -> RunResult: ...

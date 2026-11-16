@@ -25,7 +25,7 @@
 use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
 use crate::observer::{IterationObserver, IterationReport};
-use crate::outcome::{OptimizationOutcome, Optimizer};
+use crate::outcome::{OptimizationOutcome, Optimizer, StopReason};
 use crate::rng::with_seeded_rng;
 use crate::util::{
     check_initial_point, check_oracle_len, measure_last_point, wrap_angle, BestMeasured,
@@ -273,6 +273,7 @@ impl AlgorithmRotosolve {
         let mut previous_best = f64::NAN;
         let mut stagnant = 0u32;
         let mut converged = false;
+        let mut stop_reason = StopReason::IterationBudget;
         let mut step = 0u64;
 
         'sweeps: for sweep in 1..=sweeps {
@@ -345,6 +346,7 @@ impl AlgorithmRotosolve {
                              than {tolerance}"
                         );
                         converged = true;
+                        stop_reason = StopReason::FitnessTolerance;
                     }
                     last = converged || sweep == sweeps;
                 }
@@ -367,6 +369,7 @@ impl AlgorithmRotosolve {
                     // The point this step reached stays unmeasured, unless this
                     // was the last step anyway.
                     converged = false;
+                    stop_reason = StopReason::Callback;
                     break 'sweeps;
                 }
                 if last {
@@ -384,6 +387,7 @@ impl AlgorithmRotosolve {
             iterations_run: fitness_history.len(),
             converged,
             fitness_history,
+            stop_reason,
         })
     }
 }

@@ -44,7 +44,7 @@ pub use circuit::{BoundCircuit, ForeignCircuit};
 pub use error::{BackendError, InfrastructureError};
 pub use mem_budget::{
     check_statevector_fits, max_statevector_concurrency, BudgetSource, InsufficientMemory,
-    MemBudget,
+    InsufficientMemoryForResult, MemBudget,
 };
 pub use params::RunParams;
 pub use planner::{

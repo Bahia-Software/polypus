@@ -24,6 +24,7 @@ from . import ask_tell, shor
 # exactly as before. The submodule import also binds the name ``polypus`` (the
 # extension) in this namespace, used just below.
 from .polypus import *  # noqa: F401,F403
+from .polypus import _target_of  # noqa: F401  (private test helper, not in __all__)
 
 __doc__ = polypus.__doc__  # noqa: F405
 if hasattr(polypus, "__all__"):  # noqa: F405
