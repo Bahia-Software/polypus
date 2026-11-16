@@ -885,8 +885,14 @@ class TestBoolIsNotACount:
             lambda a, flag: a.hardware_efficient(flag),
             lambda a, flag: a.real_amplitudes(flag),
             lambda a, flag: a.strongly_entangling(1, ranges=[flag]),
+            lambda a, flag: a.simplified_two_design(flag),
         ],
-        ids=["hardware-efficient", "real-amplitudes", "strongly-entangling-ranges"],
+        ids=[
+            "hardware-efficient",
+            "real-amplitudes",
+            "strongly-entangling-ranges",
+            "simplified-two-design",
+        ],
     )
     def test_a_builder_count(self, build, flag):
         from polypus.qml import Ansatz
