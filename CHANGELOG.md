@@ -232,6 +232,11 @@ Entries were curated from the Conventional Commits history. Releases before
   before on the 12–16 threads measured, and on wider nodes a batch smaller
   than the thread count may lose more (#593). The results are the same bit
   for bit (#560).
+- For contributors: the Hygiene check also scans the messages of the commits
+  it analyses (merge base to head on pull requests, base to head on merge-queue
+  groups and pushes to `main`) with the same public rules as file content, plus
+  the private patterns on `main`, and flags internal `bahia<N>` host names
+  alongside login-node names. Commit messages admit no allow-list exceptions.
 
 ### Fixed
 - `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a
