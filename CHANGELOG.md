@@ -39,17 +39,6 @@ Entries were curated from the Conventional Commits history. Releases before
   `#[non_exhaustive]`), raised in Python as
   `polypus.InsufficientMemoryError` when a result leaves no room for its
   statevectors. See `examples/qml_kernel_svc.py` (#504).
-- Typed execution targets: `polypus.Aer`, `Native`, `Cunqa`, `Qmio` and
-  `Registered`, each checking its own fields when built (except `sim_method`,
-  which Aer checks when the run starts), and a `target=`
-  keyword on `run_quantum_circuit`, `train`, `qml.train` and `qml.predict`
-  that replaces `infrastructure`, `backend` and their provider arguments
-  (passing one of those next to it is a `ConfigurationError`, except
-  `backend` or `sim_method` left at its default). Strings stay as shorthand; every accepted
-  `infrastructure`/`backend` spelling now resolves through one alias table
-  with unchanged errors. `infrastructure` (and, for `train`/`qml.train`,
-  `nodes`, `cores_per_qpu` and `id`) now defaults to `None` so a call with
-  `target=` can omit them; without `target=` they are still required (#434).
 - `polypus.qml.Ansatz.strongly_entangling(reps, ranges=None, entangler="cx")`,
   PennyLane's `StronglyEntanglingLayers`: per layer, a general rotation on
   every qubit, emitted as `Rz(φ)`, `Ry(θ)`, `Rz(ω)`, in that order, so the
@@ -81,8 +70,8 @@ Entries were curated from the Conventional Commits history. Releases before
   blocks. See `examples/qml_expval_jacobian_loop.py`.
 - `polypus.torch.QuantumLayer(model, *, initial_params=None, seed=None, ...)`,
   a `torch.nn.Module` over a native `qml.Model` for hybrid quantum-classical
-  networks: forward = `qml.expval` over the batch, backward = the
-  vector-Jacobian product of `qml.jacobian` (parameters, inputs or both), so
+  networks: forward = `qml.expval` over the batch, backward = one `qml.vjp`
+  call with the incoming gradient (parameters, inputs or both; #559), so
   it trains with any `torch.optim` optimizer; float32 networks work as is (the
   computation is float64 on the CPU), and a `seed` derives one per backend call
   so a training replays. `polypus.torch.from_trained(trained, ...)` starts one
@@ -111,6 +100,27 @@ Entries were curated from the Conventional Commits history. Releases before
   of `qml.expval`), and pickling of `Model`, so `copy.deepcopy` works: it
   travels as the JSON of its spec, rebuilt through the checks of `qml.load`
   (#502).
+- `polypus.qml.vjp(model, x, params, cotangent, *, wrt="params", ...)`, the
+  vector-Jacobian product of `qml.jacobian` with a `(rows, observables)`
+  cotangent, what a reverse-mode backward pass needs: `(num_params,)` summed
+  over the rows for `wrt="params"`, `(rows, features)` for `"inputs"`, the
+  tuple for `"both"`. With `exact=True` it takes one adjoint run per row
+  whatever the number of observables (`qml.jacobian` takes one per row and
+  observable), so the exact backward pass of `polypus.torch.QuantumLayer`,
+  which now calls it, is up to `K` times cheaper for a `K`-observable readout;
+  with shots it runs `qml.jacobian`'s circuits and gives its contraction for
+  the same `seed`. The layer's gradients move in the last bits, no more:
+  exactly, they come from one combined observable instead of one run per
+  observable, and with shots the parameter product is summed in row order.
+  The cotangent's shape is checked right after `params` (a
+  `polypus.ConfigurationError`, as is a complex one) and its values are read
+  as `x`'s are (a string or `None` is the same `TypeError`); a `NaN` or an
+  infinity in it propagates as through the contraction, and changes only its
+  own row's route. `qml.jacobian` does not change. In `polypus-qml`:
+  `Jacobian::vjp`, `JacobianBlock::vjp_runs`/`num_vjp_runs`/
+  `vjp_weight_bounds`/`vjp_from_adjoint` (and
+  `ExpectationJacobian`'s), `Vjp` and `DiagonalObservable::weight_bound`.
+  `benchmarks/bench_vjp.py` measures it (#559, ADR 0008).
 - A call trace for `polypus.train` and `polypus.run_quantum_circuit`
   (contract C-12): the keyword-only `trace=` (a path to a new file) or
   `POLYPUS_CALL_TRACE=<directory>` writes one JSON Lines line per planner
@@ -219,24 +229,6 @@ Entries were curated from the Conventional Commits history. Releases before
   0.6 to 0.7, which raised its MSRV. Default features keep Rust 1.85. The
   QMIO reply-size cap is still checked after the reply is received; 0.7 has
   no receive size limit yet (#383).
-- Exact native QML gradients are faster where a batch of them used to take the
-  parallel gate kernels (from 12 qubits on, on the 16-thread node measured): a
-  batch of two or more adjoint runs (`NativeStatevectorBackend::run_adjoint`)
-  now runs each one on the sequential gate kernels and leaves the cores to the
-  runs themselves. Forking every short pass of a run onto the shared pool cost
-  more than it saved, and that made the adjoint's cost jump from 10 to 12
-  qubits. On 16 threads with 8 rows, `qml.jacobian(..., exact=True)` is
-  2.3–6.6× faster at 12 qubits and 2.5–3.9× faster at 14, and an exact
-  `Model.fit` epoch is 1.3–2.0× faster (`benchmarks/bench_adjoint.py`). From
-  about 18 qubits on, a batch of two runs can be up to ~1.4× slower than
-  before on the 12–16 threads measured, and on wider nodes a batch smaller
-  than the thread count may lose more (#593). The results are the same bit
-  for bit (#560).
-- For contributors: the Hygiene check also scans the messages of the commits
-  it analyses (merge base to head on pull requests, base to head on merge-queue
-  groups and pushes to `main`) with the same public rules as file content, plus
-  the private patterns on `main`, and flags internal `bahia<N>` host names
-  alongside login-node names. Commit messages admit no allow-list exceptions.
 
 ### Fixed
 - `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a

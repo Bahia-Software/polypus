@@ -78,6 +78,19 @@ impl DiagonalObservable {
         DiagonalObservable { terms }
     }
 
+    /// `Σ |c|` over the terms, summed in order: a bound on every eigenvalue,
+    /// `|weight(b)| ≤ weight_bound()` for every basis state `b`, rounding
+    /// included (each partial sum of [`weight`](Self::weight) is bounded by the
+    /// matching partial sum here, rounding being monotonic). Finite exactly when
+    /// no coefficient is non-finite and the sum does not overflow, so a finite
+    /// bound means no eigenvalue is non-finite: a simulator that refuses to
+    /// weigh a state by a non-finite value will take this observable.
+    pub fn weight_bound(&self) -> f64 {
+        self.terms
+            .iter()
+            .fold(0.0, |sum, &(coefficient, _)| sum + coefficient.abs())
+    }
+
     /// The eigenvalue of basis state `basis_state` (qubit `q` is bit `q`, the
     /// index of a statevector's amplitudes): `Σ c · (−1)^{|b ∧ mask|}` over the
     /// terms, summed in order. Pure, so it can be called from several threads.
@@ -161,6 +174,32 @@ mod tests {
         for b in 0..4 {
             assert_eq!(combined.weight(b), 3.0 * z0.weight(b) - 0.5 * z1.weight(b));
         }
+    }
+
+    #[test]
+    fn the_weight_bound_bounds_every_eigenvalue_and_flags_an_overflow() {
+        let observable = DiagonalObservable::from_terms([
+            (0.5, [0usize, 2].as_slice()),
+            (-1.5, [1usize].as_slice()),
+            (2.0, [].as_slice()),
+        ])
+        .unwrap();
+        assert_eq!(observable.weight_bound(), 4.0);
+        for b in 0..8 {
+            assert!(observable.weight(b).abs() <= observable.weight_bound());
+        }
+        // Finite coefficients whose sum overflows: the bound says so, and so
+        // does the eigenvalue it bounds.
+        let z0 = DiagonalObservable::from_terms([(1.0, [0usize].as_slice())]).unwrap();
+        let huge = DiagonalObservable::combine(&[1e308, 1e308], &[z0.clone(), z0.clone()]);
+        assert!(!huge.weight_bound().is_finite());
+        assert!(!huge.weight(0).is_finite());
+        // A large but representable sum stays finite.
+        let large = DiagonalObservable::combine(&[1e307, -1e307], &[z0.clone(), z0.clone()]);
+        assert!(large.weight_bound().is_finite());
+        // A non-finite coefficient makes the bound non-finite.
+        let nan = DiagonalObservable::combine(&[f64::NAN], &[z0]);
+        assert!(nan.weight_bound().is_nan());
     }
 
     #[test]
