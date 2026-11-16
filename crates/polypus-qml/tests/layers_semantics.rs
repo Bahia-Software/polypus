@@ -3,7 +3,7 @@
 //! instruction-list golden tests, but the actual quantum state and its
 //! measured expectations.
 //!
-//! Nine checks:
+//! Ten checks:
 //! 1. the [`AngleEncoder`] produces the expected tensor-product state;
 //! 2. the [`ConvBlock::Cartan`] block (including the synthesized `ryy`) matches
 //!    an independently hand-applied gate sequence on every canonical basis
@@ -21,11 +21,14 @@
 //!    `cos(x₀)·cos(x₀·x₁)` — the data non-linearity that motivates the layer;
 //! 8. the `BasisEncoder` puts a binary sample on a **computational basis
 //!    state** — a single unit amplitude, matching an independently
-//!    hand-applied `X` on every set bit.
+//!    hand-applied `X` on every set bit;
 //! 9. the [`StronglyEntanglingAnsatz`] applies PennyLane's
 //!    `Rot(φ, θ, ω) = Rz(ω)·Ry(θ)·Rz(φ)` with its parameters in `(φ, θ, ω)`
 //!    order: the one-qubit state matches the closed-form first column of
-//!    `Rot`'s matrix.
+//!    `Rot`'s matrix;
+//! 10. the [`SimplifiedTwoDesignAnsatz`] block (initial `Ry`, `CZ`, then `Ry`
+//!     on both qubits of the pair) matches a hand-derived closed form of the
+//!     two-qubit state, amplitude by amplitude.
 //!
 //! `polypus-sim` enters only as a dev-dependency — the crate's public API never
 //! executes a circuit.
@@ -40,7 +43,7 @@ use polypus_circuit::{Fixed, GateInstruction};
 use polypus_qml::{
     ConvBlock, ConvLayer, Dataset, Decision, Entanglement, Entangler, HardwareEfficientAnsatz,
     IqpEncoder, Layer, Loss, Observable, Pauli, PauliString, PoolBlock, PoolLayer, QmlProblem,
-    QuantumModel, Readout, RotationAxis, StronglyEntanglingAnsatz,
+    QuantumModel, Readout, RotationAxis, SimplifiedTwoDesignAnsatz, StronglyEntanglingAnsatz,
 };
 use polypus_sim::{Simulator, SplitMix64, Statevector, StatevectorSimulator, C64};
 
@@ -568,5 +571,57 @@ fn strongly_entangling_rotation_is_pennylane_s_rot() {
     ];
     for (a, b) in actual.amplitudes().iter().zip(expected) {
         assert!(close(*a, b), "amplitude mismatch: {a} vs {b}");
+    }
+}
+
+/// (10) One block of the simplified 2-design on two qubits, against a closed
+/// form worked out by hand rather than from the layer's own gate list.
+///
+/// With `cₖ = cos(θₖ/2)`, `sₖ = sin(θₖ/2)`: the initial `Ry(θ₀) ⊗ Ry(θ₁)`
+/// gives `u₀ ⊗ u₁` with `uₖ = (cₖ, sₖ)`; `CZ` flips the sign of `|11⟩`, which is
+/// `u₀ ⊗ u₁ − 2·s₀·s₁·|1⟩|1⟩`; the block's `Ry(θ₂)` on qubit 0 and `Ry(θ₃)` on
+/// qubit 1 then turn `u₀` into `(cos((θ₀+θ₂)/2), sin((θ₀+θ₂)/2))`, `u₁` into
+/// the same with `θ₁ + θ₃`, and each `|1⟩` into `(−sₖ, cₖ)`. So the amplitude of
+/// qubit 0 in `i` and qubit 1 in `j` (index `i + 2j`) is
+///
+/// ```text
+/// w₀(i)·w₁(j) − 2·s₀·s₁·r₂(i)·r₃(j),
+/// w₀ = (cos((θ₀+θ₂)/2), sin((θ₀+θ₂)/2)),  w₁ = (cos((θ₁+θ₃)/2), sin((θ₁+θ₃)/2)),
+/// r₂ = (−s₂, c₂),                          r₃ = (−s₃, c₃).
+/// ```
+///
+/// Binding the block's parameters to the other qubit, or the `CZ` after the
+/// block's `Ry` instead of before, changes the state.
+#[test]
+fn simplified_two_design_block_matches_the_closed_form() {
+    // An Ry encoder at x = 0 is the identity, so only the ansatz acts.
+    let model = QuantumModel::new(2)
+        .angle_encoder(RotationAxis::Ry)
+        .layer(Layer::SimplifiedTwoDesign(SimplifiedTwoDesignAnsatz::new(
+            1,
+        )))
+        .readout(z0_readout(Decision::Raw))
+        .compile(2)
+        .unwrap();
+    let theta = [0.7, -1.3, 2.1, 0.4];
+    assert_eq!(model.num_params(), theta.len());
+    let circuit = model.bind(&[0.0, 0.0], &theta).unwrap();
+    let actual = StatevectorSimulator::new().run(&circuit).unwrap();
+
+    let (s0, s1) = ((theta[0] / 2.0).sin(), (theta[1] / 2.0).sin());
+    let (c2, s2) = ((theta[2] / 2.0).cos(), (theta[2] / 2.0).sin());
+    let (c3, s3) = ((theta[3] / 2.0).cos(), (theta[3] / 2.0).sin());
+    let half = |a: f64| [(a / 2.0).cos(), (a / 2.0).sin()];
+    let (w0, w1) = (half(theta[0] + theta[2]), half(theta[1] + theta[3]));
+    let (r2, r3) = ([-s2, c2], [-s3, c3]);
+    for j in 0..2 {
+        for i in 0..2 {
+            let expected = C64::new(w0[i] * w1[j] - 2.0 * s0 * s1 * r2[i] * r3[j], 0.0);
+            let a = actual.amplitudes()[i + 2 * j];
+            assert!(
+                close(a, expected),
+                "amplitude of |q1={j} q0={i}⟩: {a} vs {expected}"
+            );
+        }
     }
 }

@@ -182,6 +182,13 @@ fn scalar_models(readout: Readout) -> Vec<(QuantumModel, usize, &'static str)> {
             "re-uploading",
         ),
         (
+            encoded(RotationAxis::Ry)
+                .simplified_two_design(2)
+                .readout(readout.clone()),
+            4,
+            "simplified 2-design",
+        ),
+        (
             QuantumModel::new(4)
                 .iqp_encoder()
                 .layer(real_amplitudes(1))
