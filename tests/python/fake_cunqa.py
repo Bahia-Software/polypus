@@ -9,7 +9,8 @@ No CUNQA is installed in CI. ``FakeCunqa`` stands in for the four functions
   arity CUNQA would reject raises ``TypeError`` here too;
 * ``qraise`` creates a family of ``n`` QPUs, ``get_QPUs`` returns them in order,
   ``qdrop`` releases it; using a family that was never raised or was already
-  dropped fails, like a real allocation that is gone;
+  dropped fails, like a real allocation that is gone, and so does a QPU of a
+  family raised again under the same name;
 * ``run`` simulates the circuit with Qiskit Aer, honouring ``shots``,
   ``method`` and ``seed`` the way CUNQA's Aer-based vQPUs consume them
   (``seed`` -> ``seed_simulator``), and ``gather`` returns objects with a
@@ -137,14 +138,16 @@ class FakeCunqa:
     ``(name, bound arguments)`` in order; ``runs`` records each ``run`` as a dict
     with the circuit, the QPU and the run options."""
 
-    def __init__(self, tag="3.1.0", run_error=None, converter=False):
+    def __init__(self, tag="3.1.0", run_error=None, converter=False, gather_error=None):
         self.tag = tag
         self.signatures = {n: signature(p) for n, p in SIGNATURES[tag].items()}
         self.families = {}
+        self.live = set()
         self.dropped = []
         self.calls = []
         self.runs = []
         self.run_error = run_error
+        self.gather_error = gather_error
         # With `converter`, the fake also publishes `cunqa.circuit.ir` and its
         # `run` converts each circuit with `to_ir` first, as CUNQA 3.x does.
         self.converter = converter
@@ -185,7 +188,7 @@ class FakeCunqa:
     def _live(self, family):
         if family not in self.families:
             raise RuntimeError(f"no CUNQA family named {family!r} was raised")
-        if family in self.dropped:
+        if family not in self.live:
             raise RuntimeError(f"CUNQA family {family!r} was already dropped")
         return self.families[family]
 
@@ -193,9 +196,10 @@ class FakeCunqa:
     def qraise(self, *args, **kwargs):
         a = self._bind("qraise", args, kwargs)
         family = a["family"] or f"family-{len(self.families)}"
-        if family in self.families and family not in self.dropped:
+        if family in self.live:
             raise RuntimeError(f"CUNQA family {family!r} is already raised")
         self.families[family] = [FakeQPU(family, i) for i in range(a["n"])]
+        self.live.add(family)
         return family
 
     # cunqa.qpu.get_QPUs
@@ -238,6 +242,8 @@ class FakeCunqa:
     # cunqa.qjob.gather
     def gather(self, *args, **kwargs):
         a = self._bind("gather", args, kwargs)
+        if self.gather_error is not None:
+            raise self.gather_error
         for job in a["qjobs"]:
             if job.error is not None:
                 raise job.error
@@ -252,6 +258,7 @@ class FakeCunqa:
             families = [families]
         for family in families:
             self._live(family)
+            self.live.discard(family)
             self.dropped.append(family)
 
     def names(self):

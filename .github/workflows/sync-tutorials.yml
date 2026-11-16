@@ -23,6 +23,10 @@ jobs:
       - name: Checkout polypus (source of truth for tutorials/)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
           path: polypus
           persist-credentials: false
 

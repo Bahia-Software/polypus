@@ -240,6 +240,38 @@ class TestPrimitiveTypes:
         assert "snippet.py:12: error" in report, report
 
 
+class TestKernelTypes:
+    """`qml.kernel_matrix` takes an `Encoder`, rows or a `Dataset` for `x1`
+    and, optionally, `x2`, and returns a `float64` array."""
+
+    _HEAD = "import numpy as np\nimport numpy.typing as npt\nfrom polypus import qml\n"
+
+    def test_it_returns_an_array_with_or_without_x2(self, tmp_path):
+        source = self._HEAD + (
+            'encoder = qml.Encoder(2).iqp_encoder("linear")\n'
+            "gram: npt.NDArray[np.float64] = qml.kernel_matrix(encoder, [[0.1, 0.2]])\n"
+            "cross: npt.NDArray[np.float64] = qml.kernel_matrix(\n"
+            "    encoder, np.array([[0.1, 0.2]]), qml.Dataset([[0.3, 0.4]]), exact=True\n"
+            ")\n"
+            "sampled: npt.NDArray[np.float64] = qml.kernel_matrix(\n"
+            "    encoder, [[0.1, 0.2]], None, shots=64, seed=1\n"
+            ")\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+    def test_only_an_encoder_type_checks(self, tmp_path):
+        # Both are a TypeError at run time.
+        source = self._HEAD + (
+            "qml.kernel_matrix(qml.Ansatz(1).real_amplitudes(1), [[0.1]])\n"
+            'qml.kernel_matrix(qml.Encoder(1), [[0.1]], shots="many")\n'
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 1, report
+        assert "snippet.py:4: error" in report, report
+        assert "snippet.py:5: error" in report, report
+
+
 class TestAskTellTypes:
     def test_only_the_optuna_adapter_types_close(self, tmp_path):
         # `from_optuna` returns an `OptunaAskTell`, the other adapters an

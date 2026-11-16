@@ -31,7 +31,9 @@ rand = { workspace = true }
 rayon = { workspace = true }
 log = { workspace = true }
 # --- optional, only compiled with `--features qmio` ---
-zeromq = { version = "0.6", optional = true }
+# zeromq 0.7 needs Rust 1.89, so the qmio feature has a higher minimum than
+# the workspace `rust-version`; the `msrv` CI job checks it on 1.89.
+zeromq = { version = "0.7", optional = true }
 serde-pickle = { version = "1.2", optional = true }
 serde_json = { workspace = true, optional = true }
 tokio = { version = "1.44", features = ["rt", "rt-multi-thread", "time", "net", "sync"], optional = true }

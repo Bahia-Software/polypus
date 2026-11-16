@@ -611,6 +611,55 @@ def test_an_exact_adjoint_jacobian_stops_inside_a_block():
     )
 
 
+# `qml.kernel_matrix` (contract C-11, "Quantum kernels"). Sampled, it runs its
+# pairs block after block like `qml.jacobian`: 1200 rows of 12 qubits is
+# 720,600 circuits. Exact, it is one call of inner products on rayon's threads
+# with no block to check between, so the calling thread watches for Ctrl+C
+# while they run: 1200 states of 16 qubits (1 MiB each) and their 720,600 inner
+# products last far longer than the deadline. The exact child runs under a
+# 256 MiB budget: the 1200 x 1200 matrix takes 11 MiB of it and the rest holds
+# about 245 states, far fewer than the 1200 rows, so it works in tiles (the
+# Ctrl+C is seen there too) and never holds more than 256 MiB of state, where
+# the whole set would take 1.2 GiB. Tiles simulate the columns again for each
+# tile, so the work lasts even longer. The warm-up is a tiny kernel.
+_KERNEL_CHILD = r"""
+import sys, time
+import polypus
+from polypus import qml
+
+qml.kernel_matrix(qml.Encoder(2).iqp_encoder(), [[0.1, 0.2]], exact=EXACT)
+
+WIDTH = 16 if EXACT else 12
+encoder = qml.Encoder(WIDTH).iqp_encoder()
+x = [[0.05 * ((i + j) % 11) for j in range(WIDTH)] for i in range(1200)]
+
+print("READY", flush=True)
+start = time.time()
+try:
+    qml.kernel_matrix(encoder, x, exact=EXACT)
+    print("COMPLETED", flush=True)
+except KeyboardInterrupt:
+    print(f"KEYBOARDINTERRUPT {time.time() - start:.3f}", flush=True)
+except BaseException as exc:
+    print(f"OTHER {type(exc).__name__}", flush=True)
+    sys.exit(1)
+"""
+
+
+@pytest.mark.parametrize("exact", [True, False], ids=["exact", "sampled"])
+def test_native_qml_kernel_matrix_responds_to_sigint_promptly(exact):
+    env = {**os.environ, "POLYPUS_MEM_BUDGET": "256MiB"} if exact else None
+    _assert_responds_to_sigint_promptly(
+        _KERNEL_CHILD.replace("EXACT", str(exact)),
+        env=env,
+        failure_hint=(
+            f"qml.kernel_matrix(exact={exact}) — the block loop or the watcher "
+            "of the exact inner products is likely not checking the interrupt "
+            "guard, or the GIL is held around them"
+        ),
+    )
+
+
 # After a minibatched run, the optimizer's `best_fitness` is re-scored on the
 # whole training set (C-5): one full-set evaluation after the loop, the heaviest
 # single step of such a run. It must run with the GIL released, like the rest of

@@ -45,9 +45,9 @@ resolver = "3"
 [workspace.package]
 version = "0.9.0-dev"
 edition = "2021"
-# MSRV, guarded by the `msrv` CI job. Currently set by the dependency tree
-# (the qmio feature pulls `saa`, which uses edition 2024 → Cargo 1.85); the
-# workspace's own code needs far less. Bump deliberately when a dep requires it.
+# MSRV, guarded by the `msrv` CI job; the workspace's own code needs far less.
+# The `qmio` feature needs Rust 1.89 (zeromq 0.7), which the same job checks
+# separately. Bump deliberately when a dep requires it.
 rust-version = "1.85"
 authors = ["Diego Beltrán Fernández Prada <diego.fernandez@bahiasoftware.es>", "Víctor Sóñora Pombo", "Sergio Figueiras Gómez", "Miguel Boubeta Martínez", "Kevin Pérez González", "Uxía Sendón Caamaño", "Galicia Supercomputing Center (CESGA)"]
 # SPDX identifier (required by cargo-deny and crates.io). The full licence
