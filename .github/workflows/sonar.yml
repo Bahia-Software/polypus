@@ -98,6 +98,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
@@ -176,6 +181,10 @@ jobs:
       # Full history: blame data for new-code detection.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
           fetch-depth: 0
       # The Rust analyzer needs cargo on PATH.
       - name: Install Rust (rust-toolchain.toml)
