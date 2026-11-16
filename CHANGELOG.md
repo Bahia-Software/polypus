@@ -160,9 +160,11 @@ Entries were curated from the Conventional Commits history. Releases before
   more than it saved, and that made the adjoint's cost jump from 10 to 12
   qubits. On 16 threads with 8 rows, `qml.jacobian(..., exact=True)` is
   2.3–6.6× faster at 12 qubits and 2.5–3.9× faster at 14, and an exact
-  `Model.fit` epoch is 1.3–2.0× faster (`benchmarks/bench_adjoint.py`). A
-  batch of exactly two runs from about 18 qubits on can be up to ~1.4× slower
-  than before. The results are the same bit for bit (#560).
+  `Model.fit` epoch is 1.3–2.0× faster (`benchmarks/bench_adjoint.py`). From
+  about 18 qubits on, a batch of two runs can be up to ~1.4× slower than
+  before on the 12–16 threads measured, and on wider nodes a batch smaller
+  than the thread count may lose more (#593). The results are the same bit
+  for bit (#560).
 
 ### Fixed
 - `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a

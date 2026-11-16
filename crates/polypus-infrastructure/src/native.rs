@@ -614,12 +614,16 @@ pub struct AdjointTask<'a, W> {
 /// with 2 to 32 tasks in the window and 10 to 16 qubits, the parallel kernels
 /// were never faster and up to 12× slower. With two tasks they win again from
 /// about 18–22 qubits up: up to ~1.4× (measured in #560: 22 qubits, 12
-/// threads). That loss is bounded: there a lone run is only about 2× faster
-/// on the parallel kernels, so a window of two loses at most that. With four
-/// tasks or more the sequential kernels won at every point measured, up to 22
-/// qubits. So each task keeps its passes on its own thread, and the window's
-/// `par_iter` alone spreads the tasks. The bits are the same either way: the
-/// kernels and the reductions give the same result on both paths.
+/// threads), where a lone run was only about 2× faster on the parallel
+/// kernels. That figure holds for the 12–16 threads measured, not as a bound:
+/// on a wider pool a lone run gains more from the parallel kernels, so a
+/// window smaller than the pool (a small batch, or the windows the memory
+/// budget cuts a wide batch into) can lose more. Issue #593 calibrates this
+/// per window size. With four tasks or more the sequential kernels won at
+/// every point measured, up to 22 qubits. So each task keeps its passes on
+/// its own thread, and the window's `par_iter` alone spreads the tasks. The
+/// bits are the same either way: the kernels and the reductions give the same
+/// result on both paths.
 fn adjoint_parallel_threshold(window_len: usize, threshold: usize) -> usize {
     if window_len > 1 {
         usize::MAX
