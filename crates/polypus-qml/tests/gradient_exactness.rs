@@ -184,14 +184,17 @@ fn strongly_entangling_with_explicit_ranges_and_cz_keeps_the_gradient_exact() {
     }
 }
 
-/// Every `Ry` of the simplified 2-design has its own parameter, and the `CZ`
-/// of the even and odd pairs carry every qubit's rotations into the `Z₁`
-/// light cone within two blocks. Five qubits give an odd `n`, whose last
-/// position is unpaired in the even pairs and paired in the odd ones.
+/// Every `Ry` of the simplified 2-design has its own parameter. `Z₁` sees the
+/// earlier blocks through the `CZ` of the even and odd pairs; the `Z` string
+/// over every active qubit also sees the last block's rotations, which a
+/// narrower readout leaves at a zero derivative (checked only as `0 = 0`).
+/// Five qubits give an odd `n`, whose last position is unpaired in the even
+/// pairs and paired in the odd ones.
 #[test]
 fn simplified_two_design_gradient_is_exact() {
     for (num_qubits, reps) in [(4, 2), (4, 3), (5, 2)] {
-        for readout in [raw_readout(&[1]), raw_readout(&[0, 1, 2, 3])] {
+        let every_qubit: Vec<usize> = (0..num_qubits).collect();
+        for readout in [raw_readout(&[1]), raw_readout(&every_qubit)] {
             let model = encoded(num_qubits)
                 .simplified_two_design(reps)
                 .readout(readout);
