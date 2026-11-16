@@ -59,6 +59,13 @@ jobs:
             .github/scripts/test_release_check.py .github/scripts/test_publish_crates.py \
             .github/scripts/test_coverage_summary.py .github/scripts/test_mutation_report.py
 
+      # A misnamed fragment would be dropped from the release notes; towncrier
+      # refuses any file in changelog.d/ that is not a fragment or ignored.
+      - name: Changelog fragments
+        run: |
+          python -m pip install towncrier==26.9.0
+          towncrier build --draft --version next > /dev/null
+
       - name: Check (pull request, public rules)
         if: github.event_name == 'pull_request'
         env:
