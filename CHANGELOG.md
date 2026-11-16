@@ -11,6 +11,8 @@ Entries were curated from the Conventional Commits history. Releases before
 
 ## [Unreleased]
 
+<!-- towncrier release notes start -->
+
 ### Added
 - `polypus.qml.kernel_matrix(encoder, x1, x2=None, *, ...)`, the fidelity
   quantum kernel `K[i, j] = |⟨φ(x1_i)|φ(x2_j)⟩|²` of a native `Encoder` as a

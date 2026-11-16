@@ -153,3 +153,47 @@ relative_files = true
 [tool.coverage.paths]
 polypus = ["python/polypus", "*/site-packages/polypus"]
 polypus_python = ["python/polypus_python", "*/site-packages/polypus_python"]
+
+# Changelog fragments: one file per change in changelog.d/, assembled into
+# CHANGELOG.md by the release pull request (docs/RELEASING.md). Run with
+# `pipx run towncrier==26.9.0`; it is not a dev dependency.
+[tool.towncrier]
+directory = "changelog.d"
+filename = "CHANGELOG.md"
+start_string = "<!-- towncrier release notes start -->\n"
+title_format = "## [{version}] - {project_date}"
+template = "changelog.d/template.md.j2"
+orphan_prefix = "+"
+issue_format = ""
+wrap = false
+underlines = ["", "", ""]
+
+[[tool.towncrier.type]]
+directory = "added"
+name = "Added"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "changed"
+name = "Changed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "deprecated"
+name = "Deprecated"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "removed"
+name = "Removed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "fixed"
+name = "Fixed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "documentation"
+name = "Documentation"
+showcontent = true
