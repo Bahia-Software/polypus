@@ -1,0 +1,12 @@
+{#- One `### Type` subsection per non-empty type, in the order of
+    [[tool.towncrier.type]]; each fragment is one bullet whose continuation
+    lines towncrier indents under it. Issue references stay in the prose. -#}
+{%- for section, _ in sections.items() %}
+{%- for category, val in definitions.items() if category in sections[section] %}
+### {{ definitions[category]['name'] }}
+{% for text, values in sections[section][category].items() -%}
+- {{ text }}
+{% endfor %}
+
+{% endfor %}
+{%- endfor %}

@@ -19,5 +19,5 @@
 ## Checklist
 
 - [ ] The checks in `docs/CONTRIBUTING.md` pass locally.
-- [ ] `CHANGELOG.md` updated if the change is user-visible.
+- [ ] A changelog fragment in `changelog.d/` if the change is user-visible (`CHANGELOG.md` itself is only edited by release pull requests).
 - [ ] A new dependency, if any, is proposed explicitly above.

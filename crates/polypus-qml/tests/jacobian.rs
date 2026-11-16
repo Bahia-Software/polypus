@@ -784,3 +784,114 @@ fn no_samples_is_an_empty_jacobian() {
     assert_eq!(empty.params(), Some(&[][..]));
     assert_eq!(empty.inputs(), Some(&[][..]));
 }
+
+// ── The vector-Jacobian product ─────────────────────────────────────────────
+
+/// A cotangent with neither zero nor repeated entries: `(samples, observables)`.
+fn cotangent(samples: usize, observables: usize) -> Vec<f64> {
+    (0..samples * observables)
+        .map(|i| 0.7 - 0.31 * i as f64)
+        .collect()
+}
+
+/// `Σ_o v[s][o] · J[s][o][c]` written out entry by entry, for the `(samples,
+/// observables, columns)` part `part`.
+fn contracted(part: &[f64], v: &[f64], samples: usize, k: usize, columns: usize) -> Vec<f64> {
+    let mut out = vec![0.0; samples * columns];
+    for s in 0..samples {
+        for c in 0..columns {
+            for o in 0..k {
+                out[s * columns + c] += v[s * k + o] * part[(s * k + o) * columns + c];
+            }
+        }
+    }
+    out
+}
+
+/// `Jacobian::vjp` is the contraction with the cotangent, part by part, per
+/// sample: every readout (an `Argmax` with three classes and a weighted
+/// observable included), with respect to the parameters, the inputs and both.
+#[test]
+fn the_vjp_of_a_jacobian_is_its_contraction() {
+    for readout in readouts() {
+        let model = QuantumModel::new(4)
+            .iqp_encoder()
+            .conv(ConvBlock::Basic)
+            .angle_encoder(RotationAxis::Ry)
+            .readout(readout)
+            .compile(4)
+            .unwrap();
+        let k = model.num_observables();
+        let v = cotangent(ROWS.len(), k);
+        for wrt in [JacobianWrt::Params, JacobianWrt::Inputs, JacobianWrt::Both] {
+            let jacobian = crate_jacobian(&model, &rows(), &thetas(model.num_params())[0], wrt);
+            let vjp = jacobian.vjp(&v).unwrap();
+            assert_eq!(vjp.num_samples(), ROWS.len());
+            assert_eq!(vjp.num_params(), model.num_params());
+            assert_eq!(vjp.num_features(), 4);
+            assert_eq!(vjp.params().is_some(), jacobian.params().is_some());
+            assert_eq!(vjp.inputs().is_some(), jacobian.inputs().is_some());
+            if let (Some(got), Some(part)) = (vjp.params(), jacobian.params()) {
+                let expected = contracted(part, &v, ROWS.len(), k, model.num_params());
+                assert_eq!(got, expected.as_slice(), "{wrt:?}");
+            }
+            if let (Some(got), Some(part)) = (vjp.inputs(), jacobian.inputs()) {
+                assert_eq!(got, contracted(part, &v, ROWS.len(), k, 4).as_slice());
+            }
+        }
+    }
+}
+
+/// A zero cotangent gives zeros; a non-finite one is not refused: it
+/// propagates to every entry of its sample (`NaN · 0` is `NaN`), and only
+/// there. The wrong length is a typed error.
+#[test]
+fn the_vjp_takes_any_cotangent_of_the_right_length() {
+    let model = encoded(RotationAxis::Ry)
+        .hardware_efficient(1)
+        .readout(readouts().remove(5))
+        .compile(4)
+        .unwrap();
+    let k = model.num_observables();
+    let theta = &thetas(model.num_params())[0];
+    let jacobian = crate_jacobian(&model, &rows(), theta, JacobianWrt::Both);
+
+    let zeros = jacobian.vjp(&vec![0.0; ROWS.len() * k]).unwrap();
+    assert!(zeros.params().unwrap().iter().all(|&d| d == 0.0));
+    assert!(zeros.inputs().unwrap().iter().all(|&d| d == 0.0));
+
+    let mut v = cotangent(ROWS.len(), k);
+    v[k] = f64::NAN; // sample 1, observable 0
+    let vjp = jacobian.vjp(&v).unwrap();
+    let (p, f) = (model.num_params(), 4);
+    for (s, chunk) in vjp.params().unwrap().chunks(p).enumerate() {
+        assert_eq!(chunk.iter().all(|d| d.is_nan()), s == 1, "sample {s}");
+        assert!(s == 1 || chunk.iter().all(|d| d.is_finite()), "sample {s}");
+    }
+    for (s, chunk) in vjp.inputs().unwrap().chunks(f).enumerate() {
+        assert_eq!(chunk.iter().all(|d| d.is_nan()), s == 1, "sample {s}");
+        assert!(s == 1 || chunk.iter().all(|d| d.is_finite()), "sample {s}");
+    }
+
+    for wrong in [ROWS.len() * k - 1, ROWS.len() * k + 1, ROWS.len()] {
+        assert_eq!(
+            jacobian.vjp(&vec![1.0; wrong]).unwrap_err(),
+            QmlError::CountsLengthMismatch {
+                expected: ROWS.len() * k,
+                got: wrong
+            }
+        );
+    }
+
+    // No sample: an empty product, never a panic.
+    let samples: Vec<Vec<f64>> = Vec::new();
+    let empty = model
+        .jacobian(&samples, JacobianWrt::Both)
+        .unwrap()
+        .jacobian_from_probabilities(&[])
+        .unwrap()
+        .vjp(&[])
+        .unwrap();
+    assert_eq!(empty.params(), Some(&[][..]));
+    assert_eq!(empty.inputs(), Some(&[][..]));
+}

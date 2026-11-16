@@ -39,17 +39,6 @@ Entries were curated from the Conventional Commits history. Releases before
   `#[non_exhaustive]`), raised in Python as
   `polypus.InsufficientMemoryError` when a result leaves no room for its
   statevectors. See `examples/qml_kernel_svc.py` (#504).
-- Typed execution targets: `polypus.Aer`, `Native`, `Cunqa`, `Qmio` and
-  `Registered`, each checking its own fields when built (except `sim_method`,
-  which Aer checks when the run starts), and a `target=`
-  keyword on `run_quantum_circuit`, `train`, `qml.train` and `qml.predict`
-  that replaces `infrastructure`, `backend` and their provider arguments
-  (passing one of those next to it is a `ConfigurationError`, except
-  `backend` or `sim_method` left at its default). Strings stay as shorthand; every accepted
-  `infrastructure`/`backend` spelling now resolves through one alias table
-  with unchanged errors. `infrastructure` (and, for `train`/`qml.train`,
-  `nodes`, `cores_per_qpu` and `id`) now defaults to `None` so a call with
-  `target=` can omit them; without `target=` they are still required (#434).
 - `polypus.qml.Ansatz.strongly_entangling(reps, ranges=None, entangler="cx")`,
   PennyLane's `StronglyEntanglingLayers`: per layer, a general rotation on
   every qubit, emitted as `Rz(φ)`, `Ry(θ)`, `Rz(ω)`, in that order, so the
@@ -81,8 +70,8 @@ Entries were curated from the Conventional Commits history. Releases before
   blocks. See `examples/qml_expval_jacobian_loop.py`.
 - `polypus.torch.QuantumLayer(model, *, initial_params=None, seed=None, ...)`,
   a `torch.nn.Module` over a native `qml.Model` for hybrid quantum-classical
-  networks: forward = `qml.expval` over the batch, backward = the
-  vector-Jacobian product of `qml.jacobian` (parameters, inputs or both), so
+  networks: forward = `qml.expval` over the batch, backward = one `qml.vjp`
+  call with the incoming gradient (parameters, inputs or both; #559), so
   it trains with any `torch.optim` optimizer; float32 networks work as is (the
   computation is float64 on the CPU), and a `seed` derives one per backend call
   so a training replays. `polypus.torch.from_trained(trained, ...)` starts one
@@ -107,29 +96,31 @@ Entries were curated from the Conventional Commits history. Releases before
   `ExpectationJacobian`'s), `AdjointRun` and `DiagonalObservable`. In
   `polypus-infrastructure`: `NativeStatevectorBackend::adjoint_fits`/
   `run_adjoint` and `AdjointTask`. `benchmarks/bench_adjoint.py` measures it.
-- Adjoint differentiation of the gates the parameter shift has no rule for
-  (#561): `polypus-sim`'s `StatevectorSimulator::adjoint_gradient` also
-  differentiates `Crx`, `Cry`, `Crz`, `Cp`, `Cu1`, `P`, `U1`, `U`, `UGate`,
-  `U2`, `Cu3` and `Cu` (each of their angles, through its generator, the phase
-  of `Cu`/`Cu3` relative to the control included) and `U0` (derivative `0`),
-  with a new reduction kernel that gives the same bits with and without the
-  `parallel` feature. In `polypus-qml` a model with such gates is built like
-  any other and gets its exact gradient and Jacobian by the adjoint
-  (`adjoint_runs`, `gradient_from_adjoint`, `jacobian_from_adjoint`), while
-  the parameter-shift methods fail with `QmlError::NoExactGradient`, which
-  names the instruction and points at exact mode; when exact mode cannot fit
-  the adjoint's two statevectors it has no shift to fall back to, and the
-  error says so (`QmlProblem::check_shift_fallback`,
-  `ExpectationJacobian::check_shift_fallback`). No layer emits these gates
-  yet, so nothing changes for a model built from Python. New: `AngleRef` in
-  `polypus-circuit` (re-exported by `polypus-sim`), the `SimError` variant
-  `AngleIndexOutOfRange`, and `polypus-qml`'s `test-support` feature (hidden
-  constructors for the tests of the crates downstream; never enabled in a
-  library or wheel build).
 - `polypus.qml.Model.num_observables`, the readout's observables (the columns
   of `qml.expval`), and pickling of `Model`, so `copy.deepcopy` works: it
   travels as the JSON of its spec, rebuilt through the checks of `qml.load`
   (#502).
+- `polypus.qml.vjp(model, x, params, cotangent, *, wrt="params", ...)`, the
+  vector-Jacobian product of `qml.jacobian` with a `(rows, observables)`
+  cotangent, what a reverse-mode backward pass needs: `(num_params,)` summed
+  over the rows for `wrt="params"`, `(rows, features)` for `"inputs"`, the
+  tuple for `"both"`. With `exact=True` it takes one adjoint run per row
+  whatever the number of observables (`qml.jacobian` takes one per row and
+  observable), so the exact backward pass of `polypus.torch.QuantumLayer`,
+  which now calls it, is up to `K` times cheaper for a `K`-observable readout;
+  with shots it runs `qml.jacobian`'s circuits and gives its contraction for
+  the same `seed`. The layer's gradients move in the last bits, no more:
+  exactly, they come from one combined observable instead of one run per
+  observable, and with shots the parameter product is summed in row order.
+  The cotangent's shape is checked right after `params` (a
+  `polypus.ConfigurationError`, as is a complex one) and its values are read
+  as `x`'s are (a string or `None` is the same `TypeError`); a `NaN` or an
+  infinity in it propagates as through the contraction, and changes only its
+  own row's route. `qml.jacobian` does not change. In `polypus-qml`:
+  `Jacobian::vjp`, `JacobianBlock::vjp_runs`/`num_vjp_runs`/
+  `vjp_weight_bounds`/`vjp_from_adjoint` (and
+  `ExpectationJacobian`'s), `Vjp` and `DiagonalObservable::weight_bound`.
+  `benchmarks/bench_vjp.py` measures it (#559, ADR 0008).
 - A call trace for `polypus.train` and `polypus.run_quantum_circuit`
   (contract C-12): the keyword-only `trace=` (a path to a new file) or
   `POLYPUS_CALL_TRACE=<directory>` writes one JSON Lines line per planner
@@ -177,20 +168,6 @@ Entries were curated from the Conventional Commits history. Releases before
   and `TrainOutcome::n_evaluations`. Seeded results are unchanged (#431).
 
 ### Changed
-- **BREAKING (Rust):** an adjoint derivative is named by an `AngleRef`
-  (`position`, `angle`) instead of a gate position, so a gate with several
-  angles can have one derivative per angle (#561):
-  `StatevectorSimulator::adjoint_gradient`'s `wrt`, `AdjointTask::wrt` in
-  `polypus-infrastructure` and `AdjointRun::wrt` in `polypus-qml` are
-  `&[AngleRef]`/`Vec<AngleRef>`. A Pauli rotation's angle is
-  `AngleRef::new(position, 0)`; its derivative is unchanged, bit for bit.
-  `SimError` has the new variant `AngleIndexOutOfRange`, and
-  `NotDifferentiable` now means a gate without angles or the call of a
-  declared gate.
-- The message of `QmlError::NoExactGradient`, which reaches Python as
-  `polypus.EvaluationError` (from `Model.fit`) or `ValueError` (from
-  `qml.jacobian`), starts `no exact gradient for this model:` instead of
-  `no exact parameter-shift gradient for this model:` (#561).
 - **BREAKING (Rust):** `polypus_qml::ValidationError` has a new variant,
   `TrainableLayerInFeatureMap`, so an exhaustive `match` on it outside its
   crate must handle it (#504).
