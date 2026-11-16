@@ -142,6 +142,15 @@ pub enum CircuitError {
         /// Its name in the composed circuit.
         name: String,
     },
+    /// [`ConcreteCircuit::inverse`](crate::ConcreteCircuit::inverse) met an
+    /// instruction whose inverse is not made of instructions of the vocabulary:
+    /// a measurement, which is not unitary, or a call of a declared gate.
+    NotInvertible {
+        /// The instruction's position in the circuit (the first such one).
+        position: usize,
+        /// What it is (`measure`, `measure_all`, a call of a declared gate).
+        instruction: &'static str,
+    },
 }
 
 impl CircuitError {
@@ -250,6 +259,13 @@ impl fmt::Display for CircuitError {
             CircuitError::ConflictingParamNames { index, name } => write!(
                 f,
                 "cannot compose: the composed circuit names parameter {index} '{name}', which the target circuit names differently or gives to another parameter"
+            ),
+            CircuitError::NotInvertible {
+                position,
+                instruction,
+            } => write!(
+                f,
+                "cannot invert the circuit: instruction {position} is {instruction}, which has no inverse in the gate vocabulary"
             ),
         }
     }

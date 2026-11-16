@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use numpy::ndarray::{Array2, Array3, ShapeError};
-use numpy::{IntoPyArray, PyArray2};
+use numpy::{IntoPyArray, PyArray2, PyReadonlyArrayDyn};
 use pyo3::exceptions::{
     PyFileNotFoundError, PyOSError, PyOverflowError, PyPermissionError, PyRuntimeError,
     PyTypeError, PyValueError,
@@ -30,18 +30,18 @@ use pyo3::types::{PyDict, PyList, PyModule, PyTuple, PyType};
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 use polypus_qml::{
     AngleEncoder, CompiledModel, ConvBlock, ConvLayer, Decision, Entanglement, Entangler,
-    ExpectationJacobian, HardwareEfficientAnsatz, IqpEncoder, JacobianWrt, KeepRule, Layer, Loss,
-    Observable, Pairing, Pauli, PauliString, PoolBlock, PoolLayer, QmlError, QmlProblem,
-    QuantumModel, Readout, RotationAxis, SimplifiedTwoDesignAnsatz, StronglyEntanglingAnsatz,
-    ValidationError,
+    ExpectationJacobian, FeatureMap, FeatureStates, FidelityKernel, HardwareEfficientAnsatz,
+    IqpEncoder, JacobianWrt, KeepRule, Layer, Loss, Observable, Pairing, Pauli, PauliString,
+    PoolBlock, PoolLayer, QmlError, QmlProblem, QuantumModel, Readout, RotationAxis,
+    SimplifiedTwoDesignAnsatz, StronglyEntanglingAnsatz, ValidationError,
 };
 
 use super::callback::validate_callback;
 use super::circuit::Circuit;
 use super::{
-    build_backend_config, counts_to_pylist, extract_labels, finish_optimization,
-    interruptible_token, is_native_backend, is_rotosolve, log_training_start, method_from_pyclass,
-    method_seed, resolve_optimizer_seed, seed_or_entropy, training_observer, unique_id,
+    config_from_strings, counts_to_pylist, extract_labels, finish_optimization,
+    interruptible_token, is_rotosolve, log_training_start, method_from_pyclass, method_seed,
+    resolve_optimizer_seed, seed_or_entropy, training_observer, unique_id,
     validate_cunqa_allocation, validate_final_shots, validate_id, validate_method,
     validate_shots_and_qpus, OptionsArg, RunResult,
 };
@@ -1234,7 +1234,7 @@ impl Model {
         let final_shots = validate_final_shots(final_shots.as_ref())?;
         let callback = validate_callback(callback.as_ref())?;
         let backend = resolve_backend(backend, infrastructure);
-        if exact && !(infrastructure == "local" && is_native_backend(backend)) {
+        if exact && !(infrastructure == "local" && super::targets::is_native_device(backend)) {
             return Err(configuration_error(
                 "exact=True needs infrastructure=\"local\" and backend=\"polypus\": only the \
                  native simulator computes exact probabilities",
@@ -1272,7 +1272,7 @@ impl Model {
 
         // Native circuits never ask for fusion here: `None` keeps the backend's
         // default.
-        let backend_config = build_backend_config(
+        let backend_config = config_from_strings(
             infrastructure,
             backend,
             sim_method,
@@ -1478,8 +1478,8 @@ impl ExactResult {
     }
 }
 
-/// The execution arguments `TrainedModel.predict` and `run`, and `qml.expval`
-/// and `qml.jacobian`, share.
+/// The execution arguments `TrainedModel.predict` and `run`, and `qml.expval`,
+/// `qml.jacobian` and `qml.vjp`, share.
 struct Execution<'a, 'py> {
     shots: u32,
     infrastructure: &'a str,
@@ -1509,7 +1509,9 @@ impl<'a> Execution<'a, '_> {
             self.walltime.as_deref(),
         )?;
         let backend = resolve_backend(self.backend, self.infrastructure);
-        if self.exact && !(self.infrastructure == "local" && is_native_backend(backend)) {
+        if self.exact
+            && !(self.infrastructure == "local" && super::targets::is_native_device(backend))
+        {
             return Err(configuration_error(
                 "exact=True needs infrastructure=\"local\" and backend=\"polypus\": only the \
                  native simulator computes exact probabilities",
@@ -1535,7 +1537,7 @@ impl<'a> Execution<'a, '_> {
         } else {
             Some(seed_or_entropy(self.seed, random_seed)?)
         };
-        let backend_config = build_backend_config(
+        let backend_config = config_from_strings(
             self.infrastructure,
             backend,
             self.sim_method,
@@ -1963,10 +1965,10 @@ pub fn load(path: PathBuf) -> PyResult<TrainedModel> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// qml.expval and qml.jacobian: the loss-free primitives
+// qml.expval, qml.jacobian and qml.vjp: the loss-free primitives
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `wrt` of `qml.jacobian`, a closed set (C-11, "Options").
+/// `wrt` of `qml.jacobian` and `qml.vjp`, a closed set (C-11, "Options").
 fn parse_wrt(wrt: &str) -> PyResult<JacobianWrt> {
     match wrt {
         "params" => Ok(JacobianWrt::Params),
@@ -2093,6 +2095,14 @@ impl PrimitiveError {
             "block {samples:?} lies outside the {num_samples} sample(s)"
         ))
     }
+
+    /// Adjoint derivatives that do not answer the runs they were asked for,
+    /// one row per run: a bookkeeping bug, never the caller's.
+    fn derivative_rows_mismatch(expected: usize, got: usize) -> Self {
+        PrimitiveError::Internal(format!(
+            "the adjoint runs gave {got} row(s) of derivatives for {expected} run(s)"
+        ))
+    }
 }
 
 /// One primitive call's state: its circuits block by block, and what it keeps
@@ -2112,6 +2122,18 @@ trait Primitive {
         &mut self,
         _native: &NativeStatevectorBackend,
         _samples: Range<usize>,
+        _cancel: &CancelToken,
+    ) -> Option<Result<(), PrimitiveError>> {
+        None
+    }
+    /// Run **every** sample on the exact native backend at once, by a route
+    /// that bounds its own memory and honours `cancel` inside (the kernel's
+    /// inner products, which would otherwise simulate each state again for
+    /// every block), or `None` to run in blocks (the default). Tried before
+    /// the first block.
+    fn run_exact_all(
+        &mut self,
+        _native: &NativeStatevectorBackend,
         _cancel: &CancelToken,
     ) -> Option<Result<(), PrimitiveError>> {
         None
@@ -2148,16 +2170,17 @@ fn run_blocks_on(
     cancel: &CancelToken,
 ) -> Result<(), PrimitiveError> {
     let num_samples = primitive.num_samples();
+    if let BlockRunner::Exact { native, .. } = runner {
+        if num_samples > 0 {
+            check_cancel(cancel)?;
+            if let Some(outcome) = primitive.run_exact_all(native, cancel) {
+                return outcome;
+            }
+        }
+    }
     let mut start = 0;
     while start < num_samples {
-        if cancel.is_cancelled() {
-            return Err(PrimitiveError::Infrastructure(
-                InfrastructureError::Cancelled,
-            ));
-        }
-        cancel
-            .poll_interrupt()
-            .map_err(PrimitiveError::Infrastructure)?;
+        check_cancel(cancel)?;
         let end = start.saturating_add(block).min(num_samples);
         if let BlockRunner::Exact { native, .. } = runner {
             if let Some(outcome) = primitive.run_exact_block(native, start..end, cancel) {
@@ -2178,6 +2201,18 @@ fn run_blocks_on(
         start = end;
     }
     Ok(())
+}
+
+/// A cancellation or a Ctrl+C, as the planner checks them between waves.
+fn check_cancel(cancel: &CancelToken) -> Result<(), PrimitiveError> {
+    if cancel.is_cancelled() {
+        return Err(PrimitiveError::Infrastructure(
+            InfrastructureError::Cancelled,
+        ));
+    }
+    cancel
+        .poll_interrupt()
+        .map_err(PrimitiveError::Infrastructure)
 }
 
 /// `qml.expval`: one circuit per sample, every readout observable read from it.
@@ -2307,30 +2342,8 @@ impl Primitive for JacobianRun {
             Ok(runs) => runs,
             Err(e) => return Some(Err(e.into())),
         };
-        let width = runs
-            .iter()
-            .map(|run| run.circuit.num_qubits())
-            .max()
-            .unwrap_or(0);
-        match native.adjoint_fits(width) {
-            Ok(true) => {}
-            Ok(false) => return None,
-            Err(e) => return Some(Err(PrimitiveError::Infrastructure(e.into()))),
-        }
-        let tasks: Vec<AdjointTask<'_, _>> = runs
-            .iter()
-            .map(|run| AdjointTask {
-                circuit: &run.circuit,
-                wrt: &run.wrt,
-                weight: move |b: usize| run.observable.weight(b),
-            })
-            .collect();
-        let derivatives = watched(cancel, |stop| {
-            native.run_adjoint(&tasks, Some(&|| stop.load(Ordering::Relaxed)))
-        });
-        let derivatives = match derivatives {
-            Ok(Ok(derivatives)) => derivatives,
-            Ok(Err(e)) => return Some(Err(PrimitiveError::Infrastructure(e.into()))),
+        let derivatives = match run_exact_adjoint(native, &runs, cancel)? {
+            Ok(derivatives) => derivatives,
             Err(e) => return Some(Err(e)),
         };
         Some(
@@ -2351,6 +2364,398 @@ impl JacobianRun {
     }
 }
 
+/// `runs` on the exact native backend by adjoint differentiation, one row of
+/// derivatives per run, or `None` when the memory budget holds one statevector
+/// of their width but not two ([`NativeStatevectorBackend::adjoint_fits`],
+/// which logs it): the caller then runs the shifted circuits. A Ctrl+C or a
+/// cancellation stops the runs in flight ([`watched`]).
+fn run_exact_adjoint(
+    native: &NativeStatevectorBackend,
+    runs: &[polypus_qml::AdjointRun],
+    cancel: &CancelToken,
+) -> Option<Result<Vec<Vec<f64>>, PrimitiveError>> {
+    let width = runs
+        .iter()
+        .map(|run| run.circuit.num_qubits())
+        .max()
+        .unwrap_or(0);
+    match native.adjoint_fits(width) {
+        Ok(true) => {}
+        Ok(false) => return None,
+        Err(e) => return Some(Err(PrimitiveError::Infrastructure(e.into()))),
+    }
+    let tasks: Vec<AdjointTask<'_, _>> = runs
+        .iter()
+        .map(|run| AdjointTask {
+            circuit: &run.circuit,
+            wrt: &run.wrt,
+            weight: move |b: usize| run.observable.weight(b),
+        })
+        .collect();
+    let derivatives = watched(cancel, |stop| {
+        native.run_adjoint(&tasks, Some(&|| stop.load(Ordering::Relaxed)))
+    });
+    Some(match derivatives {
+        Ok(Ok(derivatives)) => Ok(derivatives),
+        Ok(Err(e)) => Err(PrimitiveError::Infrastructure(e.into())),
+        Err(e) => Err(e),
+    })
+}
+
+/// The largest weight bound ([`DiagonalObservable::weight_bound`]) of a
+/// combined observable `Σ_o v_o·O_o` that `qml.vjp` hands the native simulator
+/// (C-11). Past it, or when it is not finite, the sample takes
+/// `qml.jacobian`'s runs and contracts them.
+///
+/// Why a quarter of `f64::MAX`. In the simulator nothing grows past the bound
+/// `W`: `λ = O|ψ⟩` has every amplitude within `W` and `‖λ‖ ≤ W`; each gate of
+/// the sweep back is a unitary matrix-vector product, its outputs within the
+/// norm of its inputs (Cauchy–Schwarz on each row); and each derivative,
+/// `Im ⟨λ|P|ψ⟩` with no further factor, is within `‖λ‖·‖ψ‖ ≤ W`. So the
+/// simulator never overflows below the limit. What can still grow is what the
+/// crate does with the derivatives afterwards: the sum over the gates that
+/// share a parameter, and the chain-rule factors of the inputs, which the
+/// contraction also computes, in another order. The factor 4 is room for a
+/// few of those, not a guarantee: with more than 4 gates on one parameter, or
+/// chain-rule factors past 4, a product near `f64::MAX` can overflow on the
+/// combined path where the contraction would not, or the other way round. A
+/// cotangent within a few orders of magnitude of `f64::MAX` is not a practical
+/// case; the limit is there so that the simulator never sees a weight it
+/// refuses.
+///
+/// [`DiagonalObservable::weight_bound`]: polypus_qml::DiagonalObservable::weight_bound
+const MAX_COMBINED_WEIGHT: f64 = f64::MAX / 4.0;
+
+/// `qml.vjp`: the Jacobian's product with a cotangent. Its circuits, and its
+/// reading of their results, are `qml.jacobian`'s, the Jacobian of each block
+/// contracted with the block's cotangent; exactly, one adjoint run per sample
+/// instead (#559).
+struct VjpRun {
+    plan: ExpectationJacobian,
+    params: Vec<f64>,
+    /// `(num_samples, num_observables)`, row-major: the cotangent `v`.
+    cotangent: Vec<f64>,
+    /// `num_params` values (empty unless `wrt` asks for them): the product's
+    /// rows read so far, summed in row order, so the sum does not depend on
+    /// the blocks.
+    by_params: Vec<f64>,
+    /// `(num_samples, num_features)`, row-major.
+    by_inputs: Vec<f64>,
+    /// The adjoint runs handed to the native backend so far.
+    adjoint_runs: usize,
+}
+
+impl VjpRun {
+    fn new(plan: ExpectationJacobian, params: Vec<f64>, cotangent: Vec<f64>) -> Self {
+        let by_params = match plan.wrt() {
+            JacobianWrt::Params | JacobianWrt::Both => vec![0.0; plan.num_params()],
+            JacobianWrt::Inputs => Vec::new(),
+        };
+        VjpRun {
+            plan,
+            params,
+            cotangent,
+            by_params,
+            by_inputs: Vec::new(),
+            adjoint_runs: 0,
+        }
+    }
+
+    /// The block `samples` and its rows of the cotangent.
+    fn block(
+        &self,
+        samples: Range<usize>,
+    ) -> Result<(polypus_qml::JacobianBlock<'_>, &[f64]), PrimitiveError> {
+        let k = self.plan.num_observables();
+        let out_of_range = || PrimitiveError::block_out_of_range(&samples, self.plan.num_samples());
+        let block = self.plan.block(samples.clone()).ok_or_else(out_of_range)?;
+        let cotangent = self
+            .cotangent
+            .get(samples.start * k..samples.end * k)
+            .ok_or_else(out_of_range)?;
+        Ok((block, cotangent))
+    }
+
+    /// Add a block's product, in sample order: its parameter rows into the
+    /// running sum, its input rows after the others.
+    fn keep(&mut self, vjp: polypus_qml::Vjp) {
+        let num_params = vjp.num_params().max(1);
+        let (by_params, by_inputs) = vjp.into_parts();
+        for row in by_params.unwrap_or_default().chunks_exact(num_params) {
+            for (sum, &value) in self.by_params.iter_mut().zip(row) {
+                *sum += value;
+            }
+        }
+        self.by_inputs.extend(by_inputs.unwrap_or_default());
+    }
+
+    /// The exact product of the block by adjoint differentiation, one [`Vjp`]
+    /// per sample in order, or `None` for the shifted circuits (see
+    /// [`run_exact_adjoint`]).
+    ///
+    /// [`Vjp`]: polypus_qml::Vjp
+    fn exact_block(
+        &mut self,
+        native: &NativeStatevectorBackend,
+        samples: Range<usize>,
+        cancel: &CancelToken,
+    ) -> Option<Result<Vec<polypus_qml::Vjp>, PrimitiveError>> {
+        let (runs, combined) = match self.exact_runs(samples.clone()) {
+            Ok(found) => found,
+            Err(e) => return Some(Err(e)),
+        };
+        let derivatives = match run_exact_adjoint(native, &runs, cancel)? {
+            Ok(derivatives) => derivatives,
+            Err(e) => return Some(Err(e)),
+        };
+        let vjps = self.read_exact(samples, &combined, &derivatives);
+        self.adjoint_runs += runs.len();
+        log::debug!(
+            "qml vjp: {} adjoint run(s), {} in all",
+            runs.len(),
+            self.adjoint_runs
+        );
+        Some(vjps)
+    }
+
+    /// The block's adjoint runs, sample after sample, and for each sample
+    /// whether it takes the combined observable. The route is **decided per
+    /// sample**, so a sample's product does not depend on the others' — nor on
+    /// the blocks, which follow the host's cores (C-11): one run, the
+    /// cotangent folded into its observable; or, when that observable cannot
+    /// be weighed safely — a non-finite value in the sample's cotangent (the
+    /// simulator refuses a non-finite weight), or a weight bound past
+    /// `MAX_COMBINED_WEIGHT` — the Jacobian's runs, one per observable, to be
+    /// contracted: the cotangent then reaches the product as it would through
+    /// the contraction of `qml.jacobian`. The bounds come before any circuit
+    /// is bound, so each sample's runs are built once. `<=` is false for a
+    /// `NaN` bound too.
+    fn exact_runs(
+        &self,
+        samples: Range<usize>,
+    ) -> Result<(Vec<polypus_qml::AdjointRun>, Vec<bool>), PrimitiveError> {
+        let (block, cotangent) = self.block(samples.clone())?;
+        let bounds = block.vjp_weight_bounds(cotangent)?;
+        let mut runs = Vec::with_capacity(block.num_vjp_runs());
+        let mut combined = Vec::with_capacity(bounds.len());
+        for (s, bound) in samples.zip(bounds) {
+            let (one, v) = self.block(s..s + 1)?;
+            let safe = bound <= MAX_COMBINED_WEIGHT;
+            runs.extend(if safe {
+                one.vjp_runs(&self.params, v)?
+            } else {
+                one.adjoint_runs(&self.params)?
+            });
+            combined.push(safe);
+        }
+        Ok((runs, combined))
+    }
+
+    /// Each sample's product, in order, from the derivatives of
+    /// [`exact_runs`](Self::exact_runs)' runs: its one row through the
+    /// combined observable, or its `num_observables` rows read as its
+    /// Jacobian and contracted with its cotangent. One row of `derivatives`
+    /// per run, no more and no fewer, or a bookkeeping error before any is
+    /// read: a row too many or too few would shift every sample after it.
+    fn read_exact(
+        &self,
+        samples: Range<usize>,
+        combined: &[bool],
+        derivatives: &[Vec<f64>],
+    ) -> Result<Vec<polypus_qml::Vjp>, PrimitiveError> {
+        let k = self.plan.num_observables();
+        let expected: usize = combined.iter().map(|&c| if c { 1 } else { k }).sum();
+        if derivatives.len() != expected {
+            return Err(PrimitiveError::derivative_rows_mismatch(
+                expected,
+                derivatives.len(),
+            ));
+        }
+        let mut rest = derivatives;
+        samples
+            .zip(combined)
+            .map(|(s, &combined)| {
+                let (one, v) = self.block(s..s + 1)?;
+                let take = if combined { 1 } else { k };
+                let (rows, after) = rest.split_at(take.min(rest.len()));
+                rest = after;
+                let vjp = if combined {
+                    one.vjp_from_adjoint(rows)
+                } else {
+                    one.jacobian_from_adjoint(rows)
+                        .and_then(|jacobian| jacobian.vjp(v))
+                };
+                Ok(vjp?)
+            })
+            .collect()
+    }
+}
+
+impl Primitive for VjpRun {
+    fn num_samples(&self) -> usize {
+        self.plan.num_samples()
+    }
+
+    fn circuits_per_sample(&self) -> usize {
+        self.plan.circuits_per_sample()
+    }
+
+    fn circuits(&self, samples: Range<usize>) -> Result<Vec<ConcreteCircuit>, PrimitiveError> {
+        let (block, _) = self.block(samples)?;
+        Ok(block.circuits(&self.params)?)
+    }
+
+    fn read(&mut self, samples: Range<usize>, results: BlockResults) -> Result<(), PrimitiveError> {
+        let (block, cotangent) = self.block(samples)?;
+        let jacobian = match &results {
+            BlockResults::Counts(counts) => block.jacobian_from_counts(counts)?,
+            BlockResults::Exact(probabilities) => {
+                block.jacobian_from_probabilities(probabilities)?
+            }
+        };
+        let vjp = jacobian.vjp(cotangent)?;
+        self.keep(vjp);
+        Ok(())
+    }
+
+    /// The exact product by adjoint differentiation (#559): one run per sample
+    /// whatever the number of observables, two statevectors each. When the
+    /// memory budget holds one statevector of the width but not two, `None`:
+    /// the shifted circuits run instead, as for the Jacobian.
+    fn run_exact_block(
+        &mut self,
+        native: &NativeStatevectorBackend,
+        samples: Range<usize>,
+        cancel: &CancelToken,
+    ) -> Option<Result<(), PrimitiveError>> {
+        let vjps = self.exact_block(native, samples, cancel)?;
+        Some(vjps.map(|vjps| vjps.into_iter().for_each(|vjp| self.keep(vjp))))
+    }
+}
+
+/// `qml.kernel_matrix`: one sample per pair `(i, j)` of the kernel, one
+/// compute-uncompute circuit each, read into one value per pair; or, exactly,
+/// the whole matrix from the native backend.
+struct KernelRun {
+    kernel: FidelityKernel,
+    /// The `rows × columns` matrix, row-major: the native backend's whole
+    /// result ([`run_exact_all`](Primitive::run_exact_all)), or allocated by
+    /// the first block read and filled block by block, each pair's value
+    /// written at its entry (a symmetric kernel's at its mirror too), so the
+    /// pairs' values are never held beside it.
+    matrix: Option<Vec<f64>>,
+    /// The pairs whose values are in `matrix`.
+    filled: usize,
+}
+
+impl KernelRun {
+    fn new(kernel: FidelityKernel) -> Self {
+        KernelRun {
+            kernel,
+            matrix: None,
+            filled: 0,
+        }
+    }
+
+    /// The `rows × columns` matrix, row-major, once every pair is in it (a
+    /// kernel with no pairs has an empty one).
+    fn into_matrix(self) -> Result<Vec<f64>, QmlError> {
+        if self.filled != self.kernel.num_pairs() {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: self.kernel.num_pairs(),
+                got: self.filled,
+            });
+        }
+        match self.matrix {
+            Some(matrix) => Ok(matrix),
+            None => self.kernel.zero_matrix(),
+        }
+    }
+}
+
+impl Primitive for KernelRun {
+    fn num_samples(&self) -> usize {
+        self.kernel.num_pairs()
+    }
+
+    fn circuits_per_sample(&self) -> usize {
+        1
+    }
+
+    fn circuits(&self, samples: Range<usize>) -> Result<Vec<ConcreteCircuit>, PrimitiveError> {
+        match self.kernel.circuits(samples.clone()) {
+            Some(circuits) => Ok(circuits?),
+            None => Err(PrimitiveError::block_out_of_range(
+                &samples,
+                self.kernel.num_pairs(),
+            )),
+        }
+    }
+
+    fn read(&mut self, samples: Range<usize>, results: BlockResults) -> Result<(), PrimitiveError> {
+        let got = match &results {
+            BlockResults::Counts(counts) => counts.len(),
+            BlockResults::Exact(probabilities) => probabilities.len(),
+        };
+        if got != samples.len() {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: samples.len(),
+                got,
+            }
+            .into());
+        }
+        let values = match results {
+            BlockResults::Counts(counts) => counts
+                .iter()
+                .map(|counts| self.kernel.fidelity_from_counts(counts))
+                .collect::<Result<Vec<_>, _>>()?,
+            BlockResults::Exact(probabilities) => probabilities
+                .iter()
+                .map(|probabilities| self.kernel.fidelity_from_probabilities(probabilities))
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        let matrix = match &mut self.matrix {
+            Some(matrix) => matrix,
+            None => self.matrix.insert(self.kernel.zero_matrix()?),
+        };
+        self.kernel.place(matrix, samples.start, &values)?;
+        self.filled += values.len();
+        Ok(())
+    }
+
+    /// The exact kernel in one call to the native backend, which picks its
+    /// route by the memory budget with the matrix counted: inner products of
+    /// statevectors, each state simulated once when they all fit and in tiles
+    /// otherwise, or, when the budget holds one statevector beside the matrix
+    /// but not two, one compute-uncompute circuit per pair (the backend logs
+    /// it). Never `None`, so the circuits never run in blocks here. A Ctrl+C
+    /// or a cancellation stops it in flight ([`watched`]).
+    fn run_exact_all(
+        &mut self,
+        native: &NativeStatevectorBackend,
+        cancel: &CancelToken,
+    ) -> Option<Result<(), PrimitiveError>> {
+        let kernel = &self.kernel;
+        let columns = (!kernel.is_symmetric()).then(|| kernel.column_states());
+        let matrix = watched(cancel, |stop| {
+            native.fidelity_matrix(
+                kernel.row_states(),
+                columns,
+                Some(&|| stop.load(Ordering::Relaxed)),
+            )
+        });
+        Some(match matrix {
+            Ok(Ok(matrix)) => {
+                self.matrix = Some(matrix);
+                self.filled = self.kernel.num_pairs();
+                Ok(())
+            }
+            Ok(Err(e)) => Err(PrimitiveError::Infrastructure(e.into())),
+            Err(e) => Err(e),
+        })
+    }
+}
+
 /// How often [`watched`] looks for a cancellation or a Ctrl+C: the simulator's
 /// own floor between two calls of its cancellation hook, so a Ctrl+C is
 /// honoured within about a frame.
@@ -2360,7 +2765,8 @@ const WATCH_INTERVAL: Duration = Duration::from_millis(25);
 /// cooperative cancellation and its interrupt guard (at the edge, a pending
 /// Ctrl+C: the guard attaches and calls `check_signals`, which only works on
 /// the thread that called into Polypus — this one — and is a no-op on the
-/// rayon threads an adjoint batch runs on). On either, `stop` is set for
+/// rayon threads an adjoint batch or the kernel's inner products run on). On
+/// either, `stop` is set for
 /// `work`'s cancellation hook to see, and once `work` returns, the reason is the
 /// result: the same `InfrastructureError` a check between blocks gives, so the
 /// edge raises the same `KeyboardInterrupt`. A signal the guard consumed is
@@ -2400,7 +2806,7 @@ fn watched<T: Send>(
         (Some(reason), _) => Err(PrimitiveError::Infrastructure(reason)),
         (None, Ok(result)) => Ok(result),
         (None, Err(_)) => Err(PrimitiveError::Internal(
-            "the adjoint gradient's thread panicked".to_string(),
+            "the watched work's thread panicked".to_string(),
         )),
     }
 }
@@ -2690,6 +3096,340 @@ pub fn jacobian<'py>(
     })
 }
 
+/// A shape as Python prints a tuple: `(3, 2)`, `(3,)`, `()`.
+fn shape_repr(shape: &[usize]) -> String {
+    match shape {
+        [only] => format!("({only},)"),
+        _ => format!(
+            "({})",
+            shape
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// `qml.vjp`'s `cotangent` as its `rows · observables` values, row-major: the
+/// check that follows `params` (C-11). Its values are read as `x`'s are (each
+/// a real number, a `bool` included), so the two take the same values:
+///
+/// - **Structure first**, through `numpy.asarray(cotangent)`: rows as lists or
+///   tuples, or a NumPy array. Ragged rows (NumPy's `ValueError`) or a shape
+///   other than `(rows, observables)` is a `polypus.ConfigurationError` naming
+///   the expected shape; a complex dtype too, rather than losing the
+///   imaginary part in the conversion. Any other exception of NumPy's (a
+///   `MemoryError`, say) propagates as it is.
+/// - **Then the values**: a real or boolean dtype is converted to `float64`
+///   in one go; any other (strings, objects such as `None`) is read value by
+///   value as `x` is, so a value that is not a real number is the `TypeError`
+///   `x` raises for it. Non-finite values are taken as they are.
+fn cotangent_values(
+    cotangent: &Bound<'_, PyAny>,
+    rows: usize,
+    observables: usize,
+) -> PyResult<Vec<f64>> {
+    let py = cotangent.py();
+    let expected = shape_repr(&[rows, observables]);
+    let numpy = py.import("numpy")?;
+    let as_is = numpy.call_method1("asarray", (cotangent,)).map_err(|e| {
+        if e.is_instance_of::<PyValueError>(py) {
+            configuration_error(format!(
+                "cotangent must be a (rows, observables) = {expected} array of real \
+                 numbers: {}",
+                e.value(py)
+            ))
+        } else {
+            e
+        }
+    })?;
+    let kind: String = as_is.getattr("dtype")?.getattr("kind")?.extract()?;
+    if kind == "c" {
+        return Err(configuration_error(format!(
+            "cotangent must be a (rows, observables) = {expected} array of real values, got \
+             complex ones"
+        )));
+    }
+    let shape: Vec<usize> = as_is.getattr("shape")?.extract()?;
+    if shape != [rows, observables] {
+        return Err(configuration_error(format!(
+            "cotangent must have shape (rows, observables) = {expected}, got {}",
+            shape_repr(&shape)
+        )));
+    }
+    if matches!(kind.as_str(), "f" | "i" | "u" | "b") {
+        let array = numpy
+            .call_method1("asarray", (as_is, "float64"))?
+            .extract::<PyReadonlyArrayDyn<'_, f64>>()?;
+        return Ok(array.as_array().iter().copied().collect());
+    }
+    // Strings, objects, dates: value by value, with `x`'s `TypeError` for the
+    // first that is not a real number.
+    as_is
+        .call_method0("ravel")?
+        .call_method0("tolist")?
+        .extract::<Vec<f64>>()
+        .map_err(|e| {
+            if e.is_instance_of::<PyTypeError>(py) {
+                PyTypeError::new_err(format!(
+                    "cotangent must hold real numbers, as x does: {}",
+                    e.value(py)
+                ))
+            } else {
+                e
+            }
+        })
+}
+
+/// `polypus.qml.vjp(model, x, params, cotangent, *, wrt="params", …)`: the
+/// vector-Jacobian product of [`jacobian`] with `cotangent`, `v`, of shape
+/// `(rows, observables)` — what a reverse-mode backward pass needs — as
+/// `float64` `numpy.ndarray`s, C-contiguous:
+///
+/// - **`wrt="params"`** gives `Σ_r,o v[r,o]·J_θ[r,o,:]`, shape `(num_params,)`,
+///   summed over the rows; **`"inputs"`** gives `Σ_o v[r,o]·J_x[r,o,:]` per
+///   row, `(rows, features)`, for angle and IQP encoders (an amplitude or basis
+///   encoder is [`jacobian`]'s `polypus.ConfigurationError`); **`"both"`** the
+///   tuple `(by_params, by_inputs)`, each identical to its separate call. Any
+///   other `wrt` is a `polypus.ConfigurationError`.
+/// - **`cotangent`** is rows of real values or a 2-D NumPy array (complex is
+///   refused), of shape exactly `(rows, observables)` (otherwise a
+///   `polypus.ConfigurationError`), its values read as `x`'s are (a string or
+///   `None` is the same `TypeError`) and taken as they are: a `NaN` or an
+///   infinity propagates to the product as it does through the contraction of
+///   [`jacobian`].
+/// - **Circuits:** with `exact=True`, one adjoint differentiation per row,
+///   whatever the number of observables (of `Σ_o v[r,o]·O_o`); a row whose
+///   combined observable cannot be weighed safely (a non-finite value in its
+///   row of `cotangent`, or a weight bound past `f64::MAX / 4`) takes
+///   [`jacobian`]'s runs, one per observable, decided row by row so no row
+///   depends on another; and when the memory budget holds one statevector but
+///   not two,
+///   [`jacobian`]'s shifted circuits. With shots, [`jacobian`]'s circuits, the
+///   same with the same `seed`: the result is its contraction, to rounding.
+/// - **`model`**, **`x`**, **`params`** and the execution arguments are
+///   [`jacobian`]'s, with its rules.
+///
+/// Every check runs before a backend exists and raises
+/// `polypus.ConfigurationError` (a `ValueError`), except a cotangent value
+/// that is not a real number: the `TypeError` `x` raises for one.
+#[pyfunction(name = "vjp", signature = (
+    model, x, params, cotangent, *, wrt="params", shots=1024, infrastructure="local", n_qpus=1,
+    nodes=1, cores_per_qpu=2, walltime=None, options=None, sim_method="automatic",
+    noise_model=None, backend=None, seed=None, exact=false,
+))]
+pub fn vjp<'py>(
+    model: &Bound<'py, PyAny>,
+    x: &Bound<'py, PyAny>,
+    params: Vec<f64>,
+    cotangent: &Bound<'py, PyAny>,
+    wrt: &str,
+    shots: u32,
+    infrastructure: &str,
+    n_qpus: u32,
+    nodes: u32,
+    cores_per_qpu: u32,
+    walltime: Option<String>,
+    options: Option<OptionsArg>,
+    sim_method: &str,
+    noise_model: Option<Bound<'py, PyAny>>,
+    backend: Option<&str>,
+    seed: Option<u64>,
+    exact: bool,
+) -> PyResult<Py<PyAny>> {
+    let py = x.py();
+    let exec = Execution {
+        shots,
+        infrastructure,
+        n_qpus,
+        nodes,
+        cores_per_qpu,
+        walltime,
+        options,
+        sim_method,
+        noise_model,
+        backend,
+        seed,
+        exact,
+    };
+    let model = primitive_model(model, "vjp")?;
+    let wrt = parse_wrt(wrt)?;
+    let backend = exec.check()?;
+    let (compiled, rows, params) = primitive_inputs(model.get(), x, params)?;
+    let cotangent = cotangent_values(cotangent, rows.num_samples(), compiled.num_observables())?;
+    let samples: Vec<&[f64]> = (0..rows.num_samples()).map(|i| rows.sample(i)).collect();
+    let plan = compiled
+        .jacobian(&samples, wrt)
+        .map_err(qml_to_config_err)?;
+    let (n, num_features) = (plan.num_samples(), plan.num_features());
+    let mut primitive = VjpRun::new(plan, params, cotangent);
+    run_primitive(py, "vjp", &mut primitive, exec, backend)?;
+    let VjpRun {
+        by_params,
+        by_inputs,
+        ..
+    } = primitive;
+    let by_params = || by_params.into_pyarray(py).into_any();
+    let by_inputs = || {
+        array2(n, num_features, by_inputs)
+            .map(|a| a.into_pyarray(py).into_any())
+            .map_err(shape_to_py_err)
+    };
+    Ok(match wrt {
+        JacobianWrt::Params => by_params().unbind(),
+        JacobianWrt::Inputs => by_inputs()?.unbind(),
+        JacobianWrt::Both => PyTuple::new(py, [by_params(), by_inputs()?])?
+            .into_any()
+            .unbind(),
+    })
+}
+
+/// `encoder` as a native [`Encoder`], or the `TypeError` `qml.kernel_matrix`
+/// raises for anything else, naming what it takes.
+fn kernel_encoder<'py>(encoder: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Encoder>> {
+    if let Ok(encoder) = encoder.cast::<Encoder>() {
+        return Ok(encoder.clone());
+    }
+    let hint = if encoder.is_instance_of::<Ansatz>() {
+        "; trainable layers have no place in a fidelity kernel (trainable kernels are not \
+         supported)"
+    } else if encoder.is_instance_of::<Model>() || encoder.is_instance_of::<TrainedModel>() {
+        "; pass the polypus.qml.Encoder the model was built from"
+    } else {
+        ""
+    };
+    Err(PyTypeError::new_err(format!(
+        "qml.kernel_matrix takes a polypus.qml.Encoder as encoder, got {}{hint}",
+        encoder.get_type().name()?
+    )))
+}
+
+/// The rows of `x` (rows or a `Dataset`, whose labels are not used) for
+/// `qml.kernel_matrix`, checked as `qml.expval` checks its rows (empty,
+/// ragged, non-finite), each a `polypus.ConfigurationError` naming `name`.
+fn kernel_rows(x: &Bound<'_, PyAny>, name: &str) -> PyResult<polypus_qml::Dataset> {
+    if let Ok(dataset) = x.cast::<PyDataset>() {
+        return Ok(dataset.try_borrow()?.inner.clone());
+    }
+    let rows: Vec<Vec<f64>> = x.extract()?;
+    polypus_qml::Dataset::from_rows(&rows, &vec![0.0; rows.len()])
+        .map_err(|e| configuration_error(format!("{name}: {e}")))
+}
+
+/// The states of every row of `rows` under `feature_map`, each rejection (a
+/// zero sample for amplitude encoding, a non-binary feature for basis
+/// encoding) a `polypus.ConfigurationError` naming `name`.
+fn kernel_states(
+    feature_map: &FeatureMap,
+    rows: &polypus_qml::Dataset,
+    name: &str,
+) -> PyResult<FeatureStates> {
+    let samples: Vec<&[f64]> = (0..rows.num_samples()).map(|i| rows.sample(i)).collect();
+    feature_map
+        .states(&samples)
+        .map_err(|e| configuration_error(format!("{name}: {e}")))
+}
+
+/// `polypus.qml.kernel_matrix(encoder, x1, x2=None, *, …)`: the fidelity
+/// kernel `K[i, j] = |⟨φ(x1_i)|φ(x2_j)⟩|²` of the states `encoder` prepares,
+/// as a `float64` `numpy.ndarray` of shape `(len(x1), len(x2))`, C-contiguous,
+/// ready for `sklearn.svm.SVC(kernel="precomputed")`.
+///
+/// - **`encoder`** is a `polypus.qml.Encoder` (anything else is a
+///   `TypeError`); **`x1`** and **`x2`** are rows of features or `Dataset`s
+///   (labels are not used), as wide as each other.
+/// - **`x2=None`** is the Gram matrix of `x1` with itself: only the upper
+///   triangle, diagonal included, is computed, `N(N+1)/2` circuits, and
+///   mirrored, so the matrix is symmetric bit for bit. The diagonal is
+///   executed, not set to `1`. An explicit `x2` computes all `N·M` entries,
+///   even if it equals `x1`.
+/// - **Execution** takes `qml.expval`'s arguments with its rules. With
+///   `exact=True`, the inner products of the native simulator's statevectors
+///   (each state simulated once when they fit in the memory budget); otherwise
+///   each entry is the frequency of `0…0` over `shots` shots of the circuit
+///   `U(x1_i)` then `U(x2_j)†` — an unbiased estimate, and a matrix that may
+///   not be positive semi-definite.
+///
+/// Every check runs before a backend exists and raises
+/// `polypus.ConfigurationError` (a `ValueError`).
+#[pyfunction(name = "kernel_matrix", signature = (
+    encoder, x1, x2=None, *, shots=1024, infrastructure="local", n_qpus=1, nodes=1,
+    cores_per_qpu=2, walltime=None, options=None, sim_method="automatic", noise_model=None,
+    backend=None, seed=None, exact=false,
+))]
+pub fn kernel_matrix<'py>(
+    encoder: &Bound<'py, PyAny>,
+    x1: &Bound<'py, PyAny>,
+    x2: Option<&Bound<'py, PyAny>>,
+    shots: u32,
+    infrastructure: &str,
+    n_qpus: u32,
+    nodes: u32,
+    cores_per_qpu: u32,
+    walltime: Option<String>,
+    options: Option<OptionsArg>,
+    sim_method: &str,
+    noise_model: Option<Bound<'py, PyAny>>,
+    backend: Option<&str>,
+    seed: Option<u64>,
+    exact: bool,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let py = x1.py();
+    let exec = Execution {
+        shots,
+        infrastructure,
+        n_qpus,
+        nodes,
+        cores_per_qpu,
+        walltime,
+        options,
+        sim_method,
+        noise_model,
+        backend,
+        seed,
+        exact,
+    };
+    let encoder = kernel_encoder(encoder)?;
+    let backend = exec.check()?;
+    let (feature_map, rows) = {
+        // A copy: the encoder can be built on afterwards without changing it.
+        let stack = encoder.try_borrow()?.stack.clone();
+        let rows1 = kernel_rows(x1, "x1")?;
+        if stack.layers.is_empty() {
+            return Err(configuration_error(
+                "the Encoder has no layers: add an encoder (angle_encoder, iqp_encoder, \
+                 amplitude_encoder or basis_encoder) to load the rows",
+            ));
+        }
+        let feature_map = FeatureMap::compile(stack.num_qubits, stack.layers, rows1.num_features())
+            .map_err(|e| configuration_error(format!("x1: {e}")))?;
+        let rows = kernel_states(&feature_map, &rows1, "x1")?;
+        (feature_map, rows)
+    };
+    let columns = x2
+        .map(|x2| {
+            let rows2 = kernel_rows(x2, "x2")?;
+            if rows2.num_features() != feature_map.num_features() {
+                return Err(configuration_error(format!(
+                    "x2 has {} feature(s) per row but x1 has {}; the kernel compares rows of \
+                     the same width",
+                    rows2.num_features(),
+                    feature_map.num_features()
+                )));
+            }
+            kernel_states(&feature_map, &rows2, "x2")
+        })
+        .transpose()?;
+    let kernel = FidelityKernel::from_states(rows, columns).map_err(qml_to_config_err)?;
+    let (num_rows, num_columns) = (kernel.num_rows(), kernel.num_columns());
+    let mut primitive = KernelRun::new(kernel);
+    run_primitive(py, "kernel_matrix", &mut primitive, exec, backend)?;
+    let matrix = primitive.into_matrix().map_err(qml_to_py_err)?;
+    let matrix = array2(num_rows, num_columns, matrix).map_err(shape_to_py_err)?;
+    Ok(matrix.into_pyarray(py))
+}
+
 /// `qml.train` and `qml.predict` run Qiskit circuits. A native piece in their
 /// `feature_map` or `ansatz` is a `TypeError` that says so (plan D4-R), rather
 /// than a Qiskit error from composing it.
@@ -2721,6 +3461,8 @@ pub(crate) fn register(qml: &Bound<'_, PyModule>) -> PyResult<()> {
     qml.add_function(wrap_pyfunction!(load, qml)?)?;
     qml.add_function(wrap_pyfunction!(expval, qml)?)?;
     qml.add_function(wrap_pyfunction!(jacobian, qml)?)?;
+    qml.add_function(wrap_pyfunction!(vjp, qml)?)?;
+    qml.add_function(wrap_pyfunction!(kernel_matrix, qml)?)?;
     qml.add_class::<PyDataset>()?;
     qml.add_class::<PauliTerm>()?;
     qml.add_class::<PyObservable>()?;
@@ -3659,6 +4401,437 @@ mod tests {
         assert!(run.by_params.is_empty() && run.by_inputs.is_empty());
     }
 
+    // ── qml.vjp ──────────────────────────────────────────────────────────────
+
+    /// `primitive_model_and_rows`'s model and rows read out by `k` observables
+    /// (`⟨Z₀⟩`, `⟨Z₁Z₂⟩`, `⟨Z₂⟩`, …, cycling over the three qubits).
+    fn model_with_observables(k: usize) -> CompiledModel {
+        let strings = [vec![0], vec![1, 2], vec![2], vec![0, 1], vec![1]];
+        let observables = (0..k)
+            .map(|o| {
+                let string = strings[o % strings.len()]
+                    .iter()
+                    .map(|&q| (q, Pauli::Z))
+                    .collect();
+                Observable::new(vec![(
+                    1.0 + 0.1 * o as f64,
+                    PauliString::new(string).unwrap(),
+                )])
+                .unwrap()
+            })
+            .collect();
+        QuantumModel::new(3)
+            .layer(Layer::AngleEncoder(AngleEncoder::new(RotationAxis::Ry)))
+            .layer(Layer::HardwareEfficient(HardwareEfficientAnsatz::new(1)))
+            .layer(Layer::Iqp(IqpEncoder::new()))
+            .layer(Layer::HardwareEfficient(
+                HardwareEfficientAnsatz::real_amplitudes(1),
+            ))
+            .readout(Readout::new(observables, Decision::Raw).unwrap())
+            .compile(3)
+            .unwrap()
+    }
+
+    /// A cotangent with neither zero nor repeated entries.
+    fn cotangent(rows: usize, k: usize) -> Vec<f64> {
+        (0..rows * k).map(|i| 0.9 - 0.23 * i as f64).collect()
+    }
+
+    fn vjp_run(compiled: &CompiledModel, wrt: JacobianWrt, v: Vec<f64>) -> VjpRun {
+        let (_, rows, _) = primitive_model_and_rows();
+        let theta = (0..compiled.num_params())
+            .map(|p| -0.7 + 0.13 * p as f64)
+            .collect();
+        VjpRun::new(compiled.jacobian(&rows, wrt).unwrap(), theta, v)
+    }
+
+    /// `qml.jacobian`'s result for the same model, rows and `wrt`, contracted
+    /// with `v` as the PyTorch backward pass did: `(Σ_r,o v·J_θ, Σ_o v·J_x)`.
+    fn contracted_jacobian(run: &JacobianRun, v: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let (n, k) = (run.plan.num_samples(), run.plan.num_observables());
+        let (p, f) = (run.plan.num_params(), run.plan.num_features());
+        let mut by_params = vec![0.0; if run.by_params.is_empty() { 0 } else { p }];
+        let mut by_inputs = vec![0.0; if run.by_inputs.is_empty() { 0 } else { n * f }];
+        for r in 0..n {
+            for o in 0..k {
+                let weight = v[r * k + o];
+                for (c, sum) in by_params.iter_mut().enumerate() {
+                    *sum += weight * run.by_params[(r * k + o) * p + c];
+                }
+                for c in 0..by_inputs.len() / n.max(1) {
+                    by_inputs[r * f + c] += weight * run.by_inputs[(r * k + o) * f + c];
+                }
+            }
+        }
+        (by_params, by_inputs)
+    }
+
+    /// Exactly, `qml.vjp` hands `run_adjoint` one task per row, whatever the
+    /// number of observables (`qml.jacobian` hands it one per row and
+    /// observable), and its result is `qml.jacobian`'s contracted, whatever the
+    /// blocks.
+    #[test]
+    fn the_exact_vjp_takes_one_adjoint_run_per_row_whatever_the_observables() {
+        for k in [1, 2, 3, 5] {
+            let compiled = model_with_observables(k);
+            let v = cotangent(5, k);
+            for wrt in [JacobianWrt::Params, JacobianWrt::Inputs, JacobianWrt::Both] {
+                let mut jacobian = JacobianRun {
+                    plan: compiled
+                        .jacobian(&primitive_model_and_rows().1, wrt)
+                        .unwrap(),
+                    params: vjp_run(&compiled, wrt, v.clone()).params,
+                    by_params: Vec::new(),
+                    by_inputs: Vec::new(),
+                };
+                jacobian.run_exact(usize::MAX);
+                let (by_params, by_inputs) = contracted_jacobian(&jacobian, &v);
+                for block in [usize::MAX, 1, 2] {
+                    let mut run = vjp_run(&compiled, wrt, v.clone());
+                    run.run_exact(block);
+                    assert_eq!(run.adjoint_runs, 5, "k = {k}, block {block}");
+                    assert_eq!(run.by_params.len(), by_params.len());
+                    assert_eq!(run.by_inputs.len(), by_inputs.len());
+                    assert_close(&run.by_params, &by_params);
+                    assert_close(&run.by_inputs, &by_inputs);
+                }
+            }
+        }
+    }
+
+    /// The route the exact path takes when only one statevector fits — the
+    /// Jacobian's shifted circuits run exactly and read by `read` — gives the
+    /// adjoint's product; and with shots the circuits are `qml.jacobian`'s, so
+    /// with the same seed the product is its contraction.
+    #[test]
+    fn the_shift_and_sampled_routes_contract_the_jacobian() {
+        let compiled = model_with_observables(3);
+        let v = cotangent(5, 3);
+        let mut adjoint = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+        adjoint.run_exact(2);
+        let mut shift = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+        for start in (0..5).step_by(2) {
+            let samples = start..(start + 2).min(5);
+            let circuits: Vec<BoundCircuit> = shift
+                .circuits(samples.clone())
+                .unwrap()
+                .into_iter()
+                .map(BoundCircuit::Native)
+                .collect();
+            let probabilities = NativeStatevectorBackend::new(0)
+                .run_circuits_exact(&circuits, &run_params(0, 1))
+                .unwrap();
+            shift
+                .read(samples, BlockResults::Exact(probabilities))
+                .unwrap();
+        }
+        assert_eq!(shift.adjoint_runs, 0);
+        assert_close(&shift.by_params, &adjoint.by_params);
+        assert_close(&shift.by_inputs, &adjoint.by_inputs);
+
+        let mut sampled = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+        sampled_on_native(&mut sampled, 7, 2);
+        let mut jacobian = JacobianRun {
+            plan: compiled
+                .jacobian(&primitive_model_and_rows().1, JacobianWrt::Both)
+                .unwrap(),
+            params: sampled.params.clone(),
+            by_params: Vec::new(),
+            by_inputs: Vec::new(),
+        };
+        sampled_on_native(&mut jacobian, 7, 2);
+        let (by_params, by_inputs) = contracted_jacobian(&jacobian, &v);
+        assert_close(&sampled.by_params, &by_params);
+        assert_close(&sampled.by_inputs, &by_inputs);
+    }
+
+    /// A non-finite cotangent is not refused: the row with one takes the
+    /// Jacobian's runs (one per observable), every other row one run, and the
+    /// value reaches the product as the contraction gives it.
+    #[test]
+    fn a_non_finite_cotangent_propagates_through_the_jacobians_runs() {
+        let k = 2;
+        let compiled = model_with_observables(k);
+        let mut v = cotangent(5, k);
+        v[3 * k] = f64::NAN; // row 3
+        let mut run = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+        run.run_exact(2);
+        // Rows 0, 1, 2 and 4 take one run each, row 3 takes k.
+        assert_eq!(run.adjoint_runs, 4 + k);
+        assert!(run.by_params.iter().all(|d| d.is_nan()));
+        let f = compiled.num_features();
+        for (r, row) in run.by_inputs.chunks(f).enumerate() {
+            assert!(row.iter().all(|d| d.is_nan() == (r == 3)), "row {r}");
+        }
+    }
+
+    /// `qml.vjp` exactly over the rows of `primitive_model_and_rows`, read out
+    /// by two copies of `⟨Z₀⟩`, with row 1's cotangent `value` in both columns
+    /// (so its combined weight bound is `2 · value`), in blocks of 2: the run,
+    /// once checked against `qml.jacobian`'s contraction — the same finiteness,
+    /// and within 1e-9 relative where finite. On the `combined` path, relative
+    /// to `value`'s scale rather than to each entry: `assert_close`'s 1e-9 for
+    /// a cotangent of order 1, scaled by this one's, since the rounding errors
+    /// of the combined weight grow with `value` and an entry near zero is all
+    /// rounding at that scale. Off it, the Jacobian is `qml.jacobian`'s own and
+    /// each entry is held to its own magnitude.
+    fn vjp_with_a_large_row(value: f64, combined: bool) -> VjpRun {
+        let z0 = || {
+            Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())]).unwrap()
+        };
+        let compiled = QuantumModel::new(3)
+            .layer(Layer::AngleEncoder(AngleEncoder::new(RotationAxis::Ry)))
+            .layer(Layer::HardwareEfficient(HardwareEfficientAnsatz::new(1)))
+            .layer(Layer::Iqp(IqpEncoder::new()))
+            .readout(Readout::new(vec![z0(), z0()], Decision::Argmax).unwrap())
+            .compile(3)
+            .unwrap();
+        let mut v = cotangent(5, 2);
+        v[2] = value; // row 1, both observables
+        v[3] = value;
+        assert!(v.iter().all(|x| x.is_finite()));
+        let mut run = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+        run.run_exact(2);
+        let mut jacobian = JacobianRun {
+            plan: compiled
+                .jacobian(&primitive_model_and_rows().1, JacobianWrt::Both)
+                .unwrap(),
+            params: run.params.clone(),
+            by_params: Vec::new(),
+            by_inputs: Vec::new(),
+        };
+        jacobian.run_exact(usize::MAX);
+        let (by_params, by_inputs) = contracted_jacobian(&jacobian, &v);
+        for (got, expected) in [(&run.by_params, &by_params), (&run.by_inputs, &by_inputs)] {
+            assert_eq!(got.len(), expected.len());
+            for (k, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+                assert_eq!(
+                    g.is_finite(),
+                    e.is_finite(),
+                    "{value}, entry {k}: {g} vs {e}"
+                );
+                if e.is_finite() {
+                    let floor = if combined { value } else { 1.0 };
+                    let scale = g.abs().max(e.abs()).max(floor);
+                    assert!(
+                        (g - e).abs() <= 1e-9 * scale,
+                        "{value}, entry {k}: {g} vs {e}"
+                    );
+                }
+            }
+        }
+        // Row 1's input product is large and finite.
+        let f = compiled.num_features();
+        assert!(
+            run.by_inputs[f..2 * f]
+                .iter()
+                .any(|d| d.is_finite() && d.abs() > value / 1e3),
+            "{value}"
+        );
+        run
+    }
+
+    /// Finite cotangent values can still overflow the combined weight: two
+    /// copies of `⟨Z₀⟩` weighed by `1e308` each make a weight of `2e308`,
+    /// which no statevector can be weighed by. That row takes the Jacobian's
+    /// runs instead, and the product is the contraction, finite where it is.
+    #[test]
+    fn a_finite_cotangent_that_overflows_the_weight_takes_the_jacobians_runs() {
+        let run = vjp_with_a_large_row(1e308, false);
+        // Rows 0, 2, 3 and 4 take one run each, row 1 takes k = 2.
+        assert_eq!(run.adjoint_runs, 4 + 2);
+    }
+
+    /// A finite weight bound past `MAX_COMBINED_WEIGHT` (`6e307 · 2 = 1.2e308`,
+    /// below `f64::MAX`) takes the Jacobian's runs too; one under it (`1e307 ·
+    /// 2 = 2e307`) stays on the combined path, one run per row. Both are the
+    /// contraction.
+    #[test]
+    fn a_weight_bound_near_the_largest_float_takes_the_jacobians_runs() {
+        const {
+            assert!(2.0 * 6e307 > MAX_COMBINED_WEIGHT && (2.0_f64 * 6e307).is_finite());
+            assert!(2.0 * 1e307 < MAX_COMBINED_WEIGHT);
+        }
+        assert_eq!(vjp_with_a_large_row(6e307, false).adjoint_runs, 4 + 2);
+        assert_eq!(vjp_with_a_large_row(1e307, true).adjoint_runs, 5);
+    }
+
+    /// The route is decided row by row, never for a block: with a `NaN` in
+    /// row 0's cotangent, or finite values that overflow row 1's combined
+    /// weight, only that row takes the Jacobian's runs, so the product is the
+    /// same bit for bit whatever the block size — that is, whatever the
+    /// host's cores (DBFerPra's review of #577: blocks of 16 rows on one host
+    /// and 8 on another gave rows 16–31 different last bits).
+    #[test]
+    fn the_route_is_decided_per_row_so_the_blocks_change_nothing() {
+        let k = 3;
+        let compiled = model_with_observables(k);
+        let mut with_nan = cotangent(5, k);
+        with_nan[0] = f64::NAN; // row 0
+        let mut overflowing = cotangent(5, k);
+        overflowing[k..2 * k].fill(1e308); // row 1
+        let bits = |values: &[f64]| values.iter().map(|d| d.to_bits()).collect::<Vec<_>>();
+        for v in [with_nan, overflowing] {
+            let mut reference = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+            reference.run_exact(usize::MAX);
+            for block in [1, 2, 3, 4] {
+                let mut run = vjp_run(&compiled, JacobianWrt::Both, v.clone());
+                run.run_exact(block);
+                assert_eq!(run.adjoint_runs, 4 + k, "block {block}");
+                assert_eq!(
+                    bits(&run.by_inputs),
+                    bits(&reference.by_inputs),
+                    "block {block}"
+                );
+                assert_eq!(
+                    bits(&run.by_params),
+                    bits(&reference.by_params),
+                    "block {block}"
+                );
+            }
+            // The rows the value is not in are those of a finite cotangent's
+            // route, one run each, bit for bit.
+            let row = if v[0].is_nan() { 0 } else { 1 };
+            let mut clean = v.clone();
+            clean[row * k..(row + 1) * k].fill(0.5);
+            let mut finite = vjp_run(&compiled, JacobianWrt::Inputs, clean);
+            finite.run_exact(2);
+            assert_eq!(finite.adjoint_runs, 5);
+            let f = compiled.num_features();
+            for r in (0..5).filter(|&r| r != row) {
+                assert_eq!(
+                    bits(&reference.by_inputs[r * f..(r + 1) * f]),
+                    bits(&finite.by_inputs[r * f..(r + 1) * f]),
+                    "row {r}"
+                );
+            }
+        }
+    }
+
+    /// `read_exact` takes one row of derivatives per run, no more and no
+    /// fewer: a row too many or too few is a bookkeeping error before any
+    /// sample is read, rather than a product read from rows shifted by one.
+    #[test]
+    fn reading_the_exact_product_takes_exactly_one_row_per_run() {
+        let k = 3;
+        let compiled = model_with_observables(k);
+        let mut v = cotangent(5, k);
+        v[0] = f64::NAN; // row 0 takes k runs, the others one each
+        let run = vjp_run(&compiled, JacobianWrt::Both, v);
+        let (runs, combined) = run.exact_runs(0..5).unwrap();
+        assert_eq!(runs.len(), 4 + k);
+        let rows: Vec<Vec<f64>> = runs.iter().map(|r| vec![0.0; r.wrt.len()]).collect();
+        assert_eq!(run.read_exact(0..5, &combined, &rows).unwrap().len(), 5);
+        let mut extra = rows.clone();
+        extra.push(rows[0].clone());
+        let missing = &rows[..rows.len() - 1];
+        for (what, derivatives) in [("one too many", extra.as_slice()), ("one too few", missing)] {
+            let expected = format!(
+                "{} row(s) of derivatives for {} run(s)",
+                derivatives.len(),
+                runs.len()
+            );
+            match run.read_exact(0..5, &combined, derivatives) {
+                Err(PrimitiveError::Internal(message)) => {
+                    assert!(message.contains(&expected), "{what}: {message}")
+                }
+                other => panic!("{what}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_cancellation_between_vjp_blocks_stops_before_the_next() {
+        let counters = Counters::new();
+        let token = CancelToken::default();
+        let compiled = model_with_observables(2);
+        let mut run = Interfering {
+            inner: vjp_run(&compiled, JacobianWrt::Inputs, cotangent(5, 2)),
+            token: token.clone(),
+            fail_second: false,
+            built: std::cell::Cell::new(0),
+        };
+        let err = run_in_blocks(&mut run, || counters.create(), |_| 2, &token).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PrimitiveError::Infrastructure(InfrastructureError::Cancelled)
+            ),
+            "{err:?}"
+        );
+        assert_eq!(run.built.get(), 1);
+        assert_eq!(counters.get(), (1, 1, 1));
+        assert_eq!(run.inner.by_inputs.len(), 2 * compiled.num_features());
+    }
+
+    /// A Ctrl+C stops the adjoint runs of an exact `qml.vjp` block in flight,
+    /// as it does `qml.jacobian`'s (see
+    /// `a_ctrl_c_stops_an_adjoint_jacobian_in_flight` for the sizing).
+    #[test]
+    fn a_ctrl_c_stops_an_adjoint_vjp_in_flight() {
+        let compiled = QuantumModel::new(16)
+            .layer(Layer::AngleEncoder(AngleEncoder::new(RotationAxis::Ry)))
+            .layer(Layer::HardwareEfficient(HardwareEfficientAnsatz::new(4)))
+            .readout(
+                Readout::new(
+                    vec![Observable::new(vec![(
+                        1.0,
+                        PauliString::new(vec![(0, Pauli::Z)]).unwrap(),
+                    )])
+                    .unwrap()],
+                    Decision::Raw,
+                )
+                .unwrap(),
+            )
+            .compile(16)
+            .unwrap();
+        let rows: Vec<Vec<f64>> = (0..32)
+            .map(|i| (0..16).map(|j| 0.1 * (i + j) as f64).collect())
+            .collect();
+        let theta: Vec<f64> = (0..compiled.num_params())
+            .map(|p| 0.01 * p as f64)
+            .collect();
+        let mut run = VjpRun::new(
+            compiled.jacobian(&rows, JacobianWrt::Both).unwrap(),
+            theta,
+            vec![1.0; 32],
+        );
+        let guard = Arc::new(InterruptAfter {
+            ok: 1,
+            polls: AtomicUsize::new(0),
+        });
+        let token = CancelToken::with_interrupt(guard.clone());
+        let err = run_in_blocks(
+            &mut run,
+            || {
+                Ok(BlockRunner::Exact {
+                    native: NativeStatevectorBackend::new(0),
+                    params: run_params(0, 1),
+                })
+            },
+            |_| usize::MAX,
+            &token,
+        )
+        .unwrap_err();
+        match err {
+            PrimitiveError::Infrastructure(InfrastructureError::Backend(
+                crate::infrastructure::BackendError::Aborted(message),
+            )) => assert_eq!(message, "test interrupt"),
+            other => panic!("expected the interrupt, got {other:?}"),
+        }
+        assert_eq!(guard.polls.load(Ordering::SeqCst), 2);
+        assert!(run.by_params.iter().all(|&d| d == 0.0) && run.by_inputs.is_empty());
+        assert_eq!(run.adjoint_runs, 0);
+    }
+
+    #[test]
+    fn shapes_print_as_python_tuples() {
+        assert_eq!(shape_repr(&[3, 2]), "(3, 2)");
+        assert_eq!(shape_repr(&[3]), "(3,)");
+        assert_eq!(shape_repr(&[]), "()");
+        assert_eq!(shape_repr(&[1, 2, 3]), "(1, 2, 3)");
+    }
+
     /// `watched` hands the work its stop flag: an interrupt seen by the watcher
     /// reaches a work that polls the flag, which returns early instead of
     /// running out its (here 10 s) course, and the interrupt is the result.
@@ -3708,5 +4881,272 @@ mod tests {
         // And a work that ends before the first look is just its result.
         let quick = watched(&CancelToken::default(), |_| 7);
         assert!(matches!(quick, Ok(7)));
+    }
+
+    // ── qml.kernel_matrix ────────────────────────────────────────────────────
+
+    /// An IQP-then-`Rx` feature map on 3 qubits and 4 + 3 rows.
+    fn kernel_map_and_rows() -> (FeatureMap, Vec<Vec<f64>>, Vec<Vec<f64>>) {
+        let map = FeatureMap::compile(
+            3,
+            vec![
+                Layer::Iqp(IqpEncoder::new()),
+                Layer::AngleEncoder(AngleEncoder::new(RotationAxis::Rx)),
+            ],
+            3,
+        )
+        .unwrap();
+        let rows = |n: usize, shift: f64| -> Vec<Vec<f64>> {
+            (0..n)
+                .map(|i| (0..3).map(|j| shift + 0.23 * (i * 3 + j) as f64).collect())
+                .collect()
+        };
+        (map, rows(4, 0.1), rows(3, -0.6))
+    }
+
+    fn kernel_run(symmetric: bool) -> KernelRun {
+        let (map, x1, x2) = kernel_map_and_rows();
+        let x2 = (!symmetric).then_some(&x2[..]);
+        KernelRun::new(FidelityKernel::new(&map, &x1, x2).unwrap())
+    }
+
+    /// The matrix of the compute-uncompute circuits of `kernel`, each run
+    /// exactly on its own: the reference the native inner products are
+    /// checked against.
+    fn compute_uncompute_matrix(kernel: &FidelityKernel) -> Vec<f64> {
+        let circuits: Vec<BoundCircuit> = kernel
+            .circuits(0..kernel.num_pairs())
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .map(BoundCircuit::Native)
+            .collect();
+        let probabilities = NativeStatevectorBackend::new(0)
+            .run_circuits_exact(&circuits, &run_params(0, 1))
+            .unwrap();
+        let values: Vec<f64> = probabilities
+            .iter()
+            .map(|p| kernel.fidelity_from_probabilities(p).unwrap())
+            .collect();
+        kernel.matrix(&values).unwrap()
+    }
+
+    #[test]
+    fn a_seeded_kernel_does_not_depend_on_the_block_size() {
+        for symmetric in [true, false] {
+            let mut whole = kernel_run(symmetric);
+            sampled_on_native(&mut whole, 5, usize::MAX);
+            assert_eq!(whole.filled, whole.kernel.num_pairs());
+            for block in [1, 2, 5] {
+                let mut blocked = kernel_run(symmetric);
+                sampled_on_native(&mut blocked, 5, block);
+                assert_eq!(blocked.matrix, whole.matrix, "block {block}");
+            }
+            let mut other_seed = kernel_run(symmetric);
+            sampled_on_native(&mut other_seed, 6, usize::MAX);
+            assert_ne!(other_seed.matrix, whole.matrix);
+            // The sampled matrix: each block written at its pairs' entries as
+            // it is read, a symmetric one mirrored bit for bit, every entry a
+            // frequency.
+            let n2 = whole.kernel.num_columns();
+            let matrix = whole.into_matrix().unwrap();
+            for (k, value) in matrix.iter().enumerate() {
+                assert!((0.0..=1.0).contains(value));
+                if symmetric {
+                    let (i, j) = (k / n2, k % n2);
+                    assert_eq!(value.to_bits(), matrix[j * n2 + i].to_bits());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_exact_kernel_is_the_compute_uncompute_one_whatever_the_blocks() {
+        for symmetric in [true, false] {
+            let reference = compute_uncompute_matrix(&kernel_run(symmetric).kernel);
+            let mut first: Option<Vec<f64>> = None;
+            for block in [1, 2, usize::MAX] {
+                let mut run = kernel_run(symmetric);
+                run.run_exact(block);
+                // One call to the native backend computed the whole matrix,
+                // whatever the blocks: its result, bit for bit.
+                let kernel = &run.kernel;
+                let native = NativeStatevectorBackend::new(0)
+                    .fidelity_matrix(
+                        kernel.row_states(),
+                        (!symmetric).then(|| kernel.column_states()),
+                        None,
+                    )
+                    .unwrap();
+                let matrix = run.into_matrix().unwrap();
+                assert_eq!(matrix, native, "block {block}");
+                for (k, (a, b)) in matrix.iter().zip(&reference).enumerate() {
+                    // Two exact routes, a few dozen roundings each.
+                    assert!((a - b).abs() < 1e-12, "entry {k}: {a} != {b}");
+                }
+                match &first {
+                    None => first = Some(matrix),
+                    Some(first) => assert_eq!(first, &matrix, "block {block}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_rows_in_chunks_concatenate_to_the_whole_matrix() {
+        let (map, x1, x2) = kernel_map_and_rows();
+        let exact = |rows: &[Vec<f64>]| {
+            let mut run = KernelRun::new(FidelityKernel::new(&map, rows, Some(&x2[..])).unwrap());
+            run.run_exact(usize::MAX);
+            run.into_matrix().unwrap()
+        };
+        let whole = exact(&x1);
+        let chunks: Vec<f64> = [&x1[..1], &x1[1..3], &x1[3..]]
+            .into_iter()
+            .flat_map(exact)
+            .collect();
+        assert_eq!(chunks, whole);
+    }
+
+    #[test]
+    fn a_kernel_runs_its_blocks_on_one_backend_created_and_closed_once() {
+        let counters = Counters::new();
+        let mut run = kernel_run(true);
+        run_in_blocks(
+            &mut run,
+            || counters.create(),
+            |_| 4,
+            &CancelToken::default(),
+        )
+        .unwrap();
+        // 4 rows: 10 pairs, so 10 circuits in blocks of 4: three calls.
+        assert_eq!(run.filled, 10);
+        assert_eq!(counters.get(), (1, 3, 1));
+    }
+
+    #[test]
+    fn a_kernel_cancelled_or_failing_between_blocks_stops_and_still_closes() {
+        let counters = Counters::new();
+        let token = CancelToken::default();
+        let mut run = Interfering {
+            inner: kernel_run(false),
+            token: token.clone(),
+            fail_second: false,
+            built: std::cell::Cell::new(0),
+        };
+        let err = run_in_blocks(&mut run, || counters.create(), |_| 5, &token).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PrimitiveError::Infrastructure(InfrastructureError::Cancelled)
+            ),
+            "{err:?}"
+        );
+        assert_eq!(run.built.get(), 1);
+        assert_eq!(run.inner.filled, 5);
+        assert_eq!(counters.get(), (1, 1, 1));
+
+        let counters = Counters::new();
+        let mut run = Interfering {
+            inner: kernel_run(false),
+            token: CancelToken::default(),
+            fail_second: true,
+            built: std::cell::Cell::new(0),
+        };
+        let err = run_in_blocks(
+            &mut run,
+            || counters.create(),
+            |_| 5,
+            &CancelToken::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, PrimitiveError::Qml(QmlError::EmptyCounts)),
+            "{err:?}"
+        );
+        assert_eq!(counters.get(), (1, 1, 1));
+    }
+
+    #[test]
+    fn a_kernel_block_outside_its_pairs_is_an_internal_error() {
+        let run = kernel_run(true);
+        assert!(matches!(
+            run.circuits(9..11),
+            Err(PrimitiveError::Internal(_))
+        ));
+        let mut run = kernel_run(true);
+        assert!(matches!(
+            run.read(0..2, BlockResults::Counts(vec![Counts::new()])),
+            Err(PrimitiveError::Qml(QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1
+            }))
+        ));
+    }
+
+    /// A Ctrl+C stops the exact inner products in flight, with the error a
+    /// check between blocks gives: the check before them lets them start, then
+    /// the watcher's first look interrupts them. The error alone cannot tell a
+    /// stop in flight from work that ran to its end and was reported
+    /// interrupted afterwards (`watched` returns the reason it saw either
+    /// way), so the interrupted call is timed against the same call run to
+    /// completion: a stop in flight takes a fraction of it. The work must
+    /// outlive the watcher's first look (25 ms): uninterrupted, these 24
+    /// states of 18 qubits (a full IQP map) and their 300 inner products took
+    /// 3.5 s in a debug `cargo test` on a 16-CPU node, 140 times that. The
+    /// comparison needs a run long enough to time: it is made when the whole
+    /// run takes at least 16 looks of the watcher (400 ms), as it always does
+    /// in debug, which CI runs; an optimized build can finish in less, too
+    /// close to the watcher's look and the simulator's own cancellation cadence
+    /// for a quarter of it to mean anything, so there it is skipped, and said
+    /// so. The error, the polls and the empty results are checked always.
+    #[test]
+    fn a_ctrl_c_stops_an_exact_kernel_in_flight() {
+        let map = FeatureMap::compile(18, vec![Layer::Iqp(IqpEncoder::new())], 18).unwrap();
+        let rows: Vec<Vec<f64>> = (0..24)
+            .map(|i| (0..18).map(|j| 0.05 * (i + j) as f64).collect())
+            .collect();
+        let exact = || {
+            Ok(BlockRunner::Exact {
+                native: NativeStatevectorBackend::new(0),
+                params: run_params(0, 1),
+            })
+        };
+        let mut whole = KernelRun::new(FidelityKernel::new(&map, &rows, None).unwrap());
+        let started = Instant::now();
+        run_in_blocks(&mut whole, exact, |_| usize::MAX, &CancelToken::default()).unwrap();
+        let uninterrupted = started.elapsed();
+        assert!(whole.matrix.is_some());
+
+        let mut run = KernelRun::new(FidelityKernel::new(&map, &rows, None).unwrap());
+        let guard = Arc::new(InterruptAfter {
+            ok: 1,
+            polls: AtomicUsize::new(0),
+        });
+        let token = CancelToken::with_interrupt(guard.clone());
+        let started = Instant::now();
+        let err = run_in_blocks(&mut run, exact, |_| usize::MAX, &token).unwrap_err();
+        let interrupted = started.elapsed();
+        match err {
+            PrimitiveError::Infrastructure(InfrastructureError::Backend(
+                crate::infrastructure::BackendError::Aborted(message),
+            )) => assert_eq!(message, "test interrupt"),
+            other => panic!("expected the interrupt, got {other:?}"),
+        }
+        assert_eq!(guard.polls.load(Ordering::SeqCst), 2);
+        assert!(run.matrix.is_none() && run.filled == 0);
+        if uninterrupted < 16 * WATCH_INTERVAL {
+            eprintln!(
+                "the whole run took {uninterrupted:?}, under {:?}: too short to time a stop \
+                 in flight against, so that comparison is skipped",
+                16 * WATCH_INTERVAL
+            );
+            return;
+        }
+        assert!(
+            interrupted < uninterrupted / 4,
+            "stopped after {interrupted:?}, the whole run takes {uninterrupted:?}: the \
+             work did not see the stop"
+        );
     }
 }

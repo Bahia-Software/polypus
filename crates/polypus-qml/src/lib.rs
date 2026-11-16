@@ -74,7 +74,10 @@
 //! [`QmlProblem::gradient_from_adjoint`] reads the derivatives back. The
 //! expectation Jacobian has the same pair
 //! ([`JacobianBlock::adjoint_runs`], [`JacobianBlock::jacobian_from_adjoint`]),
-//! one run per sample and observable. This crate still executes nothing.
+//! one run per sample and observable, and so does its product with a
+//! cotangent ([`JacobianBlock::vjp_runs`], [`JacobianBlock::vjp_from_adjoint`]),
+//! one run per sample whatever the number of observables. This crate still
+//! executes nothing.
 //!
 //! ## Expectations and their Jacobian
 //!
@@ -87,7 +90,22 @@
 //! `∂⟨O_o⟩/∂x` ([`JacobianWrt`]), by the same per-occurrence shift rule, block
 //! by block if the caller wants to bound how many circuits are alive
 //! ([`JacobianBlock`]). It costs `2 · shifts` circuits per sample, with no
-//! unshifted one.
+//! unshifted one. A reverse-mode backward pass needs only its product with a
+//! cotangent, a [`Vjp`] ([`Jacobian::vjp`], or by adjoint differentiation as
+//! above).
+//!
+//! ## Quantum kernels
+//!
+//! A [`FeatureMap`] compiles an encoder stack on its own (no ansatz, no
+//! readout) into the circuit `U(x)` of each sample, with the same layer
+//! checks and gates as a model's encoders, and a [`FidelityKernel`] gives the
+//! Gram matrix `K[i, j] = |⟨φ(x_i)|φ(y_j)⟩|²` over one or two sets of
+//! samples: the compute-uncompute circuit of each pair (`U(x_i)`, then
+//! `U(y_j)†` from `polypus_circuit::ConcreteCircuit::inverse`, then
+//! `measure_all`) and the reader of its `0…0` frequency, or the unmeasured
+//! state circuits for a caller that takes the inner products of statevectors.
+//! A symmetric kernel computes the upper triangle, diagonal included, and
+//! mirrors it.
 
 #![warn(missing_docs)]
 
@@ -95,6 +113,7 @@ mod adjoint;
 mod dataset;
 mod error;
 mod jacobian;
+mod kernel;
 mod layers;
 mod loss;
 mod model;
@@ -106,7 +125,8 @@ mod rng;
 pub use adjoint::{AdjointRun, DiagonalObservable};
 pub use dataset::Dataset;
 pub use error::{QmlError, ValidationError};
-pub use jacobian::{ExpectationJacobian, Jacobian, JacobianBlock, JacobianWrt};
+pub use jacobian::{ExpectationJacobian, Jacobian, JacobianBlock, JacobianWrt, Vjp};
+pub use kernel::{FeatureMap, FeatureStates, FidelityKernel};
 pub use layers::{
     AmplitudeEncoder, AngleEncoder, BasisEncoder, ConvBlock, ConvLayer, Entanglement, Entangler,
     HardwareEfficientAnsatz, IqpEncoder, KeepRule, Layer, Pairing, PoolBlock, PoolLayer,

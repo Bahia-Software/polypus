@@ -224,3 +224,27 @@ def test_cli_fails_with_annotations(tmp_path):
     res = run_cli(tree(tmp_path, pin_a="0.7.2"), "--tag", "v0.8.0")
     assert res.returncode == 1
     assert "::error::" in res.stdout
+
+
+def test_release_refuses_unassembled_changelog_fragments(tmp_path):
+    root = tree(tmp_path)
+    root.joinpath("changelog.d").mkdir()
+    root.joinpath("changelog.d", "1.fixed.md").write_text("x\n")
+    assert any(
+        "changelog.d/1.fixed.md" in e for e in errors(root, tag="v0.8.0", publish=True)
+    )
+
+
+def test_release_ignores_changelog_d_scaffolding(tmp_path):
+    root = tree(tmp_path)
+    root.joinpath("changelog.d").mkdir()
+    root.joinpath("changelog.d", ".gitkeep").write_text("")
+    root.joinpath("changelog.d", "template.md.j2").write_text("")
+    assert errors(root, tag="v0.8.0", publish=True) == []
+
+
+def test_branch_mode_ignores_changelog_fragments(tmp_path):
+    root = tree(tmp_path, version="0.8.1-dev", cff_version="0.8.0")
+    root.joinpath("changelog.d").mkdir()
+    root.joinpath("changelog.d", "1.fixed.md").write_text("x\n")
+    assert errors(root) == []

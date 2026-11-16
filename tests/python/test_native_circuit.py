@@ -68,6 +68,31 @@ class TestCircuitConstruction:
         assert "cx q[0],q[1];" in qasm
         assert "measure q -> c;" in qasm
 
+    def test_to_qasm2_writes_full_in_order_runs_canonically(self):
+        """A barrier on every qubit in order and ``measure(k, k)`` of every
+        qubit in order are written as ``barrier q;`` and ``measure q -> c;``,
+        so the export is a fixed point of ``from_qasm2`` (contract C-2, #568),
+        and both docstrings say so."""
+        import polypus
+
+        qasm = (
+            polypus.Circuit(2)
+            .h(0)
+            .barrier([0, 1])
+            .measure(0, 0)
+            .measure(1, 1)
+            .to_qasm2()
+        )
+        assert qasm.endswith("h q[0];\nbarrier q;\nmeasure q -> c;\n")
+        assert polypus.Circuit.from_qasm2(qasm).to_qasm2() == qasm
+
+        def doc(method):
+            return " ".join(method.__doc__.split())
+
+        assert "barrier q;" in doc(polypus.Circuit.to_qasm2)
+        assert "measure q -> c;" in doc(polypus.Circuit.to_qasm2)
+        assert "measure_all()" in doc(polypus.Circuit.from_qasm2)
+
     def test_to_qasm2_binds_params(self):
         import polypus
 

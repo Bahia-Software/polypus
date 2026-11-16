@@ -12,16 +12,33 @@ Entries were curated from the Conventional Commits history. Releases before
 ## [Unreleased]
 
 ### Added
-- `polypus.qml.Ansatz.simplified_two_design(reps)`, PennyLane's
-  `SimplifiedTwoDesign`: an `Ry` on every qubit, then `reps` blocks that apply
-  `CZ` and an `Ry` on both qubits of each even pair and then each odd pair;
-  `n + 2·(n−1)·reps` parameters for the `n` qubits active at that point, in
-  PennyLane's order (initial weights, then `(reps, n−1, 2)`). Only `Ry` and
-  `CZ`, so the exact parameter-shift gradient still applies; one active qubit
-  is the initial layer alone, whatever `reps`. The layer saves and loads with
-  `TrainedModel.save`/`qml.load` (format version still 1). In `polypus-qml`:
-  `SimplifiedTwoDesignAnsatz`, `Layer::SimplifiedTwoDesign` and
-  `QuantumModel::simplified_two_design` (#505, #570).
+- `polypus.qml.kernel_matrix(encoder, x1, x2=None, *, ...)`, the fidelity
+  quantum kernel `K[i, j] = |⟨φ(x1_i)|φ(x2_j)⟩|²` of a native `Encoder` as a
+  `float64` NumPy array, ready for scikit-learn's
+  `SVC(kernel="precomputed")`. With `exact=True` it takes the inner products of
+  the native simulator's statevectors, each state simulated once when they fit
+  in the memory budget; with shots, the `0…0` frequency of one
+  compute-uncompute circuit (`U(x1_i)` then `U(x2_j)†`) per entry. Without
+  `x2` only the upper triangle, diagonal included, runs (`N(N+1)/2` circuits)
+  and the matrix is symmetric bit for bit; the diagonal is executed, not set
+  to 1. It takes `qml.expval`'s execution arguments and rules, checks
+  everything before a backend exists, and runs the pairs in blocks over one
+  backend per call. In `polypus-circuit`: `ConcreteCircuit::inverse`,
+  `CircuitError::NotInvertible`, and `GateInstruction::push_inverse`, public:
+  the one inverse table of the workspace, which the native simulator's
+  adjoint gradient now steps back through too (`csx`, `rc3x` and `c3sqrtx` are
+  inverted through their decomposition). In `polypus-qml`: `FeatureMap`,
+  `FeatureStates` and `FidelityKernel`, and the variants
+  `ValidationError::TrainableLayerInFeatureMap`, `QmlError::KernelTooLarge`
+  and `QmlError::StateWidthMismatch`. In `polypus-infrastructure`:
+  `NativeStatevectorBackend::fidelity_matrix`, which counts its matrix
+  against the memory budget and, with room for one statevector beside it but
+  not two, computes each entry from one statevector instead of refusing. In
+  `polypus-backend`: `InsufficientMemoryForResult` and the
+  `BackendError::InsufficientMemoryForResult` variant (`BackendError` is
+  `#[non_exhaustive]`), raised in Python as
+  `polypus.InsufficientMemoryError` when a result leaves no room for its
+  statevectors. See `examples/qml_kernel_svc.py` (#504).
 - `polypus.qml.Ansatz.strongly_entangling(reps, ranges=None, entangler="cx")`,
   PennyLane's `StronglyEntanglingLayers`: per layer, a general rotation on
   every qubit, emitted as `Rz(φ)`, `Ry(θ)`, `Rz(ω)`, in that order, so the
@@ -53,8 +70,8 @@ Entries were curated from the Conventional Commits history. Releases before
   blocks. See `examples/qml_expval_jacobian_loop.py`.
 - `polypus.torch.QuantumLayer(model, *, initial_params=None, seed=None, ...)`,
   a `torch.nn.Module` over a native `qml.Model` for hybrid quantum-classical
-  networks: forward = `qml.expval` over the batch, backward = the
-  vector-Jacobian product of `qml.jacobian` (parameters, inputs or both), so
+  networks: forward = `qml.expval` over the batch, backward = one `qml.vjp`
+  call with the incoming gradient (parameters, inputs or both; #559), so
   it trains with any `torch.optim` optimizer; float32 networks work as is (the
   computation is float64 on the CPU), and a `seed` derives one per backend call
   so a training replays. `polypus.torch.from_trained(trained, ...)` starts one
@@ -83,6 +100,27 @@ Entries were curated from the Conventional Commits history. Releases before
   of `qml.expval`), and pickling of `Model`, so `copy.deepcopy` works: it
   travels as the JSON of its spec, rebuilt through the checks of `qml.load`
   (#502).
+- `polypus.qml.vjp(model, x, params, cotangent, *, wrt="params", ...)`, the
+  vector-Jacobian product of `qml.jacobian` with a `(rows, observables)`
+  cotangent, what a reverse-mode backward pass needs: `(num_params,)` summed
+  over the rows for `wrt="params"`, `(rows, features)` for `"inputs"`, the
+  tuple for `"both"`. With `exact=True` it takes one adjoint run per row
+  whatever the number of observables (`qml.jacobian` takes one per row and
+  observable), so the exact backward pass of `polypus.torch.QuantumLayer`,
+  which now calls it, is up to `K` times cheaper for a `K`-observable readout;
+  with shots it runs `qml.jacobian`'s circuits and gives its contraction for
+  the same `seed`. The layer's gradients move in the last bits, no more:
+  exactly, they come from one combined observable instead of one run per
+  observable, and with shots the parameter product is summed in row order.
+  The cotangent's shape is checked right after `params` (a
+  `polypus.ConfigurationError`, as is a complex one) and its values are read
+  as `x`'s are (a string or `None` is the same `TypeError`); a `NaN` or an
+  infinity in it propagates as through the contraction, and changes only its
+  own row's route. `qml.jacobian` does not change. In `polypus-qml`:
+  `Jacobian::vjp`, `JacobianBlock::vjp_runs`/`num_vjp_runs`/
+  `vjp_weight_bounds`/`vjp_from_adjoint` (and
+  `ExpectationJacobian`'s), `Vjp` and `DiagonalObservable::weight_bound`.
+  `benchmarks/bench_vjp.py` measures it (#559, ADR 0008).
 - A call trace for `polypus.train` and `polypus.run_quantum_circuit`
   (contract C-12): the keyword-only `trace=` (a path to a new file) or
   `POLYPUS_CALL_TRACE=<directory>` writes one JSON Lines line per planner
@@ -130,9 +168,12 @@ Entries were curated from the Conventional Commits history. Releases before
   and `TrainOutcome::n_evaluations`. Seeded results are unchanged (#431).
 
 ### Changed
-- **BREAKING (Rust):** `polypus_qml::Layer` has a new variant,
-  `SimplifiedTwoDesign`, so an exhaustive `match` on it outside its crate
-  must handle it (#570).
+- **BREAKING (Rust):** `polypus_qml::ValidationError` has a new variant,
+  `TrainableLayerInFeatureMap`, so an exhaustive `match` on it outside its
+  crate must handle it (#504).
+- **BREAKING (Rust):** `polypus_qml::QmlError` has two new variants,
+  `KernelTooLarge` and `StateWidthMismatch`, so an exhaustive `match` on it
+  outside its crate must handle them (#504).
 - **BREAKING:** for Rust users, `TrainFlow` and `RunCircuitFlow`
   (`polypus-orchestration`) have a new public field,
   `trace: Option<Arc<CallTracer>>`, so a struct literal must set it;
@@ -184,6 +225,10 @@ Entries were curated from the Conventional Commits history. Releases before
 - CUNQA: the seal looks up a family's QPUs with `get_QPUs` once instead of
   once per wave, and looks them up again after `qdrop` or a failed wave
   (#437).
+- **BREAKING (build):** the `qmio` feature needs Rust 1.89: `zeromq` goes from
+  0.6 to 0.7, which raised its MSRV. Default features keep Rust 1.85. The
+  QMIO reply-size cap is still checked after the reply is received; 0.7 has
+  no receive size limit yet (#383).
 
 ### Fixed
 - `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a
@@ -194,6 +239,13 @@ Entries were curated from the Conventional Commits history. Releases before
   after such a parameter count, and a saved file edited to one, fail the same
   way. In `polypus-qml`, `QuantumModel::compile` returns the new
   `ValidationError::TooManyParams` instead of panicking (#505).
+- The OpenQASM 2.0 export of a barrier on every qubit in order and of the
+  measurements `q[k] -> c[k]` of every qubit in order is now written as
+  `barrier q;` and `measure q -> c;`, the form the importer reads them back
+  in, as the OpenQASM 3 export already did. So
+  `to_qasm2(from_qasm2(to_qasm2(c)))` is byte-identical to `to_qasm2(c)` for
+  these circuits too (contract C-2), and the exported text of those two shapes
+  changes for the same program (#568).
 
 ### Documentation
 - The documentation site (MkDocs Material) is published at the Pages root,

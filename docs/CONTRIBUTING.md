@@ -59,7 +59,8 @@ it lives (Cargo enforces it and Clippy picks it up automatically). The
 workspace uses the MSRV-aware resolver (`resolver = "3"`), so `cargo update`
 avoids dependency releases that need a newer Rust than `rust-version`; the
 `msrv` CI job still builds with `--locked` and catches anything that slips
-through. Dependabot does not honour `rust-version`
+through. The `qmio` feature has a higher minimum, Rust 1.89 (`zeromq` 0.7), which the
+same job checks. Dependabot does not honour `rust-version`
 ([dependabot-core#5423](https://github.com/dependabot/dependabot-core/issues/5423)),
 so `.github/dependabot.yml` ignores `uuid >=1.27`, which needs Rust 1.89. Remove
 that `ignore` when `rust-version` is raised to 1.89 or later (#276, #278). If
@@ -200,9 +201,9 @@ rejects:
 
 - internal notes and local tool configuration that `.gitignore` already
   excludes, and any file added although a versioned `.gitignore` ignores it;
-- infrastructure data and credentials on added lines: cluster file-system
-  paths, login-node names, private IPv4 addresses, private-key headers and
-  GitHub tokens;
+- infrastructure data and credentials on added lines and in the messages
+  of the analysed commits: cluster file-system paths, login-node and internal
+  host names, private IPv4 addresses, private-key headers and GitHub tokens;
 - notebooks under `tutorials/` with outputs or execution counts;
 - blobs larger than 1 MiB;
 - a `CITATION.cff` version different from `Cargo.toml`, or not an earlier
@@ -225,7 +226,9 @@ result; `nbstripout --install` once per clone prevents it.
 
 Legitimate exceptions go in `.github/hygiene-allow.txt`, one per line as
 `RULE<TAB>PATTERN<TAB># reason`: one rule, the narrowest path or glob, and a
-reason. Forbidden names, notebooks, versions and submodules admit none.
+reason. Forbidden names, notebooks, versions, submodules and commit messages
+admit none: merge commits keep every message in the history of `main`, so
+reword the commit instead (`git commit --amend` or `git rebase -i`).
 Changes to the allow list, the script, the workflow or the policy-relevant
 `.gitignore` files need explicit human review.
 
@@ -299,6 +302,14 @@ run (the unmutated tests failing, the step timing out) fails its job. A manual
 run (`workflow_dispatch`) reports in the summaries only, unless its `comment`
 input is set.
 
+Every test process runs with a 6 GiB address-space cap (`prlimit --as`,
+through cargo's target runner), because some mutants turn a loop into one that
+allocates until the timeout, and two at once can exhaust the runner's 16 GB.
+Such a mutant aborts on a failed allocation when it reaches the cap, and its
+test fails: it counts as caught (one still under the cap when the timeout hits
+counts as a timeout, as before). The unmutated tests of every crate pass well
+under the cap.
+
 To reproduce a crate's run, or to check that a new test catches a mutant,
 install the version the workflow pins and run it on that crate (it copies the
 tree to a temporary directory; `mutants.out/` is ignored by git):
@@ -309,6 +320,10 @@ cargo mutants --package polypus-observable --all-features           # the whole 
 cargo mutants --package polypus-observable --all-features --list    # its mutants, without running them
 cargo mutants --package polypus-observable --all-features --file crates/polypus-observable/src/qubo.rs --re 'from_matrix'
 cargo mutants --package polypus-sim --all-features --shard 1/3 --sharding round-robin   # one CI job's shard
+# As the CI job runs it, with the same cap on each test process (x86-64 Linux, util-linux's prlimit;
+# on another target the variable name changes, and without the right one the cap is silently not applied):
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="prlimit --as=6442450944" \
+  cargo mutants --package polypus-sim --all-features --jobs 2 --shard 1/3 --sharding round-robin
 ```
 
 Kill a missed mutant with a test of the behaviour it changes, not by
@@ -351,6 +366,27 @@ We use [Conventional Commits](https://www.conventionalcommits.org):
 `feat(circuit): add cp to the QASM importer`, `test(seam): mock CUNQA contract`.
 The type+scope prefix feeds the changelog; the subject line explains the
 *intent*, not the action ("Update" tells a reviewer nothing).
+
+## Changelog entries
+
+A user-visible change adds one file to [`changelog.d/`](../changelog.d)
+instead of editing [`CHANGELOG.md`](../CHANGELOG.md); the release pull request
+assembles the files into `CHANGELOG.md` with
+[towncrier](https://towncrier.readthedocs.io/). Pull requests that all edited
+`CHANGELOG.md` used to conflict with each other on the same lines.
+
+- Name: `<issue>.<type>.md` (`504.added.md`), or `+<short-slug>.<type>.md`
+  when there is no issue. A second entry of the same issue and type is
+  `504.added.1.md`.
+- Type: `added`, `changed`, `deprecated`, `removed`, `fixed` or
+  `documentation`, the `### ` subsection the entry goes under.
+- Content: one entry, as it should read in the changelog, without the
+  leading `- `. Keep the issue reference in the text, as in `(#504)`, and
+  mark breaking changes **BREAKING** at the start.
+- Preview the next release section:
+  `pipx run --spec towncrier==26.9.0 towncrier build --draft --version next`.
+  A misnamed file fails that command, and the same check in CI. Within a
+  section, entries are ordered by issue number, not by file suffix.
 
 ## Pull requests
 
@@ -436,7 +472,7 @@ version is `0.x`), with `cargo set-version --workspace` and the backend
 templates' lockfiles refreshed as in [`docs/RELEASING.md`](RELEASING.md#release-steps);
 the `semver` CI job (cargo-semver-checks against the last published version)
 fails otherwise.
-Mark the change **BREAKING** in `CHANGELOG.md`. The release checklist lives
+Mark the change **BREAKING** in its changelog fragment. The release checklist lives
 in [`docs/RELEASING.md`](RELEASING.md).
 
 ## AI-assisted development

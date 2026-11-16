@@ -42,9 +42,9 @@ pub use polypus_backend::{
     merge_counts, register_backend, registered_names, validate_run_results, wave_concurrency,
     BackendBuildContext, BackendCapabilities, BackendError, BackendFactory, BoundCircuit,
     BudgetSource, CallSeeds, CancelToken, CircuitTask, Counts, ForeignCircuit, IdentityTranspiler,
-    InfrastructureError, InsufficientMemory, Interrupt, MemBudget, OptLevel, OptionValue, Planner,
-    PlannerRequirements, QuantumBackend, RunParams, SequentialPlanner, ShotDistributingPlanner,
-    TranspileOptions, Transpiler,
+    InfrastructureError, InsufficientMemory, InsufficientMemoryForResult, Interrupt, MemBudget,
+    OptLevel, OptionValue, Planner, PlannerRequirements, QuantumBackend, RunParams,
+    SequentialPlanner, ShotDistributingPlanner, TranspileOptions, Transpiler,
 };
 
 // --- this crate's own additions ---

@@ -373,7 +373,10 @@ impl Circuit {
     /// `gate` declarations included (every instruction — `p`, `u1`, `u2`, `u`,
     /// `id` and calls of declared gates included — is kept one-to-one under its
     /// own spelling; only the builtins `U`/`CX` become `u`/`cx`; multiple
-    /// registers are flattened in declaration order). The
+    /// registers are flattened in declaration order). Two shapes come back in
+    /// canonical form: a barrier listing every qubit in order is the
+    /// whole-register `barrier()`, and the measurements `q[k] -> c[k]` of
+    /// every qubit in order are one `measure_all()`. The
     /// result is fully concrete (`num_params == 0`); builder methods can keep
     /// extending it.
     ///
@@ -953,6 +956,13 @@ impl Circuit {
     /// declared in OpenQASM 3 is written from its definition, renamed where
     /// OpenQASM 2.0 cannot take its name; one whose body uses `arcsin`,
     /// `arccos` or `arctan`, which OpenQASM 2.0 lacks, raises `ValueError`.
+    ///
+    /// The output is canonical, so `from_qasm2` followed by `to_qasm2` gives
+    /// it back byte for byte: a barrier on every qubit in order is written as
+    /// `barrier q;`, and `measure(k, k)` of every qubit in order as
+    /// `measure q -> c;` (bit by bit when the classical register is wider
+    /// than the qubits). It is the same program; `from_qasm2` reads them back
+    /// as `barrier()` and `measure_all()`.
     #[pyo3(signature = (params=None))]
     fn to_qasm2(&self, params: Option<Vec<f64>>) -> PyResult<String> {
         self.inner

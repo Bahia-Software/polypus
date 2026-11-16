@@ -550,13 +550,27 @@ except BaseException as exc:  # e.g. a PanicException from a swallowed error
 """
 
 
+# `qml.vjp` (#559) runs the same blocks: the same child, with the product
+# instead of the Jacobian (exactly, one adjoint run per row as the Jacobian of
+# this one-observable model takes; sampled, the same circuits).
+_JACOBIAN_CALL = 'qml.jacobian(model, x, params, wrt="both", exact=EXACT)'
+assert _JACOBIAN_CHILD.count(_JACOBIAN_CALL) == 1
+_VJP_CHILD = _JACOBIAN_CHILD.replace(
+    _JACOBIAN_CALL,
+    'qml.vjp(model, x, params, [[1.0]] * len(x), wrt="both", exact=EXACT)',
+)
+
+
 @pytest.mark.parametrize("exact", [True, False], ids=["exact", "sampled"])
-def test_native_qml_jacobian_responds_to_sigint_promptly(exact):
+@pytest.mark.parametrize("primitive", ["jacobian", "vjp"])
+def test_native_qml_jacobian_responds_to_sigint_promptly(primitive, exact):
+    child = _JACOBIAN_CHILD if primitive == "jacobian" else _VJP_CHILD
     _assert_responds_to_sigint_promptly(
-        _JACOBIAN_CHILD.replace("EXACT", str(exact)),
+        child.replace("EXACT", str(exact)),
         failure_hint=(
-            f"qml.jacobian(exact={exact}) — the block loop is likely not checking "
-            "the interrupt guard between blocks, or the GIL is held around it"
+            f"qml.{primitive}(exact={exact}) — the block loop is likely not "
+            "checking the interrupt guard between blocks, or the GIL is held "
+            "around it"
         ),
     )
 
@@ -601,12 +615,71 @@ except BaseException as exc:
 """
 
 
-def test_an_exact_adjoint_jacobian_stops_inside_a_block():
+_ADJOINT_CALL = "qml.jacobian(model, x, params, exact=True)"
+assert _ADJOINT_ONE_BLOCK_CHILD.count(_ADJOINT_CALL) == 1
+
+
+@pytest.mark.parametrize("primitive", ["jacobian", "vjp"])
+def test_an_exact_adjoint_jacobian_stops_inside_a_block(primitive):
+    child = _ADJOINT_ONE_BLOCK_CHILD
+    if primitive == "vjp":
+        child = child.replace(
+            _ADJOINT_CALL, "qml.vjp(model, x, params, [[1.0]] * len(x), exact=True)"
+        )
     _assert_responds_to_sigint_promptly(
-        _ADJOINT_ONE_BLOCK_CHILD,
+        child,
         failure_hint=(
-            "qml.jacobian(exact=True) with long adjoint runs — the calling "
+            f"qml.{primitive}(exact=True) with long adjoint runs — the calling "
             "thread is likely not watching for Ctrl+C while the block runs"
+        ),
+    )
+
+
+# `qml.kernel_matrix` (contract C-11, "Quantum kernels"). Sampled, it runs its
+# pairs block after block like `qml.jacobian`: 1200 rows of 12 qubits is
+# 720,600 circuits. Exact, it is one call of inner products on rayon's threads
+# with no block to check between, so the calling thread watches for Ctrl+C
+# while they run: 1200 states of 16 qubits (1 MiB each) and their 720,600 inner
+# products last far longer than the deadline. The exact child runs under a
+# 256 MiB budget: the 1200 x 1200 matrix takes 11 MiB of it and the rest holds
+# about 245 states, far fewer than the 1200 rows, so it works in tiles (the
+# Ctrl+C is seen there too) and never holds more than 256 MiB of state, where
+# the whole set would take 1.2 GiB. Tiles simulate the columns again for each
+# tile, so the work lasts even longer. The warm-up is a tiny kernel.
+_KERNEL_CHILD = r"""
+import sys, time
+import polypus
+from polypus import qml
+
+qml.kernel_matrix(qml.Encoder(2).iqp_encoder(), [[0.1, 0.2]], exact=EXACT)
+
+WIDTH = 16 if EXACT else 12
+encoder = qml.Encoder(WIDTH).iqp_encoder()
+x = [[0.05 * ((i + j) % 11) for j in range(WIDTH)] for i in range(1200)]
+
+print("READY", flush=True)
+start = time.time()
+try:
+    qml.kernel_matrix(encoder, x, exact=EXACT)
+    print("COMPLETED", flush=True)
+except KeyboardInterrupt:
+    print(f"KEYBOARDINTERRUPT {time.time() - start:.3f}", flush=True)
+except BaseException as exc:
+    print(f"OTHER {type(exc).__name__}", flush=True)
+    sys.exit(1)
+"""
+
+
+@pytest.mark.parametrize("exact", [True, False], ids=["exact", "sampled"])
+def test_native_qml_kernel_matrix_responds_to_sigint_promptly(exact):
+    env = {**os.environ, "POLYPUS_MEM_BUDGET": "256MiB"} if exact else None
+    _assert_responds_to_sigint_promptly(
+        _KERNEL_CHILD.replace("EXACT", str(exact)),
+        env=env,
+        failure_hint=(
+            f"qml.kernel_matrix(exact={exact}) — the block loop or the watcher "
+            "of the exact inner products is likely not checking the interrupt "
+            "guard, or the GIL is held around them"
         ),
     )
 
