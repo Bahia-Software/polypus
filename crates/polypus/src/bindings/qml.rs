@@ -25,7 +25,7 @@ use pyo3::exceptions::{
     PyTypeError, PyValueError,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyModule, PyTuple, PyType};
+use pyo3::types::{PyBool, PyDict, PyList, PyModule, PyTuple, PyType};
 
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 use polypus_qml::{
@@ -100,11 +100,19 @@ impl OutOfRangeCount {
 /// instead of PyO3's `OverflowError`, and PyO3's own error for anything else
 /// (a `TypeError` for another type).
 ///
-/// An object with `__index__` (a NumPy integer, say) is the integer it
-/// returns: an out-of-range one is described by that integer, never compared
-/// or printed as the object itself, which may support neither.
+/// A `bool` is not a count, although Python makes it an `int`: it is a
+/// `TypeError`, as `final_shots` treats one. An object with `__index__` (a
+/// NumPy integer, say) is the integer it returns: an out-of-range one is
+/// described by that integer, never compared or printed as the object itself,
+/// which may support neither.
 fn extract_count(ob: &Bound<'_, PyAny>) -> PyResult<Result<usize, OutOfRangeCount>> {
     let py = ob.py();
+    if ob.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(format!(
+            "expected an integer, got a bool ({})",
+            ob.str()?
+        )));
+    }
     match ob.extract::<usize>() {
         Ok(count) => Ok(Ok(count)),
         Err(err) if err.is_instance_of::<PyOverflowError>(py) => {
@@ -120,10 +128,10 @@ fn extract_count(ob: &Bound<'_, PyAny>) -> PyResult<Result<usize, OutOfRangeCoun
 
 /// A count argument, such as `reps` or `num_qubits`: a Python `int` that fits
 /// in a `usize`. A negative or oversized one is a `ValueError` (contract
-/// C-11), not the `OverflowError` PyO3's own conversion raises; any other
-/// type keeps its `TypeError`. On Python 3.11 and later, PyO3 adds a note
-/// naming the argument to whatever this raises (it shows in the traceback, not
-/// in `str(e)`).
+/// C-11), not the `OverflowError` PyO3's own conversion raises; a `bool` or
+/// any other type is a `TypeError`. On Python 3.11 and later, PyO3 adds a
+/// note naming the argument to whatever this raises (it shows in the
+/// traceback, not in `str(e)`).
 ///
 /// A local newtype, like [`AngleArg`](super::circuit::AngleArg), because
 /// `FromPyObject` and `usize` are both foreign to this crate.
@@ -144,7 +152,7 @@ impl<'a, 'py> FromPyObject<'a, 'py> for CountArg {
 /// does not (negative or oversized), kept so that `fit` refuses it where it
 /// refuses `0` or a size as large as the training set, with the same
 /// `polypus.ConfigurationError` (contract C-11) rather than PyO3's
-/// `OverflowError`. Any other type keeps its `TypeError`.
+/// `OverflowError`. A `bool` or any other type is a `TypeError`.
 enum BatchSizeArg {
     Size(usize),
     OutOfRange(OutOfRangeCount),
@@ -3416,10 +3424,18 @@ mod tests {
                     "{source}: {err}"
                 );
             }
-            // Another type keeps its `TypeError`.
-            for source in ["'3'", "3.0", "None"] {
+            // Another type keeps its `TypeError`, and a `bool`, although an
+            // `int` to Python, is one too.
+            for source in ["'3'", "3.0", "None", "True", "False"] {
                 let err = extract(source).unwrap_err();
                 assert!(err.is_instance_of::<PyTypeError>(py), "{source}: {err}");
+            }
+            for (source, shown) in [("True", "True"), ("False", "False")] {
+                let message = extract(source).unwrap_err().value(py).to_string();
+                assert_eq!(
+                    message,
+                    format!("expected an integer, got a bool ({shown})")
+                );
             }
         });
     }
@@ -3462,8 +3478,8 @@ mod tests {
                 );
                 assert_eq!(arg.to_string(), shown);
             }
-            // Another type keeps its `TypeError`.
-            for source in ["'2'", "2.0"] {
+            // Another type keeps its `TypeError`, a `bool` included.
+            for source in ["'2'", "2.0", "True", "False"] {
                 let err = extract(source).err().unwrap();
                 assert!(err.is_instance_of::<PyTypeError>(py), "{source}: {err}");
             }
@@ -3532,6 +3548,7 @@ mod tests {
                 "[('z', 0.5)]",
                 "'zz'",
                 "[('z',), ('z', -1)]",
+                "[('z', True)]",
             ] {
                 let err = factors(source).unwrap_err();
                 assert!(err.is_instance_of::<PyTypeError>(py), "{source}: {err}");

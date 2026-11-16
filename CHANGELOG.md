@@ -147,6 +147,11 @@ Entries were curated from the Conventional Commits history. Releases before
   and `TrainOutcome::n_evaluations`. Seeded results are unchanged (#431).
 
 ### Changed
+- **BREAKING:** a bool is no longer accepted as a count of the native QML API
+  (`num_qubits`, `reps`, `ranges`, a Pauli position, `batch_size`):
+  `Z(True)`, `Encoder(True)` or `fit(batch_size=True)` were read as `1` (and
+  `False` as `0`); they are now a `TypeError`, as `final_shots` already was
+  (#571).
 - **BREAKING (Rust):** `polypus_qml::ValidationError` has a new variant,
   `TrainableLayerInFeatureMap`, so an exhaustive `match` on it outside its
   crate must handle it (#504).

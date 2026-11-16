@@ -712,6 +712,59 @@ class TestIndexObjects:
         assert Ansatz(_Index(2)).num_qubits == 2
 
 
+_BOOL_IDS = ["True", "False"]
+
+
+class TestBoolIsNotACount:
+    """A ``bool`` is an ``int`` to Python but never a count of the native API:
+    ``num_qubits``, ``reps``, ``ranges`` and a Pauli position refuse one with a
+    ``TypeError`` (contract C-11), as ``final_shots`` does, instead of reading
+    ``True`` as 1. A builder call that raises leaves the ``Ansatz`` as it was."""
+
+    @pytest.mark.parametrize("flag", [True, False], ids=_BOOL_IDS)
+    @pytest.mark.parametrize("name", ["Encoder", "Ansatz", "Z", "X", "Y"])
+    def test_a_qubit_count_or_position(self, name, flag):
+        with pytest.raises(
+            TypeError, match=f"expected an integer, got a bool \\({flag}\\)"
+        ):
+            _qml(name)(flag)
+
+    @pytest.mark.parametrize("flag", [True, False], ids=_BOOL_IDS)
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda a, flag: a.hardware_efficient(flag),
+            lambda a, flag: a.real_amplitudes(flag),
+            lambda a, flag: a.strongly_entangling(1, ranges=[flag]),
+        ],
+        ids=["hardware-efficient", "real-amplitudes", "strongly-entangling-ranges"],
+    )
+    def test_a_builder_count(self, build, flag):
+        from polypus.qml import Ansatz
+
+        ansatz = Ansatz(2).real_amplitudes(1)
+        with pytest.raises(TypeError, match="got a bool"):
+            build(ansatz, flag)
+        assert (ansatz.num_layers, ansatz.num_params) == (1, 4)
+
+    @pytest.mark.parametrize("flag", [True, False], ids=_BOOL_IDS)
+    @pytest.mark.parametrize(
+        ("where", "match"),
+        [
+            ("readout", "each observable must be"),
+            ("observable", "a Pauli term must be"),
+        ],
+    )
+    def test_a_position_in_a_list(self, where, match, flag):
+        from polypus.qml import Observable, Readout
+
+        with pytest.raises(TypeError, match=match):
+            if where == "readout":
+                Readout([[("z", flag)]])
+            else:
+                Observable([(1.0, [("z", flag)])])
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Readout observables, against closed forms
 # ─────────────────────────────────────────────────────────────────────────────

@@ -2566,7 +2566,7 @@ that does not depend on the data is checked where it is written, as a plain
   in a `usize` (a huge `reps`, or any layer after one) is
   `ValidationError::TooManyParams`. Both are a `ValueError` that leaves the
   object as it was, never PyO3's `OverflowError` or a panic. A count of
-  another type (a `str`, a `float`) is a `TypeError`; an object
+  another type (a `bool`, a `str`, a `float`) is a `TypeError`; an object
   with `__index__` (a NumPy integer) is the integer it returns, which an
   out-of-range message shows.
 
@@ -2655,7 +2655,8 @@ is also a `ValueError` (#418), as `train`'s do:
 - **`batch_size`** must satisfy `1 <= batch_size < number of samples`; the
   reported `best_fitness` is on every sample (C-5). A negative integer, or one
   larger than a `usize` holds, is refused with the same message, never PyO3's
-  `OverflowError`; a `batch_size` that is not an integer is a `TypeError`.
+  `OverflowError`; a `batch_size` that is not an integer (a `bool` included)
+  is a `TypeError`.
 - **`initial_point`** (keyword-only, default `None`) is C-5's starting point,
   with `num_params` as `dimensions`: its checks, after the optimizer's
   configuration (checked with or without a point), are `train`'s, with its

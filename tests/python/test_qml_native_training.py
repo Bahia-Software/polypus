@@ -217,6 +217,9 @@ class TestFitRejections:
         [
             pytest.param("2", None, id="str"),
             pytest.param(2.0, None, id="float"),
+            # A bool is an `int` to Python, but not a size (C-11).
+            pytest.param(True, r"got a bool \(True\)", id="True"),
+            pytest.param(False, r"got a bool \(False\)", id="False"),
         ],
     )
     def test_a_batch_size_of_another_type_is_a_type_error(
