@@ -4,5 +4,5 @@
 # Pinned: MkDocs 2.x breaks the plugin API that Material for MkDocs relies on.
 mkdocs==1.6.1
 mkdocs-material==9.7.7
-pymdown-extensions==11.0.1
-pytest==9.0.3
+pymdown-extensions==12.3
+pytest==9.2.0

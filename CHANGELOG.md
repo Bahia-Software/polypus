@@ -12,6 +12,33 @@ Entries were curated from the Conventional Commits history. Releases before
 ## [Unreleased]
 
 ### Added
+- `polypus.qml.kernel_matrix(encoder, x1, x2=None, *, ...)`, the fidelity
+  quantum kernel `K[i, j] = |⟨φ(x1_i)|φ(x2_j)⟩|²` of a native `Encoder` as a
+  `float64` NumPy array, ready for scikit-learn's
+  `SVC(kernel="precomputed")`. With `exact=True` it takes the inner products of
+  the native simulator's statevectors, each state simulated once when they fit
+  in the memory budget; with shots, the `0…0` frequency of one
+  compute-uncompute circuit (`U(x1_i)` then `U(x2_j)†`) per entry. Without
+  `x2` only the upper triangle, diagonal included, runs (`N(N+1)/2` circuits)
+  and the matrix is symmetric bit for bit; the diagonal is executed, not set
+  to 1. It takes `qml.expval`'s execution arguments and rules, checks
+  everything before a backend exists, and runs the pairs in blocks over one
+  backend per call. In `polypus-circuit`: `ConcreteCircuit::inverse`,
+  `CircuitError::NotInvertible`, and `GateInstruction::push_inverse`, public:
+  the one inverse table of the workspace, which the native simulator's
+  adjoint gradient now steps back through too (`csx`, `rc3x` and `c3sqrtx` are
+  inverted through their decomposition). In `polypus-qml`: `FeatureMap`,
+  `FeatureStates` and `FidelityKernel`, and the variants
+  `ValidationError::TrainableLayerInFeatureMap`, `QmlError::KernelTooLarge`
+  and `QmlError::StateWidthMismatch`. In `polypus-infrastructure`:
+  `NativeStatevectorBackend::fidelity_matrix`, which counts its matrix
+  against the memory budget and, with room for one statevector beside it but
+  not two, computes each entry from one statevector instead of refusing. In
+  `polypus-backend`: `InsufficientMemoryForResult` and the
+  `BackendError::InsufficientMemoryForResult` variant (`BackendError` is
+  `#[non_exhaustive]`), raised in Python as
+  `polypus.InsufficientMemoryError` when a result leaves no room for its
+  statevectors. See `examples/qml_kernel_svc.py` (#504).
 - `polypus.qml.Ansatz.strongly_entangling(reps, ranges=None, entangler="cx")`,
   PennyLane's `StronglyEntanglingLayers`: per layer, a general rotation on
   every qubit, emitted as `Rz(φ)`, `Ry(θ)`, `Rz(ω)`, in that order, so the
@@ -123,12 +150,34 @@ Entries were curated from the Conventional Commits history. Releases before
   PySCF/OpenFermion data in `reference-data/h2-sto3g/` (FCI at 0.7414 Å:
   −1.1372701747 Ha). `constants::BOHR_RADIUS_ANGSTROM`. New dependency:
   `libm` (`erf` for the Boys function).
+- `TrainResult.stop_reason` and `TrainResult.n_evaluations` on `train`,
+  `qml.train` and `Model.fit`. `stop_reason` names what ended the
+  optimizer's loop: `"iteration_budget"`, `"evaluation_budget"` (L-SHADE's
+  schedule, `External`'s `max_evaluations`), `"fitness_tolerance"`,
+  `"parameter_tolerance"` (PSO), `"degenerate"` (CMA-ES),
+  `"optimizer_finished"` (`External`'s empty `ask()`) or `"callback"`.
+  `n_evaluations` counts the candidates scored as a fitness, as
+  `TrainProgress.evaluations` does, plus the re-score of `best_params` on
+  the whole training set when a gradient-free optimizer trains on
+  minibatches; the shifted circuits of an exact gradient (`Adam` in
+  `qml.Model.fit`) and the final batch are not counted. In
+  Rust: `polypus_optimizers::StopReason`, `OptimizationOutcome::stop_reason`
+  and `TrainOutcome::n_evaluations`. Seeded results are unchanged (#431).
 
 ### Changed
+- **BREAKING (Rust):** `polypus_qml::ValidationError` has a new variant,
+  `TrainableLayerInFeatureMap`, so an exhaustive `match` on it outside its
+  crate must handle it (#504).
+- **BREAKING (Rust):** `polypus_qml::QmlError` has two new variants,
+  `KernelTooLarge` and `StateWidthMismatch`, so an exhaustive `match` on it
+  outside its crate must handle them (#504).
 - **BREAKING:** for Rust users, `TrainFlow` and `RunCircuitFlow`
   (`polypus-orchestration`) have a new public field,
   `trace: Option<Arc<CallTracer>>`, so a struct literal must set it;
   `trace: None` keeps today's behaviour.
+- **BREAKING (Rust):** `polypus_optimizers::OptimizationOutcome` has a new
+  public field, `stop_reason`, so a struct literal of it outside its crate
+  must set it (#431).
 - **BREAKING (Rust):** `polypus_qml::ValidationError` has two new variants,
   `StronglyEntanglingRangesLength` and `StronglyEntanglingRangeOutOfBounds`,
   so an exhaustive `match` on it outside its crate must handle them (#505).
@@ -165,6 +214,18 @@ Entries were curated from the Conventional Commits history. Releases before
   its own block-scoped `allow`. `missing_docs` is on in the crates that are
   already fully documented, and `cargo deny` keeps `pyo3` out of the pure
   crates (#408).
+- For contributors: the CI, Hygiene and SonarQube Cloud workflows also run on
+  GitHub merge-queue groups, a prerequisite for enabling the queue on `main`.
+  Hygiene checks the queue's candidate commit against `main` with the public
+  rules; SonarQube Cloud skips its jobs there, since the quality gate already
+  ran on the pull request and the push to `main` reports on the merged commit.
+- CUNQA: the seal looks up a family's QPUs with `get_QPUs` once instead of
+  once per wave, and looks them up again after `qdrop` or a failed wave
+  (#437).
+- **BREAKING (build):** the `qmio` feature needs Rust 1.89: `zeromq` goes from
+  0.6 to 0.7, which raised its MSRV. Default features keep Rust 1.85. The
+  QMIO reply-size cap is still checked after the reply is received; 0.7 has
+  no receive size limit yet (#383).
 
 ### Fixed
 - `polypus.qml.Ansatz.hardware_efficient` and `real_amplitudes` with a
@@ -175,6 +236,13 @@ Entries were curated from the Conventional Commits history. Releases before
   after such a parameter count, and a saved file edited to one, fail the same
   way. In `polypus-qml`, `QuantumModel::compile` returns the new
   `ValidationError::TooManyParams` instead of panicking (#505).
+- The OpenQASM 2.0 export of a barrier on every qubit in order and of the
+  measurements `q[k] -> c[k]` of every qubit in order is now written as
+  `barrier q;` and `measure q -> c;`, the form the importer reads them back
+  in, as the OpenQASM 3 export already did. So
+  `to_qasm2(from_qasm2(to_qasm2(c)))` is byte-identical to `to_qasm2(c)` for
+  these circuits too (contract C-2), and the exported text of those two shapes
+  changes for the same program (#568).
 
 ### Documentation
 - The documentation site (MkDocs Material) is published at the Pages root,

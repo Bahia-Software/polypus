@@ -59,7 +59,8 @@ it lives (Cargo enforces it and Clippy picks it up automatically). The
 workspace uses the MSRV-aware resolver (`resolver = "3"`), so `cargo update`
 avoids dependency releases that need a newer Rust than `rust-version`; the
 `msrv` CI job still builds with `--locked` and catches anything that slips
-through. Dependabot does not honour `rust-version`
+through. The `qmio` feature has a higher minimum, Rust 1.89 (`zeromq` 0.7), which the
+same job checks. Dependabot does not honour `rust-version`
 ([dependabot-core#5423](https://github.com/dependabot/dependabot-core/issues/5423)),
 so `.github/dependabot.yml` ignores `uuid >=1.27`, which needs Rust 1.89. Remove
 that `ignore` when `rust-version` is raised to 1.89 or later (#276, #278). If
@@ -252,7 +253,8 @@ the coverage figures: it runs as a separate process spawned by the Rust
 integration tests, which no tool instruments. So are the diagnostic binaries
 under `crates/*/src/bin/`, which are run by hand. Sonar still analyses both
 for issues. On pull requests the `SonarQube Cloud scan` job waits for the
-quality gate and fails with it; pushes to `main` only report. Without the
+quality gate and fails with it; pushes to `main` only report, and merge-queue
+runs skip the workflow (the gate already ran on the PR). Without the
 `SONAR_TOKEN` secret (pull requests from forks) the reports are still built
 but not uploaded, and the job passes without a gate. Python coverage locally,
 with the wheel installed:
@@ -298,6 +300,14 @@ run (the unmutated tests failing, the step timing out) fails its job. A manual
 run (`workflow_dispatch`) reports in the summaries only, unless its `comment`
 input is set.
 
+Every test process runs with a 6 GiB address-space cap (`prlimit --as`,
+through cargo's target runner), because some mutants turn a loop into one that
+allocates until the timeout, and two at once can exhaust the runner's 16 GB.
+Such a mutant aborts on a failed allocation when it reaches the cap, and its
+test fails: it counts as caught (one still under the cap when the timeout hits
+counts as a timeout, as before). The unmutated tests of every crate pass well
+under the cap.
+
 To reproduce a crate's run, or to check that a new test catches a mutant,
 install the version the workflow pins and run it on that crate (it copies the
 tree to a temporary directory; `mutants.out/` is ignored by git):
@@ -308,6 +318,10 @@ cargo mutants --package polypus-observable --all-features           # the whole 
 cargo mutants --package polypus-observable --all-features --list    # its mutants, without running them
 cargo mutants --package polypus-observable --all-features --file crates/polypus-observable/src/qubo.rs --re 'from_matrix'
 cargo mutants --package polypus-sim --all-features --shard 1/3 --sharding round-robin   # one CI job's shard
+# As the CI job runs it, with the same cap on each test process (x86-64 Linux, util-linux's prlimit;
+# on another target the variable name changes, and without the right one the cap is silently not applied):
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="prlimit --as=6442450944" \
+  cargo mutants --package polypus-sim --all-features --jobs 2 --shard 1/3 --sharding round-robin
 ```
 
 Kill a missed mutant with a test of the behaviour it changes, not by
@@ -354,7 +368,8 @@ The type+scope prefix feeds the changelog; the subject line explains the
 ## Pull requests
 
 All changes land through a PR against `main` — the branch is protected: at
-least one approving review from someone other than the author, and CI green.
+least one approving review from someone other than the author, CI green, and
+the merge queue (see [Merging](#merging)).
 The PR template asks for three declarations that we take seriously:
 
 1. **Scope** — which module(s) the change targets.
@@ -369,6 +384,26 @@ The PR template asks for three declarations that we take seriously:
 Keep PRs small and single-purpose. If your work naturally produced unrelated
 improvements, split them out — small PRs get reviewed in hours, mixed ones sit
 for days.
+
+### Merging
+
+`main` uses GitHub's merge queue. A PR does not need to be up to date with
+`main`: once it is approved and green, press **Merge when ready** (or run
+`gh pr merge <N> --merge`). The queue tests the PR on top of `main` and of the
+PRs queued ahead of it, runs the required checks on that commit, and merges it
+with a merge commit if they pass. Do not press **Update branch** just to
+refresh CI; rebase only to resolve a conflict.
+
+If the queue removes your PR, open the failed `merge_group` run:
+
+- A real failure, usually a clash with a PR merged ahead of yours: fix it on
+  your branch and queue again.
+- A failure that does not reproduce: open an issue for the flaky test,
+  quarantine it in the same or a follow-up PR, and queue again. A flaky test
+  ejects every PR behind it, so it is not left in place.
+
+Admins can bypass the queue; that is for emergencies only (the queue itself
+is broken, or `main` must be fixed now).
 
 ## Adding things that have a defined shape
 

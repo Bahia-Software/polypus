@@ -1,7 +1,73 @@
 //! Optimizer result type and the shared optimizer trait.
 
+use std::fmt;
+
 use crate::error::OptimizerError;
 use crate::observer::{IterationObserver, Unobserved};
+
+/// Why a run stopped: what ended the optimizer's loop.
+///
+/// [`OptimizationOutcome::converged`] is `true` exactly for the optimizer's
+/// own stopping tests ([`FitnessTolerance`](Self::FitnessTolerance),
+/// [`ParameterTolerance`](Self::ParameterTolerance),
+/// [`Degenerate`](Self::Degenerate) and
+/// [`OptimizerFinished`](Self::OptimizerFinished)). The optimizers in this
+/// crate never report [`Walltime`](Self::Walltime),
+/// [`Interrupted`](Self::Interrupted) or [`Failed`](Self::Failed): those are
+/// for the layer that runs them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum StopReason {
+    /// The best fitness improved by less than `tolerance` over the last
+    /// `patience` iterations (DE, SHADE, L-SHADE, CMA-ES, Adam; Rotosolve over
+    /// whole sweeps).
+    FitnessTolerance,
+    /// The population's spread fell below `tolerance` in every dimension (PSO).
+    ParameterTolerance,
+    /// The iteration budget (`generations`, `max_iters`, `sweeps`) ran out.
+    IterationBudget,
+    /// The evaluation budget ran out: L-SHADE's schedule, or `External`'s
+    /// `max_evaluations` (spent, or too small for the next batch).
+    EvaluationBudget,
+    /// An [`IterationObserver`] stopped the run; this wins over any stopping
+    /// test that fired on the same iteration.
+    Callback,
+    /// CMA-ES's search distribution degenerated (non-finite, ill-conditioned,
+    /// collapsed or diverging) with no restart left, or no budget for one.
+    Degenerate,
+    /// The external optimizer ended the run itself, with an empty `ask`.
+    OptimizerFinished,
+    /// The run's walltime ran out.
+    Walltime,
+    /// The run was interrupted.
+    Interrupted,
+    /// The run failed.
+    Failed,
+}
+
+impl StopReason {
+    /// The `snake_case` name of the reason, as the Python edge reports it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FitnessTolerance => "fitness_tolerance",
+            Self::ParameterTolerance => "parameter_tolerance",
+            Self::IterationBudget => "iteration_budget",
+            Self::EvaluationBudget => "evaluation_budget",
+            Self::Callback => "callback",
+            Self::Degenerate => "degenerate",
+            Self::OptimizerFinished => "optimizer_finished",
+            Self::Walltime => "walltime",
+            Self::Interrupted => "interrupted",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl fmt::Display for StopReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// Outcome of an optimization run.
 ///
@@ -37,6 +103,8 @@ pub struct OptimizationOutcome {
     /// early stop is computed from (contract C-5). Empty only for a zero-budget
     /// run (`generations`/`max_iters == 0`).
     pub fitness_history: Vec<f64>,
+    /// What ended the run (see [`StopReason`]).
+    pub stop_reason: StopReason,
 }
 
 /// Shared entry point for the variational optimizers in this crate.

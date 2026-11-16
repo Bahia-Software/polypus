@@ -17,7 +17,7 @@
 //!     │   ├── CunqaError              # CUNQA distributed-QPU backend
 //!     │   ├── QmioError               # QMIO real-QPU network path
 //!     │   ├── NativeCircuitError      # pure-Rust circuit / simulator path
-//!     │   └── InsufficientMemoryError # a statevector exceeds the memory budget
+//!     │   └── InsufficientMemoryError # a statevector, or a result beside it, exceeds the budget
 //!     ├── EvaluationError             # optimizer oracle / expectation evaluation
 //!     └── ConfigurationError          # also a ValueError: rejected before anything runs
 //! ```
@@ -88,8 +88,10 @@ create_exception!(
     polypus,
     InsufficientMemoryError,
     BackendError,
-    "A statevector would not fit in the memory budget, so the run was refused before \
-     starting instead of being killed by the out-of-memory killer. The budget is \
+    "A statevector would not fit in the memory budget, or a result an exact computation \
+     keeps beside its statevectors (the exact quantum kernel's matrix) would leave no room \
+     for them, so the run was refused before starting instead of being killed by the \
+     out-of-memory killer. The budget is \
      POLYPUS_MEM_BUDGET when set (e.g. POLYPUS_MEM_BUDGET=64G), else the detected \
      RAM/cgroup limit minus a safety reserve."
 );
@@ -191,6 +193,11 @@ pub(crate) fn backend_error_to_pyerr(err: InfraBackendError) -> PyErr {
         // own `polypus.BackendError` subclass, so it stays catchable as
         // `PolypusError` (contract C-1) while being distinguishable from a crash.
         InfraBackendError::InsufficientMemory(e) => insufficient_memory_to_pyerr(&e),
+        // A result that leaves no room for its statevectors (the exact kernel's
+        // matrix): the same class, as it is the same refusal.
+        InfraBackendError::InsufficientMemoryForResult(e) => {
+            InsufficientMemoryError::new_err(e.to_string())
+        }
         // The pyo3-free contract carries any provider/Python failure type-erased
         // here; recover its original class so contract C-1 holds (a seam
         // `ValueError`/`TypeError`, a `KeyboardInterrupt`, or a `polypus.QmioError`
@@ -590,6 +597,26 @@ pub(crate) mod tests {
             })
         };
         assert_maps_to::<InsufficientMemoryError>(refusal(), "20-qubit statevector");
+        assert_maps_to::<BackendError>(refusal(), "POLYPUS_MEM_BUDGET");
+    }
+
+    #[test]
+    fn insufficient_memory_for_a_result_maps_to_insufficient_memory_error() {
+        use crate::infrastructure::{BudgetSource, InsufficientMemoryForResult};
+        // The same class as a statevector that does not fit, so one `except`
+        // catches both refusals of the memory budget.
+        let refusal = || {
+            InfraBackendError::InsufficientMemoryForResult(InsufficientMemoryForResult {
+                result: "a 12 x 12 fidelity matrix".to_string(),
+                result_bytes: 1152,
+                num_qubits: 1,
+                statevectors: 2,
+                statevector_bytes: 32,
+                budget_bytes: 1 << 10,
+                source: BudgetSource::Explicit,
+            })
+        };
+        assert_maps_to::<InsufficientMemoryError>(refusal(), "12 x 12 fidelity matrix");
         assert_maps_to::<BackendError>(refusal(), "POLYPUS_MEM_BUDGET");
     }
 

@@ -6,7 +6,7 @@ name: Hygiene
 # .github/scripts/release_check.py and .github/hygiene-allow.txt; changes to
 # any of them, or to this file, need human review.
 #
-# Pull requests run the public rules only. The maintainers' private patterns
+# Pull requests and merge-queue groups run the public rules only. The maintainers' private patterns
 # (secret HYGIENE_LEAK_PATTERNS) run after the merge, on the push to main: they
 # detect a leak but cannot undo its publication.
 
@@ -15,9 +15,10 @@ on:
     branches: [main]
   push:
     branches: [main]
+  merge_group:
 
-# Pull requests: one run per PR, superseded runs cancelled. Pushes: one group
-# per run, so no push to main is ever left unanalysed.
+# Pull requests: one run per PR, superseded runs cancelled. Pushes and
+# merge-queue groups: one group per run, so none is left unanalysed.
 concurrency:
   group: hygiene-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('push-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -66,6 +67,17 @@ jobs:
         run: >-
           python .github/scripts/hygiene.py
           --base "$BASE_SHA" --head "$HEAD_SHA" --comparison merge-base
+
+      # The queue's candidate commit is main plus every pull request queued
+      # ahead of this one; each of them already passed the check on its own.
+      - name: Check (merge queue, public rules)
+        if: github.event_name == 'merge_group'
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: >-
+          python .github/scripts/hygiene.py
+          --base "$BASE_SHA" --head "$HEAD_SHA" --comparison direct
 
       - name: Check (push to main, public and private rules)
         if: github.event_name == 'push'

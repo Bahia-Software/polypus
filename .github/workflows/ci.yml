@@ -4,9 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
 
 # Pull requests: one group per PR, so a new push cancels the run it supersedes.
-# Pushes to main: one group per run, never cancelled. The release gate
+# Pushes to main and merge-queue groups: one group per run, never cancelled. The release gate
 # (release.yml) needs a completed push run for the exact commit it publishes,
 # and a shared group would cancel a queued run as soon as a newer one queued.
 concurrency:
@@ -238,8 +239,12 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Check (workspace, default features)
         run: cargo check --locked --workspace --all-targets
-      - name: Check (qmio backend)
+      # The qmio feature's own minimum: zeromq 0.7 needs Rust 1.89.
+      - name: Check (qmio backend, Rust 1.89)
+        env:
+          RUSTUP_TOOLCHAIN: "1.89.0"
         run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
           cargo check --locked -p polypus-infrastructure --features qmio --all-targets
           cargo check --locked -p polypus --features qmio --all-targets
 
@@ -289,7 +294,7 @@ jobs:
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-semver-checks@0.51.0
       - name: cargo semver-checks (crates on crates.io)
