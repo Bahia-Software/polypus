@@ -8,8 +8,16 @@
 //! message, or stopped by the next check, so nothing here needs Qiskit, Aer,
 //! CUNQA or a QPU.
 
-use super::*;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+
 use pyo3::types::PyString;
+
+use super::test_support::{
+    de, fake_qml_circuits, qml_train_on, qml_train_with, register_sentinel_backend, train_on,
+    train_with,
+};
+use super::*;
 
 /// The class name and the text (`str(exc)`) of `err`.
 fn class_and_message(py: Python<'_>, err: &PyErr) -> (String, String) {
@@ -37,21 +45,8 @@ fn assert_rejected(py: Python<'_>, result: PyResult<Py<PyAny>>, message: &str) {
     assert_eq!(text, message);
 }
 
-/// Register `name` as a backend whose creation fails with
-/// [`SENTINEL_MESSAGE`], so a call that reaches it passed every check.
-fn register_failing_backend(name: &str) {
-    crate::infrastructure::register_backend(
-        name,
-        |_ctx: &crate::infrastructure::BackendBuildContext| {
-            Err(crate::infrastructure::BackendError::Conversion(
-                SENTINEL_MESSAGE.to_string(),
-            ))
-        },
-    );
-}
-
-/// What a backend registered with [`register_failing_backend`] fails with.
-const SENTINEL_MESSAGE: &str = "the entry point reached the sentinel backend";
+/// What a backend registered with [`register_sentinel_backend`] fails with.
+const SENTINEL_MESSAGE: &str = "the sentinel backend was created";
 
 /// Assert that `result` failed creating the sentinel backend: the circuit
 /// passed every check before it.
@@ -102,16 +97,6 @@ fn rotosolve_refused_circuit(py: Python<'_>) -> Bound<'_, PyAny> {
 
 /// The start of the Rotosolve rejection of [`rotosolve_refused_circuit`].
 const ROTOSOLVE_REFUSED: &str = "polypus.Rotosolve cannot train this circuit";
-
-/// A `polypus.DE` built through its Python signature.
-fn de_method(py: Python<'_>, population_size: u32) -> Bound<'_, PyAny> {
-    let kwargs = [("generations", 1), ("population_size", population_size)]
-        .into_py_dict(py)
-        .expect("the kwargs build");
-    py.get_type::<DE>()
-        .call((), Some(&kwargs))
-        .expect("the pyclass instantiates")
-}
 
 /// A `polypus.Rotosolve` with its defaults but the seed.
 fn rotosolve_method(py: Python<'_>) -> Bound<'_, PyAny> {
@@ -186,33 +171,7 @@ fn train_case<'py>(
     )
 }
 
-/// Stand-ins for a Qiskit feature map and ansatz with one parameter each:
-/// what `qml.train` and `qml.predict` read of them before the backend exists
-/// (`parameters`, `compose`, `num_clbits`, `assign_parameters`).
-fn qml_circuits(py: Python<'_>) -> (Bound<'_, PyAny>, Bound<'_, PyAny>) {
-    let module = PyModule::from_code(
-        py,
-        c"class Circuit:
-    num_clbits = 1
-    def __init__(self, *parameters):
-        self.parameters = list(parameters)
-    def compose(self, other):
-        return Circuit(*self.parameters, *other.parameters)
-    def assign_parameters(self, values, inplace=False):
-        return self
-",
-        c"entry_qml_circuits.py",
-        c"entry_qml_circuits",
-    )
-    .expect("the module compiles");
-    let circuit = module.getattr("Circuit").expect("the class exists");
-    (
-        circuit.call1(("x",)).expect("a feature map"),
-        circuit.call1(("w",)).expect("an ansatz"),
-    )
-}
-
-/// `qml.train` of the [`qml_circuits`] on two rows, with `method` and
+/// `qml.train` of the [`fake_qml_circuits`] on two rows, with `method` and
 /// `dimensions`.
 fn qml_train_case<'py>(
     py: Python<'py>,
@@ -222,7 +181,7 @@ fn qml_train_case<'py>(
     infrastructure: &str,
     backend: &str,
 ) -> PyResult<Py<PyAny>> {
-    let (feature_map, ansatz) = qml_circuits(py);
+    let (feature_map, ansatz) = fake_qml_circuits(py);
     let rows = py.eval(c"[[0.1], [0.2]]", None, None).unwrap();
     let cost = py.eval(c"lambda bits: 0.0", None, None).unwrap();
     qml_train(
@@ -252,7 +211,7 @@ fn qml_train_case<'py>(
     )
 }
 
-/// `qml.predict` of the [`qml_circuits`] on two rows, with `params`.
+/// `qml.predict` of the [`fake_qml_circuits`] on two rows, with `params`.
 fn qml_predict_case(
     py: Python<'_>,
     params: Vec<f64>,
@@ -260,7 +219,7 @@ fn qml_predict_case(
     infrastructure: &str,
     backend: &str,
 ) -> PyResult<Py<PyAny>> {
-    let (feature_map, ansatz) = qml_circuits(py);
+    let (feature_map, ansatz) = fake_qml_circuits(py);
     let rows = py.eval(c"[[0.1], [0.2]]", None, None).unwrap();
     qml_predict(
         feature_map,
@@ -301,7 +260,8 @@ const QML_QMIO: &str = "the 'qmio' infrastructure runs entirely in Rust (GIL-fre
 /// native circuit is accepted everywhere.
 #[test]
 fn run_quantum_circuit_refuses_a_qiskit_circuit_on_native_and_qmio() {
-    register_failing_backend("sentinel-rule-run");
+    static BUILDS: AtomicUsize = AtomicUsize::new(0);
+    register_sentinel_backend("sentinel-rule-run", &BUILDS);
     Python::initialize();
     Python::attach(|py| {
         let qasm = PyString::new(py, "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\ncreg c[1];\nx q[0];\nmeasure q -> c;\n").into_any();
@@ -386,7 +346,8 @@ fn run_quantum_circuit_checks_in_a_fixed_order() {
 /// is accepted everywhere.
 #[test]
 fn train_refuses_a_qiskit_circuit_on_native_and_qmio() {
-    register_failing_backend("sentinel-rule-train");
+    static BUILDS: AtomicUsize = AtomicUsize::new(0);
+    register_sentinel_backend("sentinel-rule-train", &BUILDS);
     Python::initialize();
     Python::attach(|py| {
         for (infrastructure, backend, message) in [
@@ -398,7 +359,7 @@ fn train_refuses_a_qiskit_circuit_on_native_and_qmio() {
                 train_case(
                     py,
                     qiskit_circuit(py),
-                    de_method(py, 4),
+                    de(py, 4),
                     16,
                     infrastructure,
                     backend,
@@ -426,15 +387,7 @@ fn train_refuses_a_qiskit_circuit_on_native_and_qmio() {
         for qc in [qiskit_circuit(py), rotosolve_refused_circuit(py)] {
             assert_reached_backend(
                 py,
-                train_case(
-                    py,
-                    qc,
-                    de_method(py, 4),
-                    16,
-                    "sentinel-rule-train",
-                    "aer",
-                    None,
-                ),
+                train_case(py, qc, de(py, 4), 16, "sentinel-rule-train", "aer", None),
             );
         }
     });
@@ -452,7 +405,7 @@ fn train_checks_in_a_fixed_order() {
             train_case(
                 py,
                 qiskit_circuit(py),
-                de_method(py, 3),
+                de(py, 3),
                 0,
                 "local",
                 "polypus",
@@ -465,7 +418,7 @@ fn train_checks_in_a_fixed_order() {
             train_case(
                 py,
                 qiskit_circuit(py),
-                de_method(py, 3),
+                de(py, 3),
                 16,
                 "local",
                 "polypus",
@@ -479,7 +432,7 @@ fn train_checks_in_a_fixed_order() {
             train_case(
                 py,
                 qiskit_circuit(py),
-                de_method(py, 4),
+                de(py, 4),
                 16,
                 "local",
                 "polypus",
@@ -496,7 +449,7 @@ fn train_checks_in_a_fixed_order() {
             train_case(
                 py,
                 qiskit_circuit(py),
-                de_method(py, 4),
+                de(py, 4),
                 16,
                 "qmio",
                 "polypus",
@@ -511,22 +464,23 @@ fn train_checks_in_a_fixed_order() {
 /// their own messages, whatever the model, and reach any other backend.
 #[test]
 fn qml_entry_points_refuse_native_and_qmio() {
-    register_failing_backend("sentinel-rule-qml");
+    static BUILDS: AtomicUsize = AtomicUsize::new(0);
+    register_sentinel_backend("sentinel-rule-qml", &BUILDS);
     Python::initialize();
     Python::attach(|py| {
         assert_rejected(
             py,
-            qml_train_case(py, de_method(py, 4), 16, 1, "local", "polypus"),
+            qml_train_case(py, de(py, 4), 16, 1, "local", "polypus"),
             QML_TRAIN_NATIVE,
         );
         assert_rejected(
             py,
-            qml_train_case(py, de_method(py, 4), 16, 1, "qmio", "openqasm"),
+            qml_train_case(py, de(py, 4), 16, 1, "qmio", "openqasm"),
             QML_QMIO,
         );
         assert_reached_backend(
             py,
-            qml_train_case(py, de_method(py, 4), 16, 1, "sentinel-rule-qml", "aer"),
+            qml_train_case(py, de(py, 4), 16, 1, "sentinel-rule-qml", "aer"),
         );
 
         assert_rejected(
@@ -555,18 +509,18 @@ fn qml_entry_points_check_in_a_fixed_order() {
     Python::attach(|py| {
         assert_rejected(
             py,
-            qml_train_case(py, de_method(py, 4), 0, 1, "local", "polypus"),
+            qml_train_case(py, de(py, 4), 0, 1, "local", "polypus"),
             "shots must be >= 1, got 0",
         );
         // A wrong `dimensions` and a population too small, both after the rule.
         assert_rejected(
             py,
-            qml_train_case(py, de_method(py, 3), 16, 2, "local", "polypus"),
+            qml_train_case(py, de(py, 3), 16, 2, "local", "polypus"),
             QML_TRAIN_NATIVE,
         );
         assert_rejected(
             py,
-            qml_train_case(py, de_method(py, 3), 16, 2, "qmio", "polypus"),
+            qml_train_case(py, de(py, 3), 16, 2, "qmio", "polypus"),
             QML_TRAIN_NATIVE,
         );
 
@@ -586,5 +540,217 @@ fn qml_entry_points_check_in_a_fixed_order() {
             qml_predict_case(py, vec![0.5, 0.5], 16, "qmio", "polypus"),
             QML_PREDICT_NATIVE,
         );
+    });
+}
+
+/// `train` and `qml.train` reject a `callback` that is neither callable
+/// nor `None` with `TypeError`, right after `final_shots` and before they
+/// create the backend; a callable one reaches the backend.
+#[test]
+fn a_callback_is_checked_after_final_shots_and_before_the_backend() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static TRAIN_BUILDS: AtomicUsize = AtomicUsize::new(0);
+    static QML_BUILDS: AtomicUsize = AtomicUsize::new(0);
+    register_sentinel_backend("sentinel-train-500", &TRAIN_BUILDS);
+    register_sentinel_backend("sentinel-qml-train-500", &QML_BUILDS);
+    Python::initialize();
+    Python::attach(|py| {
+        let cost = py.eval(c"lambda bits: 0.0", None, None).unwrap();
+        let not_callable = py.eval(c"'checkpoint.json'", None, None).unwrap();
+        let callable = py.eval(c"lambda progress: None", None, None).unwrap();
+        let zero = 0_i32.into_pyobject(py).unwrap().into_any();
+        type Run = for<'py> fn(
+            Python<'py>,
+            &str,
+            Bound<'py, PyAny>,
+            Bound<'py, PyAny>,
+            Option<Bound<'py, PyAny>>,
+            Option<Bound<'py, PyAny>>,
+        ) -> PyResult<Py<PyAny>>;
+        let entry_points: [(&str, &str, &AtomicUsize, Run); 2] = [
+            ("train", "sentinel-train-500", &TRAIN_BUILDS, train_with),
+            (
+                "qml.train",
+                "sentinel-qml-train-500",
+                &QML_BUILDS,
+                qml_train_with,
+            ),
+        ];
+        for (name, infrastructure, builds, run) in entry_points {
+            let err = run(
+                py,
+                infrastructure,
+                de(py, 4),
+                cost.clone(),
+                None,
+                Some(not_callable.clone()),
+            )
+            .expect_err("a callback that is not callable is rejected");
+            assert!(
+                err.is_instance_of::<pyo3::exceptions::PyTypeError>(py),
+                "{name}: {err}"
+            );
+            assert!(
+                err.to_string()
+                    .contains("callback must be a callable or None, got 'checkpoint.json'"),
+                "{name}: {err}"
+            );
+
+            // `final_shots` is checked first.
+            let err = run(
+                py,
+                infrastructure,
+                de(py, 4),
+                cost.clone(),
+                Some(zero.clone()),
+                Some(not_callable.clone()),
+            )
+            .expect_err("final_shots=0 is rejected");
+            crate::exceptions::tests::assert_configuration_error(&err, "final_shots");
+            assert_eq!(
+                builds.load(Ordering::SeqCst),
+                0,
+                "{name} created the backend"
+            );
+
+            // Control: a callable callback reaches the backend.
+            let err = run(
+                py,
+                infrastructure,
+                de(py, 4),
+                cost.clone(),
+                None,
+                Some(callable.clone()),
+            )
+            .expect_err("the sentinel backend fails");
+            assert!(
+                err.to_string().contains("sentinel backend was created"),
+                "{name}: {err}"
+            );
+            assert_eq!(builds.load(Ordering::SeqCst), 1, "{name}");
+        }
+    });
+}
+
+/// `train` and `qml.train` convert `expectation_function` and check the
+/// optimizer before they create the backend, which on CUNQA requests a
+/// SLURM allocation (issue #418).
+#[test]
+fn training_checks_the_configuration_before_creating_the_backend() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static TRAIN_BUILDS: AtomicUsize = AtomicUsize::new(0);
+    static QML_BUILDS: AtomicUsize = AtomicUsize::new(0);
+    register_sentinel_backend("sentinel-train-418", &TRAIN_BUILDS);
+    register_sentinel_backend("sentinel-qml-train-418", &QML_BUILDS);
+    Python::initialize();
+    Python::attach(|py| {
+        let not_an_observable = 42_i32.into_pyobject(py).unwrap().into_any();
+        let cost = py.eval(c"lambda bits: 0.0", None, None).unwrap();
+        type Run = for<'py> fn(
+            Python<'py>,
+            &str,
+            Bound<'py, PyAny>,
+            Bound<'py, PyAny>,
+        ) -> PyResult<Py<PyAny>>;
+        let entry_points: [(&str, &str, &AtomicUsize, Run); 2] = [
+            ("train", "sentinel-train-418", &TRAIN_BUILDS, train_on),
+            (
+                "qml.train",
+                "sentinel-qml-train-418",
+                &QML_BUILDS,
+                qml_train_on,
+            ),
+        ];
+        for (name, infrastructure, builds, run) in entry_points {
+            let err = run(py, infrastructure, de(py, 4), not_an_observable.clone())
+                .expect_err("an invalid observable is rejected");
+            assert!(
+                err.is_instance_of::<pyo3::exceptions::PyTypeError>(py),
+                "{name}: {err}"
+            );
+            assert!(
+                err.to_string().contains("expectation_function"),
+                "{name}: {err}"
+            );
+
+            let err = run(py, infrastructure, de(py, 3), cost.clone())
+                .expect_err("a population too small is rejected");
+            crate::exceptions::tests::assert_configuration_error(&err, "population_size");
+            assert_eq!(
+                builds.load(Ordering::SeqCst),
+                0,
+                "{name} created the backend"
+            );
+
+            // Control: a valid configuration does create it.
+            let err = run(py, infrastructure, de(py, 4), cost.clone())
+                .expect_err("the sentinel backend fails");
+            assert!(
+                err.to_string().contains("sentinel backend was created"),
+                "{name}: {err}"
+            );
+            assert_eq!(builds.load(Ordering::SeqCst), 1, "{name}");
+        }
+    });
+}
+
+/// `qml.train` and `qml.predict` refuse `infrastructure="qmio"` before they
+/// read the model, which QMIO could not serialize.
+#[test]
+fn qml_rejects_qmio_before_reading_the_model() {
+    Python::initialize();
+    Python::attach(|py| {
+        let none = || py.None().into_bound(py);
+        let cost = py.eval(c"lambda bits: 0.0", None, None).unwrap();
+        let train_err = qml_train(
+            none(),
+            none(),
+            none(),
+            de(py, 4),
+            16,
+            1,
+            1,
+            cost,
+            Some("qmio".to_string()),
+            Some(1),
+            Some(1),
+            Some("edge".to_string()),
+            "automatic",
+            None,
+            "aer",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("qmio is rejected");
+        let predict_err = qml_predict(
+            none(),
+            none(),
+            none(),
+            vec![0.0],
+            16,
+            Some("qmio".to_string()),
+            1,
+            Some(1),
+            Some(1),
+            "automatic",
+            None,
+            "aer",
+            None,
+            None,
+            None,
+        )
+        .expect_err("qmio is rejected");
+        for err in [train_err, predict_err] {
+            crate::exceptions::tests::assert_configuration_error(
+                &err,
+                "cannot serialize the Qiskit circuits of a QML model",
+            );
+        }
     });
 }
