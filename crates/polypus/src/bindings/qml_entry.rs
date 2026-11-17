@@ -1,13 +1,11 @@
 //! `polypus.qml.train` and `polypus.qml.predict`: a Qiskit feature map and
 //! ansatz, trained on rows of data or run on them.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyDict, PyModule};
 
-use super::backend_config::{build_backend_config, validate_id, validate_shots_and_qpus};
 use super::callback::validate_callback;
 use super::extract::{extract_cost_observable, extract_labels, extract_supervised_objective};
 use super::interrupt::interruptible_token;
@@ -17,17 +15,14 @@ use super::optimizer::{
     validate_final_shots, validate_method,
 };
 use super::options::OptionsArg;
-use super::prepare::QMIO_REJECTS_QML;
+use super::prepare::{self, Entry, TargetArgs};
 use super::qml;
 use super::results::{counts_to_pylist, finish_optimization, log_training_start, RunResult};
 use super::seeds::{method_seed, resolve_optimizer_seed, seed_or_entropy, unique_id};
-use super::targets::{self, Selection};
 use crate::evaluation::{OracleErrorSlot, QmlObjective, QmlOracleFactory, QmlSource};
 use crate::infrastructure::execution_config::random_seed;
-use crate::infrastructure::{
-    BoundCircuit, Counts, ExecutionConfig, Infrastructure, InfrastructureError, OptLevel,
-};
-use crate::orchestration::{Resources, RunCircuitFlow, Scheduler, TrainFlow};
+use crate::infrastructure::{BoundCircuit, Counts, InfrastructureError};
+use crate::orchestration::{RunCircuitFlow, TrainFlow};
 
 /// Compose `feature_map` with `ansatz` into the QML circuit template, adding a
 /// terminal `measure_all` when there are no classical bits (Aer needs them to
@@ -238,24 +233,22 @@ pub fn qml_train<'py>(
     target: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
-    let selection = Selection::new(
-        "train",
-        target.as_ref(),
-        infrastructure,
-        backend,
-        sim_method,
-        noise_model,
-        None,
-        nodes,
-        cores_per_qpu,
-        walltime,
+    let selection = prepare::select(
+        Entry::QmlTrain,
+        TargetArgs {
+            target: target.as_ref(),
+            infrastructure,
+            backend,
+            sim_method,
+            noise_model,
+            fusion: None,
+            nodes,
+            cores_per_qpu,
+            walltime,
+        },
     )?;
-    selection.require_allocation("train")?;
-    let id = targets::require_arg("train", "id", id)?;
     let (infrastructure, backend) = (selection.infrastructure.clone(), selection.backend.clone());
-    validate_shots_and_qpus(shots, n_qpus)?;
-    selection.validate_allocation()?;
-    validate_id(&id)?;
+    let id = prepare::check_arguments(Entry::QmlTrain, &selection, shots, n_qpus, id)?;
     // Native models have their own entry point (plan D4-R).
     qml::reject_native_pieces("train", &feature_map, &ansatz)?;
     // Same seed precedence as `train` (contract C-7): kwarg > optimizer field >
@@ -265,16 +258,9 @@ pub fn qml_train<'py>(
     let effective_seed = resolve_optimizer_seed(seed, method_seed(&method), random_seed)?;
     // QML composes Qiskit feature maps and ansätze, so it is inherently a
     // Qiskit path; the native statevector backend cannot consume a Qiskit
-    // `QuantumCircuit`. Accept `backend` for API symmetry but reject native.
-    if selection.is_native() {
-        return Err(crate::exceptions::configuration_error(
-            "the native 'polypus' backend is not supported for qml.train (feature maps \
-             and ansätze are Qiskit circuits); use backend=\"aer\"",
-        ));
-    }
-    if infrastructure == "qmio" {
-        return Err(crate::exceptions::configuration_error(QMIO_REJECTS_QML));
-    }
+    // `QuantumCircuit`, and neither can QMIO. Accept `backend` for API symmetry
+    // but reject both.
+    prepare::reject_foreign_circuit(Entry::QmlTrain, &selection, true)?;
     // The optimizer searches a `dimensions`-wide vector and binds it to the
     // ansatz's free parameters; a mismatch surfaces later as a cryptic Qiskit
     // binding error inside the oracle. Catch it upfront, mirroring how `train`
@@ -349,25 +335,23 @@ pub fn qml_train<'py>(
     // an Aer variant here, which never fuses. Pass `None` (no fusion opinion)
     // rather than `Some(true)` — the latter would trip the "fusion=True on a
     // non-fusing backend" rejection for a value the caller never chose.
-    let target = selection.resolve(options.map(OptionsArg::into_inner))?;
-    let backend_config = build_backend_config(target)?;
+    let backend_config = prepare::backend_config(py, selection, options)?;
     // Suffix the caller-supplied `id` with a UUID v4 (see `train` and #75) so
     // concurrent qml.train runs sharing the same `id` never collide on the
     // SLURM family/allocation, temp files or log streams named by
     // ExecutionConfig::id. The effective id is reported back in the TrainResult.
     let effective_id = unique_id(&id)?;
-    let config = Arc::new(ExecutionConfig {
-        id: effective_id.clone(),
+    let config = prepare::execution_config(
+        effective_id.clone(),
         shots,
         n_qpus,
-        infrastructure: infrastructure.clone(),
+        infrastructure.clone(),
         backend_config,
-        opt_level: OptLevel::default(),
         // The run's base seed: the native backend seeds each circuit from it,
         // Aer, CUNQA and the subprocess bridge each call (C-7); QMIO ignores
         // it. Set unconditionally so a seeded training run reproduces exactly.
-        seed: Some(effective_seed),
-    });
+        Some(effective_seed),
+    );
     // Shared error slot (see `train`): the oracle records the first evaluation
     // failure here and `finish_optimization` surfaces it after `optimize`.
     let errors = OracleErrorSlot::new();
@@ -377,8 +361,8 @@ pub fn qml_train<'py>(
         None => QmlObjective::Unsupervised(extract_cost_observable(&expectation_function)?),
     };
     let method_enum = method_from_pyclass(&method, dimensions, &errors, &effective_id)?;
-    // Log before `backend` is shadowed below (see `train`): the device selector
-    // string is the manifest value, not the constructed backend object.
+    // As in `train`: the device selector string is the manifest value, not the
+    // constructed backend object.
     log_training_start(
         &effective_id,
         &infrastructure,
@@ -387,11 +371,8 @@ pub fn qml_train<'py>(
         shots,
         effective_seed,
     );
-    let backend = Infrastructure::create_backend(&config)
-        .map_err(crate::exceptions::backend_error_to_pyerr)?;
-    let resources = Resources::new(backend, None, Arc::new(config.run_params()))
+    let scheduler = prepare::scheduler(&config, None)
         .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
-    let scheduler = Scheduler::ephemeral(resources);
     let flow = TrainFlow {
         factory: QmlOracleFactory {
             source: QmlSource::Qiskit {
@@ -476,32 +457,25 @@ pub fn qml_predict<'py>(
     target: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
-    let selection = Selection::new(
-        "predict",
-        target.as_ref(),
-        infrastructure,
-        backend,
-        sim_method,
-        noise_model,
-        None,
-        nodes,
-        cores_per_qpu,
-        walltime,
+    let selection = prepare::select(
+        Entry::QmlPredict,
+        TargetArgs {
+            target: target.as_ref(),
+            infrastructure,
+            backend,
+            sim_method,
+            noise_model,
+            fusion: None,
+            nodes,
+            cores_per_qpu,
+            walltime,
+        },
     )?;
     let (infrastructure, backend) = (selection.infrastructure.clone(), selection.backend.clone());
-    validate_shots_and_qpus(shots, n_qpus)?;
-    selection.validate_allocation()?;
+    let id_prefix = prepare::check_arguments(Entry::QmlPredict, &selection, shots, n_qpus, None)?;
     qml::reject_native_pieces("predict", &feature_map, &ansatz)?;
     // The model is a Qiskit circuit: neither the native backend nor QMIO runs it.
-    if selection.is_native() {
-        return Err(crate::exceptions::configuration_error(
-            "the native 'polypus' backend is not supported for qml.predict (feature maps \
-             and ansätze are Qiskit circuits); use backend=\"aer\"",
-        ));
-    }
-    if infrastructure == "qmio" {
-        return Err(crate::exceptions::configuration_error(QMIO_REJECTS_QML));
-    }
+    prepare::reject_foreign_circuit(Entry::QmlPredict, &selection, true)?;
     // The weights must fill the ansatz exactly (contract C-8).
     let num_ansatz_params = ansatz.getattr("parameters")?.len()?;
     if params.len() != num_ansatz_params {
@@ -541,19 +515,17 @@ pub fn qml_predict<'py>(
 
     // Always simulated (qmio is rejected), so a seed always applies (contract C-7).
     let effective_seed = seed_or_entropy(seed, random_seed)?;
-    let id = unique_id(&format!("predict_{}_{}", n_qpus, infrastructure))?;
+    let id = unique_id(&id_prefix)?;
     // predict has no `options=`; a `Registered` target brings its own.
-    let target = selection.resolve(None)?;
-    let backend_config = build_backend_config(target)?;
-    let config = ExecutionConfig {
-        id: id.clone(),
+    let backend_config = prepare::backend_config(py, selection, None)?;
+    let config = prepare::execution_config(
+        id.clone(),
         shots,
         n_qpus,
-        infrastructure: infrastructure.clone(),
+        infrastructure.clone(),
         backend_config,
-        opt_level: OptLevel::default(),
-        seed: Some(effective_seed),
-    };
+        Some(effective_seed),
+    );
     let n_rows = circuits.len();
     log::info!(
         "qml.predict {id} starting: rows={n_rows}, infrastructure={infrastructure}, \
@@ -564,10 +536,7 @@ pub fn qml_predict<'py>(
     // sends the rows in waves of the backend's concurrency; Ctrl+C is honoured
     // between waves.
     let counts_result = py.detach(move || -> Result<Vec<Counts>, InfrastructureError> {
-        let backend =
-            Infrastructure::create_backend(&config).map_err(InfrastructureError::Backend)?;
-        let resources = Resources::new(backend, None, Arc::new(config.run_params()))?;
-        let scheduler = Scheduler::ephemeral(resources);
+        let scheduler = prepare::scheduler(&config, None)?;
         let out = scheduler.run_cancellable(
             RunCircuitFlow {
                 circuits,

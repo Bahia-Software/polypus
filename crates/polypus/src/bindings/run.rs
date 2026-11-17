@@ -6,22 +6,19 @@ use std::time::Instant;
 
 use pyo3::prelude::*;
 
-use super::backend_config::{build_backend_config, validate_shots_and_qpus};
 use super::extract::extract_bound_circuit;
 use super::interrupt::interruptible_token;
 use super::options::OptionsArg;
-use super::prepare::{NATIVE_REJECTS_QISKIT, QMIO_REJECTS_QISKIT};
+use super::prepare::{self, Entry, TargetArgs};
 use super::results::{counts_to_pydict, counts_to_pylist, RunResult};
 use super::seeds::{seed_or_entropy, unique_id};
-use super::targets::Selection;
-use super::{calibration, call_trace, python_version};
+use super::{call_trace, python_version};
 use crate::infrastructure::execution_config::random_seed;
 use crate::infrastructure::{
-    merge_counts, BackendConfig, Counts, ExecutionConfig, Infrastructure, InfrastructureError,
-    OptLevel, Planner, ShotDistributingPlanner,
+    merge_counts, Counts, InfrastructureError, Planner, ShotDistributingPlanner,
 };
 use crate::orchestration::trace::{TraceFlow, TraceHeader};
-use crate::orchestration::{Resources, RunCircuitFlow, Scheduler};
+use crate::orchestration::RunCircuitFlow;
 
 /// Function to run a quantum circuit called from Python.
 ///
@@ -128,17 +125,19 @@ pub fn run_quantum_circuit<'py>(
     target: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
-    let selection = Selection::new(
-        "run_quantum_circuit",
-        target.as_ref(),
-        infrastructure,
-        backend,
-        sim_method,
-        noise_model,
-        fusion,
-        nodes,
-        cores_per_qpu,
-        walltime,
+    let selection = prepare::select(
+        Entry::Run,
+        TargetArgs {
+            target: target.as_ref(),
+            infrastructure,
+            backend,
+            sim_method,
+            noise_model,
+            fusion,
+            nodes,
+            cores_per_qpu,
+            walltime,
+        },
     )?;
     let (infrastructure, backend) = (selection.infrastructure.clone(), selection.backend.clone());
     // Entry-point trace carrying the full circuit `Debug` repr on every call:
@@ -147,19 +146,12 @@ pub fn run_quantum_circuit<'py>(
         "run_quantum_circuit called with qc: {qc:?}, shots: {shots}, \
          infrastructure: {infrastructure}, n_qpus: {n_qpus}, backend: {backend}, seed: {seed:?}"
     );
-    validate_shots_and_qpus(shots, n_qpus)?;
-    selection.validate_allocation()?;
+    let id_prefix = prepare::check_arguments(Entry::Run, &selection, shots, n_qpus, None)?;
     let bound_qc = extract_bound_circuit(&qc)?;
-    if selection.is_native() && bound_qc.is_foreign() {
-        return Err(crate::exceptions::configuration_error(
-            NATIVE_REJECTS_QISKIT,
-        ));
-    }
-    // The QMIO path serialises circuits to QASM/QIR in Rust (GIL-free) and cannot
-    // read a Qiskit QuantumCircuit, whose gates are only accessible via Python.
-    if infrastructure == "qmio" && bound_qc.is_foreign() {
-        return Err(crate::exceptions::configuration_error(QMIO_REJECTS_QISKIT));
-    }
+    // The native backend and the QMIO path read circuits in Rust (GIL-free) and
+    // cannot read a Qiskit QuantumCircuit, whose gates are only accessible via
+    // Python.
+    prepare::reject_foreign_circuit(Entry::Run, &selection, bound_qc.is_foreign())?;
     // Resolve the shot-sampling seed. Every simulated backend (native, Aer,
     // CUNQA's simulated QPUs) is seeded by Polypus; `qmio` is real hardware, so
     // an explicit seed there would be silently ineffective — reject it rather
@@ -182,27 +174,22 @@ pub fn run_quantum_circuit<'py>(
     // temp files and log streams (see ExecutionConfig::id), so a byte-identical
     // id across runs is a real hazard, not a cosmetic one. The `run_{n}_{infra}`
     // prefix is kept for human-readable debuggability.
-    let id = unique_id(&format!("run_{}_{}", n_qpus, infrastructure))?;
-    let target = selection.resolve(options.map(OptionsArg::into_inner))?;
-    let backend_config = build_backend_config(target)?;
+    let id = unique_id(&id_prefix)?;
     // Only the native statevector backend consults the gate-parallel threshold,
-    // so calibrate it lazily (#351) and surface the one-time default-visible
-    // warning only when this run actually resolves to it — never for
+    // so it is calibrated lazily (#351), with its one-time default-visible
+    // warning, only when this run actually resolves to it — never for
     // Aer/CUNQA/QMIO. Gated on the resolved `BackendConfig`, not the raw
     // `backend` string, so it tracks the real dispatch rather than re-deriving
     // it from the kwargs.
-    if matches!(backend_config, BackendConfig::LocalNative { .. }) {
-        calibration::prepare_native_threshold(qc.py())?;
-    }
-    let config = ExecutionConfig {
-        id: id.clone(),
+    let backend_config = prepare::backend_config(qc.py(), selection, options)?;
+    let config = prepare::execution_config(
+        id.clone(),
         shots,
         n_qpus,
-        infrastructure: infrastructure.clone(),
+        infrastructure.clone(),
         backend_config,
-        opt_level: OptLevel::default(),
-        seed: effective_seed,
-    };
+        effective_seed,
+    );
     // Lifecycle record at the default level, carrying the C-7 manifest data only
     // (the circuit itself stays in the `debug!` above): enough to see what ran
     // where, and with which seed to replay it.
@@ -247,15 +234,12 @@ pub fn run_quantum_circuit<'py>(
     let counts_result = qc
         .py()
         .detach(move || -> Result<Vec<Counts>, InfrastructureError> {
-            let backend =
-                Infrastructure::create_backend(&config).map_err(InfrastructureError::Backend)?;
             let planner: Option<Arc<dyn Planner>> = if n_qpus == 1 {
                 None
             } else {
                 Some(Arc::new(ShotDistributingPlanner::new(n_qpus)))
             };
-            let resources = Resources::new(backend, planner, Arc::new(config.run_params()))?;
-            let scheduler = Scheduler::ephemeral(resources);
+            let scheduler = prepare::scheduler(&config, planner)?;
             // A Ctrl+C during the run aborts it at the next wave boundary: the
             // token carries the `check_signals`-backed interrupt guard the
             // pyo3-free planner calls between waves.

@@ -1,12 +1,10 @@
 //! `polypus.train`: a variational circuit trained with a chosen optimizer.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Instant;
 
 use pyo3::prelude::*;
 
-use super::backend_config::{build_backend_config, validate_id, validate_shots_and_qpus};
 use super::callback::validate_callback;
 use super::extract::{extract_circuit_source, extract_cost_observable};
 use super::interrupt::interruptible_token;
@@ -15,15 +13,14 @@ use super::optimizer::{
     validate_final_shots, validate_method,
 };
 use super::options::OptionsArg;
+use super::prepare::{self, Entry, TargetArgs};
 use super::results::{finish_optimization, log_training_start};
 use super::seeds::{method_seed, resolve_optimizer_seed, unique_id};
-use super::targets::{self, Selection};
-use super::{calibration, call_trace, python_version};
+use super::{call_trace, python_version};
 use crate::evaluation::{CircuitSource, OracleErrorSlot, VqcOracleFactory};
 use crate::infrastructure::execution_config::random_seed;
-use crate::infrastructure::{BackendConfig, ExecutionConfig, Infrastructure, OptLevel};
 use crate::orchestration::trace::{TraceFlow, TraceHeader};
-use crate::orchestration::{Resources, Scheduler, TrainFlow};
+use crate::orchestration::TrainFlow;
 
 /// Unified entry point: train a variational quantum circuit with a chosen optimizer.
 ///
@@ -193,24 +190,22 @@ pub fn train<'py>(
     target: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
-    let selection = Selection::new(
-        "train",
-        target.as_ref(),
-        infrastructure,
-        backend,
-        sim_method,
-        noise_model,
-        fusion,
-        nodes,
-        cores_per_qpu,
-        walltime,
+    let selection = prepare::select(
+        Entry::Train,
+        TargetArgs {
+            target: target.as_ref(),
+            infrastructure,
+            backend,
+            sim_method,
+            noise_model,
+            fusion,
+            nodes,
+            cores_per_qpu,
+            walltime,
+        },
     )?;
-    selection.require_allocation("train")?;
-    let id = targets::require_arg("train", "id", id)?;
     let (infrastructure, backend) = (selection.infrastructure.clone(), selection.backend.clone());
-    validate_shots_and_qpus(shots, n_qpus)?;
-    selection.validate_allocation()?;
-    validate_id(&id)?;
+    let id = prepare::check_arguments(Entry::Train, &selection, shots, n_qpus, id)?;
     // Resolve the seed that drives the optimizer's RNG (contract C-7): explicit
     // kwarg > optimizer object's `seed` field > fresh OS entropy. Unlike
     // `run_quantum_circuit`, a seed is always meaningful here — it seeds the
@@ -231,56 +226,40 @@ pub fn train<'py>(
     validate_method(&method, dimensions, initial_point.as_deref())?;
     let final_shots = validate_final_shots(final_shots.as_ref())?;
     let callback = validate_callback(callback.as_ref())?;
-    // The native statevector backend runs pure-Rust circuits only; a Qiskit
-    // template can't be simulated without the interpreter.
-    if selection.is_native() {
-        if let CircuitSource::Qiskit(_) = &circuit_source {
-            return Err(crate::exceptions::configuration_error(
-                "the native 'polypus' backend requires a native polypus.Circuit; \
-                 got a Qiskit circuit. Build it with polypus.Circuit or use backend=\"aer\"",
-            ));
-        }
-    }
-    // QMIO serialises GIL-free, so it likewise needs a native circuit, not a
-    // Qiskit template that can only be read through the interpreter.
-    if infrastructure == "qmio" {
-        if let CircuitSource::Qiskit(_) = &circuit_source {
-            return Err(crate::exceptions::configuration_error(
-                "the 'qmio' infrastructure requires a native polypus.Circuit (GIL-free \
-                 serialization); got a Qiskit circuit. Build it with polypus.Circuit",
-            ));
-        }
-    }
+    // The native statevector backend runs pure-Rust circuits only, and QMIO
+    // serialises GIL-free: neither can read a Qiskit template, which only the
+    // interpreter can.
+    prepare::reject_foreign_circuit(
+        Entry::Train,
+        &selection,
+        matches!(circuit_source, CircuitSource::Qiskit(_)),
+    )?;
     // Rotosolve's step is exact only on single-frequency circuits: checked
     // before any backend, and so any CUNQA allocation, exists.
     if is_rotosolve(&method) {
         check_rotosolve_circuit(&qc, Some(&circuit_source), None)?;
     }
-    let target = selection.resolve(options.map(OptionsArg::into_inner))?;
-    let backend_config = build_backend_config(target)?;
     // As in `run_quantum_circuit`: the native backend's simulator resolves the
-    // gate-parallel threshold, so calibrate it lazily before building it (#351).
-    if matches!(backend_config, BackendConfig::LocalNative { .. }) {
-        calibration::prepare_native_threshold(qc.py())?;
-    }
+    // gate-parallel threshold, so it is calibrated lazily before it is built
+    // (#351).
+    let backend_config = prepare::backend_config(qc.py(), selection, options)?;
     // Suffix the caller-supplied `id` with a UUID v4 so two concurrent training
     // runs sharing the same `id` never collide on the SLURM family/allocation,
     // temp files or log streams named by ExecutionConfig::id (#75, mirroring
     // run_quantum_circuit). The prefix is kept for debuggability and the
     // effective id is reported back in the TrainResult.
     let effective_id = unique_id(&id)?;
-    let config = Arc::new(ExecutionConfig {
-        id: effective_id.clone(),
+    let config = prepare::execution_config(
+        effective_id.clone(),
         shots,
         n_qpus,
-        infrastructure: infrastructure.clone(),
+        infrastructure.clone(),
         backend_config,
-        opt_level: OptLevel::default(),
         // The run's base seed: the native backend seeds each circuit from it,
         // Aer, CUNQA and the subprocess bridge each call (C-7); QMIO ignores
         // it. Set unconditionally so a seeded training run reproduces exactly.
-        seed: Some(effective_seed),
-    });
+        Some(effective_seed),
+    );
     // Shared error slot: the oracle records the first evaluation failure here
     // (the optimizer traits cannot return a `Result`) and it is surfaced by
     // `finish_optimization` after `optimize` returns.
@@ -291,8 +270,8 @@ pub fn train<'py>(
     // it requests a SLURM allocation (issue #418).
     let observable = extract_cost_observable(&expectation_function)?;
     let method_enum = method_from_pyclass(&method, dimensions, &errors, &effective_id)?;
-    // Log before `backend` is shadowed below: the `&str` device selector is what
-    // belongs in the manifest record, not the constructed backend object.
+    // The `&str` device selector is what belongs in the manifest record, not
+    // the constructed backend object.
     log_training_start(
         &effective_id,
         &infrastructure,
@@ -322,15 +301,11 @@ pub fn train<'py>(
         seed: Some(effective_seed),
     };
     let tracer = py.detach(|| call_trace::open(trace, header));
-    let backend = Infrastructure::create_backend(&config)
-        .map_err(crate::exceptions::backend_error_to_pyerr)
-        .map_err(|err| call_trace::close_on_error(py, tracer.as_ref(), err))?;
     // Pair the backend with its default planner (the atomic-wave SequentialPlanner)
     // and validate the pairing up front.
-    let resources = Resources::new(backend, None, Arc::new(config.run_params()))
+    let scheduler = prepare::scheduler(&config, None)
         .map_err(crate::exceptions::infrastructure_error_to_pyerr)
         .map_err(|err| call_trace::close_on_error(py, tracer.as_ref(), err))?;
-    let scheduler = Scheduler::ephemeral(resources);
     let flow = TrainFlow {
         factory: VqcOracleFactory {
             circuit: circuit_source,
