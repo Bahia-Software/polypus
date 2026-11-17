@@ -136,7 +136,7 @@ pub use kernel::{FeatureMap, FeatureStates, FidelityKernel};
 pub use layers::{
     AmplitudeEncoder, AngleEncoder, BasisEncoder, ConvBlock, ConvLayer, Entanglement, Entangler,
     HardwareEfficientAnsatz, IqpEncoder, KeepRule, Layer, Pairing, PoolBlock, PoolLayer,
-    RotationAxis, StronglyEntanglingAnsatz,
+    RotationAxis, SimplifiedTwoDesignAnsatz, StronglyEntanglingAnsatz,
 };
 pub use loss::Loss;
 pub use model::{CompiledModel, QuantumModel, TrainedModel};

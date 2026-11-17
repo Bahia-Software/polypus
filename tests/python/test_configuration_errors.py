@@ -238,6 +238,14 @@ class TestNativeQmlChecksRaiseIt:
                 id="dataset-and-y",
             ),
             pytest.param(lambda: _fit(batch_size=6), "batch_size", id="batch-size"),
+            pytest.param(
+                lambda: _fit(batch_size=-1), "batch_size", id="batch-size-negative"
+            ),
+            pytest.param(
+                lambda: _fit(batch_size=2**70),
+                "batch_size",
+                id="batch-size-beyond-usize",
+            ),
             pytest.param(lambda: _fit(exact=True), "exact=True", id="fit-exact"),
             pytest.param(
                 lambda: _fit(x=[[0.1, 0.2], [2.9, 2.8]], y=[1, -1]),

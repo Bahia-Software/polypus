@@ -774,8 +774,13 @@ impl NativeStatevectorBackend {
     ///   `(n + 1)`-qubit statevector that takes the memory of two `n`-qubit
     ///   ones; check [`adjoint_fits`](Self::adjoint_fits) first), and the batch
     ///   runs in windows of as many tasks as fit at once, the exact path's
-    ///   windowing and gate-parallel threshold. A pure resource bound: the
-    ///   result is the same for every window size.
+    ///   windowing. A pure resource bound: the result is the same for every
+    ///   window size.
+    /// - **Gate kernels.** A window of two or more tasks runs every task on the
+    ///   sequential gate kernels, whatever the pool's size; only a lone task
+    ///   takes the parallel ones, from the simulator's threshold up (issue
+    ///   #560: on a shared pool, forking every short pass of a run costs more
+    ///   than it saves). Speed only: the bits are the same.
     /// - **Cancellable.** `should_cancel` is polled inside every run, on the
     ///   simulator's throttled cadence; `true` abandons the batch with
     ///   [`BackendError::Aborted`]. It must be cheap and callable from any
@@ -824,11 +829,7 @@ impl NativeStatevectorBackend {
         };
         let mut out = Vec::with_capacity(tasks.len());
         for chunk in tasks.chunks(window) {
-            let simulator = StatevectorSimulator {
-                max_qubits: self.simulator.max_qubits,
-                parallel_threshold: self.gate_parallel_threshold(chunk.len(), threads),
-                fusion: self.simulator.fusion,
-            };
+            let simulator = self.adjoint_window_simulator(chunk.len());
             let block: Vec<Vec<f64>> = chunk
                 .par_iter()
                 .map(|task| {
@@ -856,6 +857,20 @@ impl NativeStatevectorBackend {
             out.extend(block);
         }
         Ok(out)
+    }
+
+    /// The simulator a window of `window_len` adjoint runs runs on: this
+    /// backend's qubit ceiling and fusion flag, and
+    /// [`adjoint_parallel_threshold`]'s gate kernels.
+    fn adjoint_window_simulator(&self, window_len: usize) -> StatevectorSimulator {
+        StatevectorSimulator {
+            max_qubits: self.simulator.max_qubits,
+            parallel_threshold: adjoint_parallel_threshold(
+                window_len,
+                self.simulator.parallel_threshold,
+            ),
+            fusion: self.simulator.fusion,
+        }
     }
 }
 
@@ -1032,6 +1047,35 @@ pub struct AdjointTask<'a, W> {
     pub wrt: &'a [AngleRef],
     /// `O|b⟩ = weight(b)|b⟩`; pure and callable from any thread.
     pub weight: W,
+}
+
+/// The gate-parallel threshold of a window of `window_len` adjoint runs (issue
+/// #560): `usize::MAX` (the sequential gate kernels) for two runs or more, and
+/// `threshold`, the simulator's, for a lone run.
+///
+/// Not [`gate_parallel_threshold`](NativeStatevectorBackend::gate_parallel_threshold)'s
+/// "fewer tasks than threads" rule. An adjoint run is about a thousand short
+/// buffer passes, and the parallel kernels fork and join each one on the pool
+/// the window's own `par_iter` already runs on. Measured on 16 threads (#560):
+/// with 2 to 32 tasks in the window and 10 to 16 qubits, the parallel kernels
+/// were never faster and up to 12× slower. With two tasks they win again from
+/// about 18–22 qubits up: up to ~1.4× (measured in #560: 22 qubits, 12
+/// threads), where a lone run was only about 2× faster on the parallel
+/// kernels. That figure holds for the 12–16 threads measured, not as a bound:
+/// on a wider pool a lone run gains more from the parallel kernels, so a
+/// window smaller than the pool (a small batch, or the windows the memory
+/// budget cuts a wide batch into) can lose more. Issue #593 calibrates this
+/// per window size. With four tasks or more the sequential kernels won at
+/// every point measured, up to 22 qubits. So each task keeps its passes on
+/// its own thread, and the window's `par_iter` alone spreads the tasks. The
+/// bits are the same either way: the kernels and the reductions give the same
+/// result on both paths.
+fn adjoint_parallel_threshold(window_len: usize, threshold: usize) -> usize {
+    if window_len > 1 {
+        usize::MAX
+    } else {
+        threshold
+    }
 }
 
 /// The width whose single statevector takes the memory of an adjoint run's two
@@ -2810,6 +2854,194 @@ mod tests {
             .run_adjoint::<fn(usize) -> f64>(&[], None)
             .unwrap()
             .is_empty());
+    }
+
+    /// Issue #560: a window of two or more adjoint runs takes the sequential
+    /// gate kernels, whatever the pool's size, and only a lone run keeps the
+    /// simulator's threshold — not the sampled and exact paths' "fewer tasks
+    /// than threads" rule, which is left as it was. Each boundary has its case:
+    /// one run against two, and windows below, at and above a 16-thread pool.
+    #[test]
+    fn adjoint_windows_of_two_or_more_take_the_sequential_gate_kernels() {
+        for threshold in [0, 12, usize::MAX] {
+            assert_eq!(adjoint_parallel_threshold(1, threshold), threshold);
+        }
+        for window in [2, 8, 15, 16, 17, usize::MAX] {
+            assert_eq!(adjoint_parallel_threshold(window, 12), usize::MAX);
+            assert_eq!(adjoint_parallel_threshold(window, 0), usize::MAX);
+        }
+        // The other paths still hand a window smaller than the pool the
+        // simulator's threshold.
+        let mut backend = NativeStatevectorBackend::new(0);
+        backend.simulator.parallel_threshold = 12;
+        assert_eq!(backend.gate_parallel_threshold(8, 16), 12);
+        assert_eq!(adjoint_parallel_threshold(8, 12), usize::MAX);
+    }
+
+    /// The simulator `run_adjoint_with_cap` gives each window: the backend's
+    /// qubit ceiling and fusion flag, and the adjoint's gate kernels — the
+    /// simulator's threshold for a lone run, the sequential kernels for two.
+    #[test]
+    fn each_adjoint_window_runs_on_the_adjoints_gate_kernels() {
+        let mut backend = NativeStatevectorBackend::new(0).with_fusion(false);
+        backend.simulator.parallel_threshold = 12;
+        backend.simulator.max_qubits = 20;
+        let lone = backend.adjoint_window_simulator(1);
+        assert_eq!(lone.parallel_threshold, 12);
+        assert_eq!(lone.max_qubits, 20);
+        assert!(!lone.fusion);
+        let pair = backend.adjoint_window_simulator(2);
+        assert_eq!(pair.parallel_threshold, usize::MAX);
+        assert_eq!(pair.max_qubits, 20);
+        assert!(!pair.fusion);
+    }
+
+    /// `run_adjoint_with_cap` runs each window on those kernels, seen from the
+    /// inside: on a one-thread pool, the weight of each run's first amplitude
+    /// runs whatever work that thread has queued. The parallel kernels queue
+    /// their reduction's other blocks there, so those run while the first
+    /// block is still under way; the sequential kernels queue nothing of the
+    /// run's own, and its blocks run one after the other. A lone run is the
+    /// control that the probe sees the parallel kernels at all.
+    #[test]
+    fn run_adjoint_with_cap_runs_each_window_on_the_adjoints_gate_kernels() {
+        // Whether any later block of this run's reduction started while its
+        // first block (amplitudes 0..4096) was under way.
+        #[derive(Default)]
+        struct Probe {
+            in_first_block: AtomicBool,
+            overlapped: AtomicBool,
+        }
+        impl Probe {
+            fn weight(&self, b: usize) -> f64 {
+                if b == 0 {
+                    self.in_first_block.store(true, Ordering::SeqCst);
+                    while rayon::yield_local() == Some(rayon::Yield::Executed) {}
+                } else if b >= 4096 && self.in_first_block.load(Ordering::SeqCst) {
+                    self.overlapped.store(true, Ordering::SeqCst);
+                }
+                if b == 4095 {
+                    self.in_first_block.store(false, Ordering::SeqCst);
+                }
+                z0(b)
+            }
+        }
+
+        let n = 14;
+        let circuits: Vec<ConcreteCircuit> = (0..2)
+            .map(|i| spread_adjoint_circuit(n, 0.2 + 0.45 * i as f64))
+            .collect();
+        let wrt = [n + 1, n + 3].map(|position| AngleRef::new(position, 0));
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        // Every gate on the parallel kernels, unless the window says otherwise.
+        let mut backend = NativeStatevectorBackend::new(0);
+        backend.simulator.parallel_threshold = 0;
+        let overlapped = |runs: usize| -> Vec<bool> {
+            let probes: Vec<Probe> = (0..runs).map(|_| Probe::default()).collect();
+            let tasks: Vec<AdjointTask<'_, _>> = circuits[..runs]
+                .iter()
+                .zip(&probes)
+                .map(|(circuit, probe)| AdjointTask {
+                    circuit,
+                    wrt: &wrt,
+                    weight: move |b: usize| probe.weight(b),
+                })
+                .collect();
+            pool.install(|| backend.run_adjoint_with_cap(&tasks, None, usize::MAX))
+                .unwrap();
+            probes
+                .iter()
+                .map(|probe| probe.overlapped.load(Ordering::SeqCst))
+                .collect()
+        };
+        assert_eq!(overlapped(1), [true], "a lone run, parallel kernels");
+        assert_eq!(overlapped(2), [false, false], "a window of two, sequential");
+    }
+
+    /// [`adjoint_circuit`] after an `Ry` of its own angle on every one of the
+    /// `n` qubits, so the amplitude spreads over the whole register: the
+    /// differentiated rotations are at `n + 1`, `n + 3` and `n + 4`. The `Ry`
+    /// angles stay clear of `0` and `π` for the angles and widths used here, so
+    /// no qubit is left without amplitude in either of its states.
+    fn spread_adjoint_circuit(n: usize, angle: f64) -> ConcreteCircuit {
+        let mut circuit = ParameterizedCircuit::new(n);
+        for q in 0..n {
+            circuit = circuit.ry(q, angle + 0.1 * q as f64);
+        }
+        circuit = circuit.h(0).ry(0, angle).cx(0, 1);
+        circuit = circuit.rz(1, 0.3 * angle).rx(0, -angle).measure_all();
+        circuit.assign_parameters(&[]).unwrap()
+    }
+
+    /// The rows are the same bits whatever kernels run them: a backend whose
+    /// threshold sends every gate of a lone run to the parallel kernels, one
+    /// that keeps them all sequential, any window size, and the simulator's
+    /// own gradient on either path. 14 qubits with amplitude on every one, so
+    /// the reductions sum four non-zero blocks of 4096 amplitudes: with two,
+    /// any order of adding them gives the same bits, and a combine out of
+    /// order could not fail the test.
+    #[test]
+    fn adjoint_rows_do_not_depend_on_the_gate_kernels() {
+        let n = 14;
+        let circuits: Vec<ConcreteCircuit> = (0..4)
+            .map(|i| spread_adjoint_circuit(n, 0.2 + 0.45 * i as f64))
+            .collect();
+        let wrt = [0, n - 1, n + 1, n + 3, n + 4].map(|position| AngleRef::new(position, 0));
+        let tasks: Vec<AdjointTask<'_, _>> = circuits
+            .iter()
+            .map(|circuit| AdjointTask {
+                circuit,
+                wrt: &wrt,
+                weight: z0,
+            })
+            .collect();
+        let sequential = StatevectorSimulator {
+            parallel_threshold: usize::MAX,
+            ..StatevectorSimulator::new()
+        };
+        let parallel = StatevectorSimulator {
+            parallel_threshold: 0,
+            ..StatevectorSimulator::new()
+        };
+        let expected: Vec<Vec<f64>> = circuits
+            .iter()
+            .map(|circuit| {
+                // Every reduction block must hold amplitude, or its partial
+                // sum would be zero and the order of the four unobservable.
+                let state = sequential.run(circuit).unwrap();
+                for block in state.amplitudes().chunks(4096) {
+                    assert!(block.iter().any(|a| a.norm() > 1e-3));
+                }
+                assert_eq!(state.amplitudes().len(), 4 * 4096);
+                let seq = sequential
+                    .adjoint_gradient(circuit, &wrt, z0, None)
+                    .unwrap()
+                    .derivatives;
+                let par = parallel
+                    .adjoint_gradient(circuit, &wrt, z0, None)
+                    .unwrap()
+                    .derivatives;
+                assert_eq!(bits(&seq), bits(&par), "simulator, both paths");
+                seq
+            })
+            .collect();
+        for threshold in [0, usize::MAX] {
+            let mut backend = NativeStatevectorBackend::new(0);
+            backend.simulator.parallel_threshold = threshold;
+            for cap in [1, 2, 3, usize::MAX] {
+                let rows = backend.run_adjoint_with_cap(&tasks, None, cap).unwrap();
+                for (row, want) in rows.iter().zip(&expected) {
+                    assert_eq!(bits(row), bits(want), "threshold {threshold}, cap {cap}");
+                }
+            }
+        }
+    }
+
+    fn bits(values: &[f64]) -> Vec<u64> {
+        values.iter().map(|v| v.to_bits()).collect()
     }
 
     /// A cancellation is `Aborted` (Ctrl+C at the edge); any other simulator

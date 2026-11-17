@@ -7,20 +7,24 @@ Why it exists: with ``exact=True`` on the native backend, ``qml.jacobian``,
 for ``P`` trainable gates — and now take one adjoint differentiation per row
 (and observable), about three simulations long whatever ``P``. That is a
 performance-only change (the result is the same to rounding, verified by the
-tests), so docs/ENGINEERING.md §9 wants the speedup measured here.
+tests), so docs/ENGINEERING.md §9 wants the speedup measured here. It also
+measures later performance-only changes to the adjoint (#560: the gate kernels
+a batch of adjoint runs takes), the same way.
 
 Method. There is no public switch between the two (by design, no environment
 variable or hidden flag), so the comparison is between two **builds**: this
 script runs once with the wheel of the branch and once with a wheel built from
-``main`` before the change (``abd0387``), each time under its own ``--label``,
-and writes ``<out>/<label>.json``. ``--compare BEFORE.json AFTER.json`` then
-prints the speedup ``t_before / t_after`` per point. Run both arms in the same
-allocation, on the same node and thread count (see bench_adjoint.sbatch).
+``main`` before the change (``abd0387`` for #503, ``f03844c`` for #560), each
+time under its own ``--label``, and writes ``<out>/<label>.json``. ``--compare
+BEFORE.json AFTER.json`` then prints the speedup ``t_before / t_after`` per
+point, with each arm's spread (``(max − min) / median`` of the ``jacobian``
+repeats). Run both arms in the same allocation, on the same node and thread
+count (see bench_adjoint.sbatch).
 
 Each point is a hardware-efficient model on ``n`` qubits — an ``ry`` angle
 encoder, ``--depth`` hardware-efficient layers, a ``Z₀`` readout — so ``P``
 grows with ``n · depth``. For each point, after one untimed warm-up, it times
-the median of ``--repeats`` runs of:
+the median (and the minimum and maximum) of ``--repeats`` runs of:
 
   * ``jacobian`` — ``qml.jacobian(model, x, params, exact=True)`` over
     ``--rows`` rows (``wrt="params"``);
@@ -72,13 +76,14 @@ def labels(count: int):
     return [0.5 if i % 2 == 0 else -0.5 for i in range(count)]
 
 
-def median_time(fn, repeats: int) -> float:
+def timings(fn, repeats: int) -> tuple[float, float, float]:
+    """The median, minimum and maximum wall-clock time of ``repeats`` runs."""
     times = []
     for _ in range(repeats):
         start = time.perf_counter()
         fn()
         times.append(time.perf_counter() - start)
-    return statistics.median(times)
+    return statistics.median(times), min(times), max(times)
 
 
 def measure(n: int, depth: int, num_rows: int, repeats: int) -> dict:
@@ -107,13 +112,19 @@ def measure(n: int, depth: int, num_rows: int, repeats: int) -> dict:
 
     jacobian()
     fit_epoch()
+    jac, jac_min, jac_max = timings(jacobian, repeats)
+    fit, fit_min, fit_max = timings(fit_epoch, repeats)
     return {
         "qubits": n,
         "depth": depth,
         "params": model.num_params,
         "rows": num_rows,
-        "jacobian_s": median_time(jacobian, repeats),
-        "fit_epoch_s": median_time(fit_epoch, repeats),
+        "jacobian_s": jac,
+        "jacobian_min_s": jac_min,
+        "jacobian_max_s": jac_max,
+        "fit_epoch_s": fit,
+        "fit_epoch_min_s": fit_min,
+        "fit_epoch_max_s": fit_max,
     }
 
 
@@ -124,12 +135,19 @@ def compare(before_path: str, after_path: str) -> None:
     def key(point):
         return (point["qubits"], point["depth"], point["rows"])
 
+    def spread(point):
+        # Results written before the spread was recorded have no min/max.
+        if "jacobian_min_s" not in point:
+            return float("nan")
+        return (point["jacobian_max_s"] - point["jacobian_min_s"]) / point["jacobian_s"]
+
     after_points = {key(p): p for p in after["points"]}
     print(f"# before: {before['label']}  after: {after['label']}")
     print(
         f"{'qubits':>6} {'depth':>5} {'P':>5} {'rows':>4} "
         f"{'jac_before':>11} {'jac_after':>10} {'speedup':>8} "
-        f"{'fit_before':>11} {'fit_after':>10} {'speedup':>8}"
+        f"{'fit_before':>11} {'fit_after':>10} {'speedup':>8} "
+        f"{'spread_b':>8} {'spread_a':>8}"
     )
     for p in before["points"]:
         q = after_points.get(key(p))
@@ -140,7 +158,8 @@ def compare(before_path: str, after_path: str) -> None:
             f"{p['jacobian_s']:>11.4f} {q['jacobian_s']:>10.4f} "
             f"{p['jacobian_s'] / q['jacobian_s']:>7.1f}x "
             f"{p['fit_epoch_s']:>11.4f} {q['fit_epoch_s']:>10.4f} "
-            f"{p['fit_epoch_s'] / q['fit_epoch_s']:>7.1f}x"
+            f"{p['fit_epoch_s'] / q['fit_epoch_s']:>7.1f}x "
+            f"{spread(p):>8.2f} {spread(q):>8.2f}"
         )
 
 

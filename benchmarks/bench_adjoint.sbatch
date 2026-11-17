@@ -10,7 +10,8 @@
 #
 # Build the two wheels first (release; from the repository root):
 #   maturin build --release --out dist                       # the branch -> AFTER_WHEEL
-#   git archive abd0387 | tar -x -C /path/to/main-src        # main before #503
+#   git archive <base> | tar -x -C /path/to/main-src         # main before the change:
+#                                                            # abd0387 for #503, f03844c for #560
 #   (cd /path/to/main-src && maturin build --release --out dist)   # -> BEFORE_WHEEL
 #
 # Submit:
@@ -37,7 +38,7 @@ REPEATS="${REPEATS:-3}"
 THREADS="${THREADS:-${SLURM_CPUS_PER_TASK:-${SLURM_CPUS_ON_NODE:-$(nproc)}}}"
 OUT="${OUT:-benchmarks/adjoint_${SLURM_JOB_ID:-local}}"
 CONDA_PREFIX_DIR="${CONDA_PREFIX_DIR:-$HOME/miniconda3}"
-: "${BEFORE_WHEEL:?set BEFORE_WHEEL to the wheel built from main (abd0387)}"
+: "${BEFORE_WHEEL:?set BEFORE_WHEEL to the wheel built from main before the change}"
 : "${AFTER_WHEEL:?set AFTER_WHEEL to the wheel built from this branch}"
 
 # ---- environment ------------------------------------------------------------

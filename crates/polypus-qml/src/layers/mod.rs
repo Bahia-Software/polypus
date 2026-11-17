@@ -12,7 +12,10 @@ mod conv;
 mod encoders;
 mod pool;
 
-pub use ansatz::{Entanglement, Entangler, HardwareEfficientAnsatz, StronglyEntanglingAnsatz};
+pub use ansatz::{
+    Entanglement, Entangler, HardwareEfficientAnsatz, SimplifiedTwoDesignAnsatz,
+    StronglyEntanglingAnsatz,
+};
 pub use conv::{ConvBlock, ConvLayer, Pairing};
 pub use encoders::{AmplitudeEncoder, AngleEncoder, BasisEncoder, IqpEncoder};
 pub use pool::{KeepRule, PoolBlock, PoolLayer};
@@ -25,7 +28,7 @@ use crate::model::{InputTrace, LayerAllocation, LayerContext, LayerOps};
 /// Adjacent, non-overlapping pairs over `n` logical positions:
 /// `(0,1),(2,3),…` — pair `k` is `(2k, 2k+1)` for `k` in `0..n/2`. With `n`
 /// odd the last position is left unpaired (design doc §6.4). Shared by
-/// [`conv`] and [`pool`].
+/// [`conv`], [`pool`] and the simplified 2-design ansatz.
 pub(crate) fn even_pairs(n: usize) -> Vec<(usize, usize)> {
     (0..n / 2).map(|k| (2 * k, 2 * k + 1)).collect()
 }
@@ -34,7 +37,7 @@ pub(crate) fn even_pairs(n: usize) -> Vec<(usize, usize)> {
 /// `(1,2),(3,4),…` — pair `k` is `(2k+1, 2k+2)` for `k` in `0..(n-1)/2`. The
 /// `n == 0` case is guarded explicitly so the `n - 1` never underflows; for
 /// `n == 1` the integer division already yields the empty range (design doc
-/// §6.4).
+/// §6.4). Shared like [`even_pairs`].
 pub(crate) fn odd_pairs(n: usize) -> Vec<(usize, usize)> {
     if n == 0 {
         return Vec::new();
@@ -112,6 +115,9 @@ pub enum Layer {
     /// PennyLane's strongly entangling layers: a general rotation per qubit and
     /// a ring of entanglers whose range changes per layer (consumes `θ`).
     StronglyEntangling(StronglyEntanglingAnsatz),
+    /// PennyLane's simplified 2-design: an initial `Ry` layer, then blocks of
+    /// `CZ` + `Ry` on the even and then the odd pairs of qubits (consumes `θ`).
+    SimplifiedTwoDesign(SimplifiedTwoDesignAnsatz),
     /// A convolution block with parameter sharing across pairs (consumes `θ`).
     Conv(ConvLayer),
     /// A unitary pooling block that shrinks the active set (consumes `θ`).
@@ -127,6 +133,7 @@ impl LayerOps for Layer {
             Layer::Basis(l) => l.plan(ctx),
             Layer::HardwareEfficient(l) => l.plan(ctx),
             Layer::StronglyEntangling(l) => l.plan(ctx),
+            Layer::SimplifiedTwoDesign(l) => l.plan(ctx),
             Layer::Conv(l) => l.plan(ctx),
             Layer::Pool(l) => l.plan(ctx),
         }
@@ -146,6 +153,7 @@ impl LayerOps for Layer {
             Layer::Basis(l) => l.emit_traced(qc, alloc, x, trace),
             Layer::HardwareEfficient(l) => l.emit_traced(qc, alloc, x, trace),
             Layer::StronglyEntangling(l) => l.emit_traced(qc, alloc, x, trace),
+            Layer::SimplifiedTwoDesign(l) => l.emit_traced(qc, alloc, x, trace),
             Layer::Conv(l) => l.emit_traced(qc, alloc, x, trace),
             Layer::Pool(l) => l.emit_traced(qc, alloc, x, trace),
         }

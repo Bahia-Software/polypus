@@ -288,6 +288,155 @@ class TestStronglyEntangling:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Simplified 2-design ansatz
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# Written out, not computed, so the oracle does not share the layer's pairing:
+# the even pairs (0,1),(2,3),… and then the odd pairs (1,2),(3,4),….
+_PAIRS = {
+    1: [],
+    2: [(0, 1)],
+    3: [(0, 1), (1, 2)],
+    4: [(0, 1), (2, 3), (1, 2)],
+    5: [(0, 1), (2, 3), (1, 2), (3, 4)],
+}
+
+
+def _simplified_two_design_circuit(sample, params, num_qubits, reps, qubits=None):
+    """The bound circuit of an ``angle_encoder("ry")`` + ``simplified_two_design``
+    model, built gate by gate with ``polypus.Circuit``: ``ry`` on every active
+    qubit, then per block and pair ``cz``, ``ry`` on the first qubit and ``ry``
+    on the second. ``qubits`` maps logical positions to physical qubits
+    (``None``: all of them, in order)."""
+    import polypus
+
+    qubits = qubits or list(range(num_qubits))
+    qc = polypus.Circuit(num_qubits)
+    for qubit, x in enumerate(sample):
+        qc.ry(qubit, x)
+    angles = iter(params)
+    for qubit in qubits:
+        qc.ry(qubit, next(angles))
+    for _ in range(reps):
+        for a, b in _PAIRS[len(qubits)]:
+            qc.cz(qubits[a], qubits[b])
+            qc.ry(qubits[a], next(angles))
+            qc.ry(qubits[b], next(angles))
+    return qc.measure_all()
+
+
+def _gate_lines(qasm):
+    """The ``cz`` and ``ry`` lines of a QASM program, in order."""
+    return [line for line in qasm.splitlines() if line.startswith(("cz", "ry"))]
+
+
+class TestSimplifiedTwoDesign:
+    """``simplified_two_design`` is PennyLane's ``SimplifiedTwoDesign``: an
+    initial ``Ry`` layer and ``reps`` blocks of ``CZ`` + ``Ry`` on the even and
+    then the odd pairs, ``n + 2·(n−1)·reps`` parameters."""
+
+    @pytest.mark.parametrize(
+        ("num_qubits", "reps"),
+        [(4, 1), (4, 2), (2, 2), (3, 1), (5, 2), (1, 3), (3, 0)],
+        ids=["n4", "n4-two-blocks", "n2", "n3", "n5", "n1", "reps0"],
+    )
+    def test_the_circuit_is_gate_for_gate(self, num_qubits, reps):
+        sample = [0.1 * (j + 1) for j in range(num_qubits)]
+        model = _raw_model(num_qubits, lambda a: a.simplified_two_design(reps))
+        params = [0.05 * (i + 1) for i in range(model.num_params)]
+        expected = _simplified_two_design_circuit(sample, params, num_qubits, reps)
+        assert model.circuit(sample, params).to_qasm2() == expected.to_qasm2()
+
+    def test_the_parameters_follow_pennylane_s_order(self):
+        # Spelled out for n = 4, one block: the initial weights, then two per
+        # pair in the order (0,1), (2,3), (1,2).
+        import polypus
+
+        params = [0.1 * (i + 1) for i in range(10)]
+        model = _raw_model(4, lambda a: a.simplified_two_design(1))
+        qc = polypus.Circuit(4)
+        for qubit in range(4):
+            qc.ry(qubit, 0.0)
+        for qubit in range(4):
+            qc.ry(qubit, params[qubit])
+        for (a, b), k in (((0, 1), 4), ((2, 3), 6), ((1, 2), 8)):
+            qc.cz(a, b)
+            qc.ry(a, params[k])
+            qc.ry(b, params[k + 1])
+        expected = qc.measure_all()
+        assert model.circuit([0.0] * 4, params).to_qasm2() == expected.to_qasm2()
+
+    def test_after_pooling_the_gates_land_on_the_active_qubits(self):
+        # Pooling 6 → 3 keeps physical qubits 0, 2 and 4: the layer's pairs are
+        # (0,2) and then (2,4), and its parameters follow the pooling's 3.
+        from polypus.qml import Ansatz, Encoder, Model, Readout, Z
+
+        model = Model(
+            Encoder(6).angle_encoder("ry"),
+            Ansatz(6).pool("basic").simplified_two_design(1),
+            Readout([Z(0)]),
+        )
+        assert model.num_params == 3 + 3 + 4
+        sample = [0.1 * (j + 1) for j in range(6)]
+        params = [0.05 * (i + 1) for i in range(model.num_params)]
+        layer = _gate_lines(
+            _simplified_two_design_circuit(
+                [], params[3:], 6, 1, qubits=[0, 2, 4]
+            ).to_qasm2()
+        )
+        # The layer's gates close the circuit, after the encoder and pooling.
+        actual = _gate_lines(model.circuit(sample, params).to_qasm2())
+        assert len(layer) == 3 + 2 * 3
+        assert actual[-len(layer) :] == layer
+
+    def test_the_count_is_n_plus_two_per_pair_per_block(self):
+        from polypus.qml import Ansatz
+
+        _assert_param_count(_raw_model(3, lambda a: a.simplified_two_design(2)), 11)
+        _assert_param_count(_raw_model(4, lambda a: a.simplified_two_design(2)), 16)
+        _assert_param_count(_raw_model(5, lambda a: a.simplified_two_design(1)), 13)
+        _assert_param_count(_raw_model(2, lambda a: a.simplified_two_design(1)), 4)
+        # After pooling, n is the qubits still active: 4 → 2.
+        assert Ansatz(4).pool("basic").simplified_two_design(1).num_params == 3 + 4
+        assert Ansatz(3).simplified_two_design(0).num_params == 3
+
+    def test_a_single_qubit_has_one_parameter_whatever_the_reps(self):
+        from polypus.qml import Ansatz
+
+        _assert_param_count(_raw_model(1, lambda a: a.simplified_two_design(3)), 1)
+        # No pairs, so no block is ever built: even the largest reps is instant.
+        assert Ansatz(1).simplified_two_design(2**64 - 1).num_params == 1
+        model = _raw_model(1, lambda a: a.simplified_two_design(2**64 - 1))
+        _assert_param_count(model, 1)
+        expected = _simplified_two_design_circuit([0.3], [0.5], 1, 0)
+        assert model.circuit([0.3], [0.5]).to_qasm2() == expected.to_qasm2()
+
+    def test_invalid_counts_are_value_errors(self):
+        from polypus.qml import Ansatz
+
+        ansatz = Ansatz(2).real_amplitudes(1)
+        for reps, match in (
+            (-1, "non-negative integer, got -1"),
+            (2**64, f"got {2**64}"),
+            (2**70, f"got {2**70}"),
+            # 2 × 1 pair × (2**64 − 1) parameters do not fit in a usize.
+            (2**64 - 1, "layer 1 needs more trainable"),
+        ):
+            with pytest.raises(ValueError, match=match):
+                ansatz.simplified_two_design(reps)
+            assert (ansatz.num_layers, ansatz.num_params) == (1, 4)
+        # Another type keeps its `TypeError`.
+        with pytest.raises(TypeError):
+            ansatz.simplified_two_design("3")
+
+    def test_it_is_an_ansatz_layer_only(self):
+        from polypus.qml import Encoder
+
+        assert not hasattr(Encoder(2), "simplified_two_design")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Encoders
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -513,6 +662,262 @@ class TestCountArguments:
 
         with pytest.raises(TypeError):
             build(Ansatz(2))
+
+
+def _qml(name):
+    """``polypus.qml.<name>``, imported when the test runs."""
+    import polypus.qml as qml
+
+    return getattr(qml, name)
+
+
+class TestQubitCountsAndPositions:
+    """``num_qubits`` and a Pauli position are counts like ``reps``: a negative
+    or oversized one is a ``ValueError`` where it is written, never PyO3's
+    ``OverflowError``, and another type is still a ``TypeError`` (contract
+    C-11). In the ``[(pauli, position), …]`` form the ``ValueError`` names the
+    factor and the term (of an ``Observable``) or observable (of a
+    ``Readout``) it is in; any other malformed list keeps the ``TypeError``
+    naming the forms."""
+
+    @pytest.mark.parametrize("cls", ["Encoder", "Ansatz"])
+    @pytest.mark.parametrize(
+        ("value", "match"),
+        [
+            pytest.param(-1, "non-negative integer, got -1", id="negative"),
+            pytest.param(2**70, f"at most {2**64 - 1}, got {2**70}", id="beyond-usize"),
+        ],
+    )
+    def test_an_out_of_range_qubit_count_is_a_value_error(self, cls, value, match):
+        with pytest.raises(ValueError, match=match):
+            _qml(cls)(value)
+
+    @pytest.mark.parametrize("cls", ["Encoder", "Ansatz"])
+    def test_zero_qubits_keeps_its_own_message(self, cls):
+        with pytest.raises(ValueError, match=f"{cls} needs at least one qubit"):
+            _qml(cls)(0)
+
+    @pytest.mark.parametrize("cls", ["Encoder", "Ansatz"])
+    @pytest.mark.parametrize("value", ["3", 3.0], ids=["str", "float"])
+    def test_a_qubit_count_of_another_type_is_a_type_error(self, cls, value):
+        with pytest.raises(TypeError):
+            _qml(cls)(value)
+
+    @pytest.mark.parametrize("name", ["Z", "X", "Y"])
+    @pytest.mark.parametrize(
+        ("value", "match"),
+        [
+            pytest.param(-1, "non-negative integer, got -1", id="negative"),
+            pytest.param(2**70, f"at most {2**64 - 1}, got {2**70}", id="beyond-usize"),
+        ],
+    )
+    def test_an_out_of_range_position_is_a_value_error(self, name, value, match):
+        with pytest.raises(ValueError, match=match):
+            _qml(name)(value)
+
+    @pytest.mark.parametrize("name", ["Z", "X", "Y"])
+    @pytest.mark.parametrize("value", ["0", 0.0], ids=["str", "float"])
+    def test_a_position_of_another_type_is_a_type_error(self, name, value):
+        with pytest.raises(TypeError):
+            _qml(name)(value)
+
+    @pytest.mark.parametrize(
+        ("factors", "match"),
+        [
+            pytest.param(
+                [("z", -1)],
+                r'position of factor 0 \("z"\) of WHOSE 0 is out of range: '
+                r"expected a non-negative integer, got -1",
+                id="negative",
+            ),
+            pytest.param(
+                [("z", 0), ("x", 2**70)],
+                rf'position of factor 1 \("x"\) of WHOSE 0 .* got {2**70}',
+                id="beyond-usize",
+            ),
+            # Read in order: the first bad factor decides.
+            pytest.param(
+                [("z", -1), ("z",)],
+                r"position of factor 0 .* of WHOSE 0 .* got -1",
+                id="position-before-a-malformed-factor",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("where", ["readout", "observable"])
+    def test_an_out_of_range_position_in_a_list_is_a_value_error(
+        self, where, factors, match
+    ):
+        from polypus.qml import Observable, Readout
+
+        whose = "observable" if where == "readout" else "term"
+        with pytest.raises(ValueError, match=match.replace("WHOSE", whose)):
+            if where == "readout":
+                Readout([factors])
+            else:
+                Observable([(1.0, factors)])
+
+    def test_the_message_names_the_term_that_is_not_the_first(self):
+        from polypus.qml import Observable
+
+        with pytest.raises(
+            ValueError, match=r'factor 0 \("z"\) of term 1 is out of range'
+        ):
+            Observable([(1.0, [("z", 0)]), (1.0, [("z", -1)])])
+
+    def test_the_message_names_the_observable_that_is_not_the_first(self):
+        from polypus.qml import Readout, Z
+
+        with pytest.raises(
+            ValueError, match=r'factor 0 \("z"\) of observable 1 is out of range'
+        ):
+            Readout([Z(0), [("z", -1)]])
+
+    @pytest.mark.parametrize(
+        "factors",
+        [
+            pytest.param([("z",)], id="no-position"),
+            pytest.param([("z", "0")], id="str-position"),
+            pytest.param([("z", 0.5)], id="float-position"),
+            pytest.param("zz", id="str"),
+            # Read in order: the malformed factor comes first.
+            pytest.param([("z",), ("z", -1)], id="malformed-before-a-bad-position"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("where", "match"),
+        [
+            ("readout", "each observable must be"),
+            ("observable", "a Pauli term must be"),
+        ],
+    )
+    def test_any_other_malformed_list_is_still_a_type_error(
+        self, where, match, factors
+    ):
+        from polypus.qml import Observable, Readout
+
+        with pytest.raises(TypeError, match=match):
+            if where == "readout":
+                Readout([factors])
+            else:
+                Observable([(1.0, factors)])
+
+
+class _Index:
+    """An integer only through ``__index__``: no ``__lt__``, and its ``str`` is
+    not the integer, so a count must be described by what ``__index__``
+    returns."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __index__(self):
+        return self.value
+
+
+class TestIndexObjects:
+    """An object with ``__index__`` (a NumPy integer, say) is the integer it
+    returns: out of range, it is the same ``ValueError`` as that integer, with
+    that integer in the message, never a ``TypeError`` from comparing or
+    printing the object (contract C-11)."""
+
+    @pytest.mark.parametrize(
+        ("call", "match"),
+        [
+            pytest.param(
+                lambda: _qml("Z")(_Index(-1)), "non-negative integer, got -1", id="Z"
+            ),
+            pytest.param(
+                lambda: _qml("Encoder")(_Index(2**70)), f"got {2**70}", id="Encoder"
+            ),
+            pytest.param(lambda: _qml("Ansatz")(_Index(-1)), "got -1", id="Ansatz"),
+            pytest.param(
+                lambda: _qml("Readout")([[("z", _Index(-1))]]),
+                "of observable 0 is out of range: .* got -1",
+                id="Readout-list",
+            ),
+            pytest.param(
+                lambda: _qml("Observable")([(1.0, [("z", _Index(-1))])]),
+                "of term 0 is out of range: .* got -1",
+                id="Observable-list",
+            ),
+        ],
+    )
+    def test_an_out_of_range_index_object_is_a_value_error(self, call, match):
+        with pytest.raises(ValueError, match=match):
+            call()
+
+    def test_an_out_of_range_reps_leaves_the_ansatz_unchanged(self):
+        from polypus.qml import Ansatz
+
+        ansatz = Ansatz(2).real_amplitudes(1)
+        with pytest.raises(ValueError, match="non-negative integer, got -1"):
+            ansatz.hardware_efficient(_Index(-1))
+        assert (ansatz.num_layers, ansatz.num_params) == (1, 4)
+
+    def test_one_in_range_is_its_integer(self):
+        from polypus.qml import Ansatz, Z
+
+        assert repr(Z(_Index(3))) == repr(Z(3)) == "Z(3)"
+        assert Ansatz(_Index(2)).num_qubits == 2
+
+
+_BOOL_IDS = ["True", "False"]
+
+
+class TestBoolIsNotACount:
+    """A ``bool`` is an ``int`` to Python but never a count of the native API:
+    ``num_qubits``, ``reps``, ``ranges`` and a Pauli position refuse one with a
+    ``TypeError`` (contract C-11), as ``final_shots`` does, instead of reading
+    ``True`` as 1. A builder call that raises leaves the ``Ansatz`` as it was."""
+
+    @pytest.mark.parametrize("flag", [True, False], ids=_BOOL_IDS)
+    @pytest.mark.parametrize("name", ["Encoder", "Ansatz", "Z", "X", "Y"])
+    def test_a_qubit_count_or_position(self, name, flag):
+        with pytest.raises(
+            TypeError, match=f"expected an integer, got a bool \\({flag}\\)"
+        ):
+            _qml(name)(flag)
+
+    @pytest.mark.parametrize("flag", [True, False], ids=_BOOL_IDS)
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda a, flag: a.hardware_efficient(flag),
+            lambda a, flag: a.real_amplitudes(flag),
+            lambda a, flag: a.strongly_entangling(1, ranges=[flag]),
+            lambda a, flag: a.simplified_two_design(flag),
+        ],
+        ids=[
+            "hardware-efficient",
+            "real-amplitudes",
+            "strongly-entangling-ranges",
+            "simplified-two-design",
+        ],
+    )
+    def test_a_builder_count(self, build, flag):
+        from polypus.qml import Ansatz
+
+        ansatz = Ansatz(2).real_amplitudes(1)
+        with pytest.raises(TypeError, match="got a bool"):
+            build(ansatz, flag)
+        assert (ansatz.num_layers, ansatz.num_params) == (1, 4)
+
+    @pytest.mark.parametrize("flag", [True, False], ids=_BOOL_IDS)
+    @pytest.mark.parametrize(
+        ("where", "match"),
+        [
+            ("readout", "each observable must be"),
+            ("observable", "a Pauli term must be"),
+        ],
+    )
+    def test_a_position_in_a_list(self, where, match, flag):
+        from polypus.qml import Observable, Readout
+
+        with pytest.raises(TypeError, match=match):
+            if where == "readout":
+                Readout([[("z", flag)]])
+            else:
+                Observable([(1.0, [("z", flag)])])
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -4,8 +4,9 @@
 //! against a catalogue that varies the encoder, rotations, entangler,
 //! entanglement, the final rotation layer, and qubit counts (including the
 //! 1-qubit case where entanglement is a no-op, a stack of two IQP encoders
-//! around an ansatz — the data re-uploading pattern — and the strongly
-//! entangling ansatz, with default and explicit ranges):
+//! around an ansatz — the data re-uploading pattern — the strongly
+//! entangling ansatz, with default and explicit ranges, and the simplified
+//! 2-design, over an even, an odd and a single qubit):
 //!
 //! - **C-4** (terminal measurement): every emitted template is terminal.
 //! - **C-2** (gate vocabulary / QASM round-trip): a bound circuit's QASM is a
@@ -179,6 +180,39 @@ fn catalogue() -> Vec<(CompiledModel, Vec<Vec<f64>>)> {
                 .compile(3)
                 .unwrap(),
             samples(3),
+        ),
+        // 10. 4 qubits: Ry encoder + simplified_two_design(3) (initial Ry,
+        //     then CZ + Ry on (0,1), (2,3), (1,2) per block).
+        (
+            QuantumModel::new(4)
+                .angle_encoder(RotationAxis::Ry)
+                .simplified_two_design(3)
+                .readout(z0_readout())
+                .compile(4)
+                .unwrap(),
+            samples(4),
+        ),
+        // 11. 5 qubits, 4 features: Rx encoder + simplified_two_design(1) (odd
+        //     n: (0,1), (2,3), then (1,2), (3,4)).
+        (
+            QuantumModel::new(5)
+                .angle_encoder(RotationAxis::Rx)
+                .simplified_two_design(1)
+                .readout(z0_readout())
+                .compile(4)
+                .unwrap(),
+            samples(4),
+        ),
+        // 12. 1 qubit: Ry encoder + simplified_two_design(2) (no pairs: the
+        //     initial Ry alone).
+        (
+            QuantumModel::new(1)
+                .angle_encoder(RotationAxis::Ry)
+                .simplified_two_design(2)
+                .readout(z0_readout())
+                .compile(1)
+                .unwrap(),
+            samples(1),
         ),
     ]
 }
