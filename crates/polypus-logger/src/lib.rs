@@ -775,6 +775,187 @@ mod tests {
         assert!(name.starts_with("exp_") && name.ends_with(".log"));
     }
 
+    // --- local timestamp formats --------------------------------------------
+
+    /// Whether `s` has exactly the byte shape of `pattern`, where `D` stands for
+    /// one ASCII digit and any other byte must match literally. Keeps the shape
+    /// checks below readable without pulling in a regex dev-dependency.
+    fn has_shape(s: &str, pattern: &str) -> bool {
+        s.len() == pattern.len()
+            && s.bytes().zip(pattern.bytes()).all(|(c, p)| match p {
+                b'D' => c.is_ascii_digit(),
+                _ => c == p,
+            })
+    }
+
+    /// Assert that a `%Y-%m-%d %H:%M:%S` stamp written by the logger is the
+    /// **local** wall-clock time (system time zone, not UTC) of an instant in
+    /// `[before, after]`. `before` is floored to the second because the stamp
+    /// carries no sub-second part. Both readings of a repeated local hour (DST
+    /// fall-back) are accepted, so the check can't flake once a year.
+    fn assert_local_stamp_within(stamp: &str, before: &jiff::Zoned, after: &jiff::Zoned) {
+        assert!(
+            has_shape(stamp, "DDDD-DD-DD DD:DD:DD"),
+            "unexpected timestamp shape: {stamp:?}"
+        );
+        let civil = jiff::civil::DateTime::strptime("%Y-%m-%d %H:%M:%S", stamp).unwrap();
+        let ambiguous = jiff::tz::TimeZone::system().to_ambiguous_zoned(civil);
+        let lo = jiff::Timestamp::from_second(before.timestamp().as_second()).unwrap();
+        let hi = after.timestamp();
+        let readings = [ambiguous.clone().earlier(), ambiguous.later()];
+        assert!(
+            readings
+                .iter()
+                .flatten()
+                .any(|z| lo <= z.timestamp() && z.timestamp() <= hi),
+            "stamp {stamp:?} is not the local time between {before} and {after}"
+        );
+    }
+
+    /// A text line starts with `[YYYY-MM-DD HH:MM:SS] ` in local time.
+    #[test]
+    fn text_line_starts_with_local_timestamp() {
+        check_text_line_stamp();
+    }
+
+    /// The JSON `"timestamp"` field has the same local `YYYY-MM-DD HH:MM:SS`
+    /// form as the text prefix.
+    #[test]
+    fn json_timestamp_is_local_and_matches_text_format() {
+        check_json_stamp();
+    }
+
+    /// Log one text line to a temporary file and check its local-time prefix.
+    fn check_text_line_stamp() {
+        let path = std::env::temp_dir().join(format!(
+            "polypus_logger_test_text_ts_{}.log",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let logger = LoggerBuilder::new()
+            .format(LogFormat::Text)
+            .target(LogTarget::File(path.clone()))
+            .include_timestamp(true)
+            .include_thread_id(false)
+            .include_module_path(false)
+            .build();
+
+        let before = jiff::Zoned::now();
+        log_message!(logger, "stamped");
+        let after = jiff::Zoned::now();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let line = contents.lines().next().unwrap();
+        let prefix = line.get(..22).unwrap_or(line);
+        assert!(
+            has_shape(prefix, "[DDDD-DD-DD DD:DD:DD] "),
+            "unexpected line prefix: {line:?}"
+        );
+        assert_local_stamp_within(&prefix[1..20], &before, &after);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Log one JSON line to a temporary file and check its local `"timestamp"`.
+    fn check_json_stamp() {
+        let path = std::env::temp_dir().join(format!(
+            "polypus_logger_test_json_ts_{}.log",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let logger = LoggerBuilder::new()
+            .format(LogFormat::Json)
+            .target(LogTarget::File(path.clone()))
+            .include_timestamp(true)
+            .include_thread_id(false)
+            .include_module_path(false)
+            .build();
+
+        let before = jiff::Zoned::now();
+        log_message!(logger, "stamped");
+        let after = jiff::Zoned::now();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let line = contents.lines().next().unwrap();
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        let stamp = value.get("timestamp").and_then(|v| v.as_str()).unwrap();
+        assert_local_stamp_within(stamp, &before, &after);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Set in the child process that [`line_stamps_are_local_under_a_non_utc_zone`]
+    /// starts.
+    const TZ_CHILD_ENV: &str = "POLYPUS_LOGGER_TZ_CHILD";
+
+    /// The CI runners are in UTC, where a logger that wrote UTC instead of local
+    /// time would still pass the two tests above. So the same checks run again
+    /// in a child copy of this test binary whose `TZ` is UTC+05:45. A child
+    /// process is the only safe way to change the zone: `set_var` races with the
+    /// other test threads (it is `unsafe` from edition 2024 on) and jiff caches
+    /// the system zone. The POSIX rule needs no tzdb on the runner.
+    #[test]
+    fn line_stamps_are_local_under_a_non_utc_zone() {
+        if std::env::var_os(TZ_CHILD_ENV).is_some() {
+            // Fail rather than pass vacuously if `TZ` was not honoured.
+            let utc_plus_5_45 = jiff::tz::Offset::from_seconds(5 * 3600 + 45 * 60).unwrap();
+            assert_eq!(
+                jiff::tz::TimeZone::system().to_offset(jiff::Timestamp::now()),
+                utc_plus_5_45,
+                "the child process must run in the zone its `TZ` names"
+            );
+            check_text_line_stamp();
+            check_json_stamp();
+            return;
+        }
+
+        let exe = std::env::current_exe().expect("the test binary path is available");
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "tests::line_stamps_are_local_under_a_non_utc_zone",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(TZ_CHILD_ENV, "1")
+            // POSIX inverts the sign: `-5:45` is five hours forty-five ahead of UTC.
+            .env("TZ", "<+0545>-5:45")
+            .output()
+            .expect("the test binary can be re-executed");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "child run failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("1 passed"),
+            "the child must actually run the test, not filter it out:\n{stdout}"
+        );
+    }
+
+    /// The default file name is `<base>_<YYYYMMDD_HHMMSS>_<pid>_<counter>.log`,
+    /// field by field, not just its prefix and suffix.
+    #[test]
+    fn default_log_path_name_has_documented_shape() {
+        let path = default_log_path(Some("exp"));
+        let name = path.file_name().unwrap().to_str().unwrap();
+        let rest = name.strip_prefix("exp_").unwrap();
+        assert!(
+            has_shape(&rest[..16], "DDDDDDDD_DDDDDD_"),
+            "unexpected timestamp part in {name:?}"
+        );
+        let tail = rest[16..].strip_suffix(".log").unwrap();
+        let (pid, counter) = tail.split_once('_').unwrap();
+        assert_eq!(pid, std::process::id().to_string());
+        assert!(
+            !counter.is_empty() && counter.bytes().all(|b| b.is_ascii_digit()),
+            "unexpected counter in {name:?}"
+        );
+    }
+
     /// With neither `file` nor `console`, the default target is a **file**, not
     /// stdout — the fix for Problem 2 (log output lost to an uncaptured stdout).
     #[test]

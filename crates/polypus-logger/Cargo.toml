@@ -20,6 +20,9 @@ chrono = "0.4"
 # correctly and every line is valid JSON.
 serde_json = { workspace = true }
 
+[dev-dependencies]
+jiff = "0.2.46"
+
 [features]
 # Compile-time maximum log level. Enabling one statically strips the more
 # verbose `log::*!` macros across the whole dependency graph (the `log` crate's
