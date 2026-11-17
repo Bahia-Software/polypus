@@ -255,10 +255,6 @@ def _deserialize_quantum_circuit(id, *, directory=None):
         raise
 
 
-def test_connection():
-    print("Testing connection to the QASM simulator backend...")
-
-
 def serialize_quantum_circuit(id, qc, *, directory=None):
     """Serialize the quantum circuit using Qiskit qpy, handling possible errors.
 
