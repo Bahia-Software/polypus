@@ -512,6 +512,121 @@ pub(crate) fn write_qasm2(
 mod tests {
     use crate::ParameterizedCircuit;
 
+    /// The statements of every instruction the exporter writes, on five qubits,
+    /// declared gates included: a program of them is exported as itself.
+    const EVERY_STATEMENT: &str = "\
+OPENQASM 2.0;
+include \"qelib1.inc\";
+gate g(t) a,b { rz(t/2) a; cx a,b; }
+gate k a { x a; }
+qreg q[5];
+creg c[2];
+h q[0];
+x q[1];
+y q[2];
+z q[3];
+s q[4];
+t q[0];
+sdg q[1];
+tdg q[2];
+id q[3];
+sx q[4];
+sxdg q[0];
+rx(0.1) q[0];
+ry(0.2) q[1];
+rz(-0.3) q[2];
+u3(0.1,0.2,0.3) q[3];
+u0(0.5) q[4];
+p(0.5) q[0];
+u1(0.5) q[1];
+u2(0.1,0.2) q[2];
+u(0.1,0.2,0.3) q[3];
+cx q[0],q[1];
+cz q[1],q[2];
+swap q[2],q[3];
+cy q[3],q[4];
+ch q[4],q[0];
+csx q[0],q[2];
+rzz(0.4) q[0],q[1];
+rxx(0.5) q[1],q[2];
+cp(0.6) q[2],q[3];
+crx(0.1) q[0],q[1];
+cry(0.2) q[1],q[2];
+crz(0.3) q[2],q[3];
+cu1(0.4) q[3],q[4];
+cu3(0.1,0.2,0.3) q[4],q[0];
+cu(0.1,0.2,0.3,0.4) q[0],q[1];
+ccx q[2],q[0],q[1];
+cswap q[3],q[1],q[2];
+rccx q[2],q[3],q[4];
+rc3x q[0],q[1],q[2],q[3];
+c3x q[1],q[2],q[3],q[4];
+c3sqrtx q[0],q[2],q[3],q[4];
+c4x q[4],q[2],q[0],q[3],q[1];
+g(0.5) q[0],q[1];
+k q[2];
+barrier q[0],q[2];
+barrier q;
+measure q[0] -> c[1];
+";
+
+    /// Every instruction is written as its statement, declared gates
+    /// included, so the exporter's split by instruction family (#419) cannot
+    /// change one character of it.
+    #[test]
+    fn every_instruction_is_exported_as_its_statement() {
+        let imported = ParameterizedCircuit::from_qasm2(EVERY_STATEMENT).unwrap();
+        assert_eq!(imported.to_qasm2_with_params(&[]).unwrap(), EVERY_STATEMENT);
+    }
+
+    /// Angles that are free parameters and expressions of them are written
+    /// with the values they are exported with; `measure_all` is written
+    /// register-wide when the registers match and qubit by qubit otherwise.
+    #[test]
+    fn parameter_and_expression_angles_are_exported_with_their_values() {
+        use crate::{Param, ParamExpr};
+        let mut qc = ParameterizedCircuit::new(2);
+        let twice = qc.add_expr(2.0 * ParamExpr::param(1)).unwrap();
+        let qc = qc
+            .rx(0, Param(0))
+            .ry(1, twice)
+            .u(0, Param(1), twice, 0.3)
+            .cu(0, 1, twice, Param(0), Param(1), -0.0)
+            .measure_all();
+        assert_eq!(
+            qc.to_qasm2_with_params(&[0.5, 0.25]).unwrap(),
+            "\
+OPENQASM 2.0;
+include \"qelib1.inc\";
+qreg q[2];
+creg c[2];
+rx(0.5) q[0];
+ry(0.5) q[1];
+u3(0.25,0.5,0.3) q[0];
+cu(0.5,0.5,0.25,-0.0) q[0],q[1];
+measure q -> c;
+"
+        );
+        assert_eq!(
+            ParameterizedCircuit::new(2)
+                .h(1)
+                .measure(0, 2)
+                .measure_all()
+                .to_qasm2_with_params(&[])
+                .unwrap(),
+            "\
+OPENQASM 2.0;
+include \"qelib1.inc\";
+qreg q[2];
+creg c[3];
+h q[1];
+measure q[0] -> c[2];
+measure q[0] -> c[0];
+measure q[1] -> c[1];
+"
+        );
+    }
+
     /// Every angle is exported as the shortest decimal that reads back as the
     /// same `f64`, in a form the importer reads: positional, scientific
     /// outside `1e-5 <= |v| < 1e16`, and negative zero with its sign.
