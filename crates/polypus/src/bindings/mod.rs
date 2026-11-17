@@ -12,6 +12,8 @@ pub mod circuit;
 pub mod cmaes;
 mod compatibility;
 pub mod de;
+#[cfg(test)]
+mod entry_tests;
 pub mod expr;
 pub mod external;
 pub mod logging;
