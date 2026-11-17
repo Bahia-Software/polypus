@@ -14,14 +14,15 @@ description = "Shared, pure-Rust logging sink for the Polypus workspace: a confi
 # logger); it is not enabled by `log` by default, so we add it on top of the
 # workspace-pinned version.
 log = { workspace = true, features = ["std"] }
-# Local timestamps for log lines.
-chrono = "0.4"
+# Local timestamps for log lines and default log file names. jiff rather than
+# `time`, whose `OffsetDateTime::now_local()` fails on Unix once the process has
+# more than one thread. Default features only: they resolve the system zone
+# (`/usr/share/zoneinfo` on Unix, the bundled tzdb on Windows); never enable
+# `logging`, which would route jiff's diagnostics back into this very logger.
+jiff = "0.2.46"
 # JSON output built via `serde_json::Map`, so message content is always escaped
 # correctly and every line is valid JSON.
 serde_json = { workspace = true }
-
-[dev-dependencies]
-jiff = "0.2.46"
 
 [features]
 # Compile-time maximum log level. Enabling one statically strips the more

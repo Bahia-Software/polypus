@@ -55,7 +55,7 @@
 //! log::info!("logger ready");
 //! ```
 
-use chrono::Local;
+use jiff::Zoned;
 use log::{LevelFilter, Metadata, Record, SetLoggerError};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -326,7 +326,7 @@ impl log::Log for Logger {
             let timestamp = self
                 .config
                 .include_timestamp
-                .then(|| Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+                .then(|| line_timestamp(&Zoned::now()));
             let thread_id = self
                 .config
                 .include_thread_id
@@ -459,6 +459,38 @@ fn resolve_log_dir(env_dir: Option<std::ffi::OsString>) -> PathBuf {
     }
 }
 
+/// Local wall-clock stamp for log lines, `%Y-%m-%d %H:%M:%S`
+/// (e.g. `2026-07-02 14:35:12`). The single source of that format: both the
+/// text prefix and the JSON `"timestamp"` field use it.
+///
+/// Built from the civil fields rather than `Zoned::strftime`, so there is no
+/// `Display` error that `to_string` could turn into a panic inside `log`.
+fn line_timestamp(now: &Zoned) -> String {
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        now.year(),
+        now.month(),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    )
+}
+
+/// Local wall-clock stamp for default log file names, `%Y%m%d_%H%M%S`
+/// (e.g. `20260702_143512`). See [`default_log_path`].
+fn file_timestamp(now: &Zoned) -> String {
+    format!(
+        "{:04}{:02}{:02}_{:02}{:02}{:02}",
+        now.year(),
+        now.month(),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    )
+}
+
 /// Assemble a default log file name from its varying parts.
 ///
 /// Split out as a pure function so the uniqueness guarantee is unit-testable
@@ -482,7 +514,7 @@ fn build_log_file_name(base: &str, timestamp: &str, pid: u32, counter: u64) -> S
 /// or creates anything; the caller decides when to create the directory/file.
 pub fn default_log_path(base_name: Option<&str>) -> PathBuf {
     let base = base_name.unwrap_or("polypus");
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let timestamp = file_timestamp(&Zoned::now());
     let pid = std::process::id();
     let counter = LOG_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     default_log_dir().join(build_log_file_name(base, &timestamp, pid, counter))
@@ -776,6 +808,45 @@ mod tests {
     }
 
     // --- local timestamp formats --------------------------------------------
+
+    /// 2026-07-02T12:35:12Z seen from a fixed UTC+2 zone: 14:35:12 local. A
+    /// fixed offset keeps the test independent of the machine's tzdb.
+    fn fixed_instant_at_utc_plus_2() -> jiff::Zoned {
+        at_utc_plus_2("2026-07-02T12:35:12Z")
+    }
+
+    fn at_utc_plus_2(instant: &str) -> jiff::Zoned {
+        let instant: jiff::Timestamp = instant.parse().unwrap();
+        instant.to_zoned(jiff::tz::TimeZone::fixed(jiff::tz::offset(2)))
+    }
+
+    /// The log-line stamp is the wall-clock time of the zone it is given, not
+    /// UTC.
+    #[test]
+    fn line_timestamp_formats_local_wall_clock() {
+        assert_eq!(
+            line_timestamp(&fixed_instant_at_utc_plus_2()),
+            "2026-07-02 14:35:12"
+        );
+        // Every field is zero-padded to its fixed width.
+        assert_eq!(
+            line_timestamp(&at_utc_plus_2("2026-01-02T01:04:05Z")),
+            "2026-01-02 03:04:05"
+        );
+    }
+
+    /// The file-name stamp is the same local instant in `%Y%m%d_%H%M%S`.
+    #[test]
+    fn file_timestamp_formats_local_wall_clock() {
+        assert_eq!(
+            file_timestamp(&fixed_instant_at_utc_plus_2()),
+            "20260702_143512"
+        );
+        assert_eq!(
+            file_timestamp(&at_utc_plus_2("2026-01-02T01:04:05Z")),
+            "20260102_030405"
+        );
+    }
 
     /// Whether `s` has exactly the byte shape of `pattern`, where `D` stands for
     /// one ASCII digit and any other byte must match literally. Keeps the shape
