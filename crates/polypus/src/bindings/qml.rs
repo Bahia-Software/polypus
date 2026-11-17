@@ -51,7 +51,7 @@ use crate::evaluation::{
 use crate::exceptions::configuration_error;
 use crate::infrastructure::execution_config::random_seed;
 use crate::infrastructure::{
-    AdjointTask, BoundCircuit, CancelToken, Counts, ExecutionConfig, Infrastructure,
+    AdjointTask, BackendError, BoundCircuit, CancelToken, Counts, ExecutionConfig, Infrastructure,
     InfrastructureError, NativeStatevectorBackend, OptLevel, QuantumBackend, RunParams,
 };
 use crate::orchestration::{Resources, RunCircuitFlow, Scheduler, TrainFlow};
@@ -2449,12 +2449,32 @@ impl Primitive for JacobianRun {
     /// and observable, two statevectors each, instead of `2 · shifts` circuits
     /// per sample. When the memory budget holds one statevector of the width
     /// but not two, `None`: the shifted circuits run instead (the backend logs
-    /// it). A Ctrl+C or a cancellation stops a run in flight ([`watched`]).
+    /// it) — unless the model has none, being one only the adjoint
+    /// differentiates (#561): then the memory's `NoExactGradient`, before
+    /// anything runs. A Ctrl+C or a cancellation stops a run in flight
+    /// ([`watched`]).
     fn run_exact_block(
         &mut self,
         native: &NativeStatevectorBackend,
         samples: Range<usize>,
         cancel: &CancelToken,
+    ) -> Option<Result<(), PrimitiveError>> {
+        self.run_exact_block_with(native, samples, cancel, |width| native.adjoint_fits(width))
+    }
+}
+
+impl JacobianRun {
+    /// [`run_exact_block`](Primitive::run_exact_block) with `adjoint_fits`
+    /// answering whether the adjoint's two statevectors of a width fit the
+    /// memory budget: the backend's
+    /// [`adjoint_fits`](NativeStatevectorBackend::adjoint_fits), or a test's
+    /// answer (the budget is the process's, which a test must not set).
+    fn run_exact_block_with(
+        &mut self,
+        native: &NativeStatevectorBackend,
+        samples: Range<usize>,
+        cancel: &CancelToken,
+        adjoint_fits: impl FnOnce(usize) -> Result<bool, BackendError>,
     ) -> Option<Result<(), PrimitiveError>> {
         let Some(block) = self.plan.block(samples.clone()) else {
             return Some(Err(PrimitiveError::block_out_of_range(
@@ -2466,7 +2486,8 @@ impl Primitive for JacobianRun {
             Ok(runs) => runs,
             Err(e) => return Some(Err(e.into())),
         };
-        let derivatives = match run_exact_adjoint(native, &runs, cancel)? {
+        let derivatives = match run_exact_adjoint(native, &self.plan, &runs, cancel, adjoint_fits)?
+        {
             Ok(derivatives) => derivatives,
             Err(e) => return Some(Err(e)),
         };
@@ -2477,9 +2498,7 @@ impl Primitive for JacobianRun {
                 .map_err(PrimitiveError::from),
         )
     }
-}
 
-impl JacobianRun {
     /// Append a block's Jacobian, in sample order.
     fn keep(&mut self, jacobian: polypus_qml::Jacobian) {
         let (by_params, by_inputs) = jacobian.into_parts();
@@ -2491,21 +2510,38 @@ impl JacobianRun {
 /// `runs` on the exact native backend by adjoint differentiation, one row of
 /// derivatives per run, or `None` when the memory budget holds one statevector
 /// of their width but not two ([`NativeStatevectorBackend::adjoint_fits`],
-/// which logs it): the caller then runs the shifted circuits. A Ctrl+C or a
-/// cancellation stops the runs in flight ([`watched`]).
+/// which logs it): the caller then runs the shifted circuits. A model only the
+/// adjoint differentiates (#561) has none, so there `plan` answers instead
+/// with the memory's `NoExactGradient`, before anything runs
+/// ([`ExpectationJacobian::check_shift_fallback`]): the one place both
+/// `qml.jacobian` and `qml.vjp` decide it. A Ctrl+C or a cancellation stops
+/// the runs in flight ([`watched`]).
+///
+/// `adjoint_fits` answers whether the adjoint's two statevectors of a width fit
+/// the memory budget: the backend's
+/// [`adjoint_fits`](NativeStatevectorBackend::adjoint_fits), or a test's
+/// answer (the budget is the process's, which a test must not set).
 fn run_exact_adjoint(
     native: &NativeStatevectorBackend,
+    plan: &ExpectationJacobian,
     runs: &[polypus_qml::AdjointRun],
     cancel: &CancelToken,
+    adjoint_fits: impl FnOnce(usize) -> Result<bool, BackendError>,
 ) -> Option<Result<Vec<Vec<f64>>, PrimitiveError>> {
     let width = runs
         .iter()
         .map(|run| run.circuit.num_qubits())
         .max()
         .unwrap_or(0);
-    match native.adjoint_fits(width) {
+    match adjoint_fits(width) {
         Ok(true) => {}
-        Ok(false) => return None,
+        // The shifted circuits instead, if the model has them.
+        Ok(false) => {
+            return plan
+                .check_shift_fallback(width)
+                .err()
+                .map(|e| Err(e.into()))
+        }
         Err(e) => return Some(Err(PrimitiveError::Infrastructure(e.into()))),
     }
     let tasks: Vec<AdjointTask<'_, _>> = runs
@@ -2624,11 +2660,24 @@ impl VjpRun {
         samples: Range<usize>,
         cancel: &CancelToken,
     ) -> Option<Result<Vec<polypus_qml::Vjp>, PrimitiveError>> {
+        self.exact_block_with(native, samples, cancel, |width| native.adjoint_fits(width))
+    }
+
+    /// [`exact_block`](Self::exact_block) with the memory decision of
+    /// [`run_exact_adjoint`].
+    fn exact_block_with(
+        &mut self,
+        native: &NativeStatevectorBackend,
+        samples: Range<usize>,
+        cancel: &CancelToken,
+        adjoint_fits: impl FnOnce(usize) -> Result<bool, BackendError>,
+    ) -> Option<Result<Vec<polypus_qml::Vjp>, PrimitiveError>> {
         let (runs, combined) = match self.exact_runs(samples.clone()) {
             Ok(found) => found,
             Err(e) => return Some(Err(e)),
         };
-        let derivatives = match run_exact_adjoint(native, &runs, cancel)? {
+        let derivatives = match run_exact_adjoint(native, &self.plan, &runs, cancel, adjoint_fits)?
+        {
             Ok(derivatives) => derivatives,
             Err(e) => return Some(Err(e)),
         };
@@ -4543,6 +4592,171 @@ mod tests {
         for (k, (g, s)) in got.iter().zip(shift).enumerate() {
             assert!((g - s).abs() < 1e-9, "entry {k}: {g} vs the shift's {s}");
         }
+    }
+
+    /// A model only the adjoint differentiates (#561), its templates written
+    /// by hand (`test-support`: no layer emits these gates): the model, its
+    /// rows and `θ`, the Jacobian plan over them (`wrt` the parameters), and
+    /// the position of the first gate the shift has no rule for (`Cp`).
+    fn adjoint_only_plan() -> (
+        CompiledModel,
+        Vec<Vec<f64>>,
+        Vec<f64>,
+        ExpectationJacobian,
+        usize,
+    ) {
+        use polypus_circuit::{GateInstruction as G, GateParam, ParameterizedCircuit};
+        let (compiled, rows, theta) = primitive_model_and_rows();
+        let mut first = 0;
+        let templates: Vec<ParameterizedCircuit> = rows
+            .iter()
+            .map(|row| {
+                let mut gates = compiled.template_for(row).unwrap().gates().to_vec();
+                assert_eq!(gates.pop(), Some(G::MeasureAll));
+                first = gates.len();
+                gates.extend([
+                    G::Cp {
+                        q0: 0,
+                        q1: 1,
+                        theta: GateParam::Param(0),
+                    },
+                    G::Cu3 {
+                        control: 2,
+                        target: 0,
+                        theta: GateParam::Param(1),
+                        phi: GateParam::Fixed(0.4),
+                        lam: GateParam::Param(0),
+                    },
+                    G::H(0),
+                    G::MeasureAll,
+                ]);
+                let mut template = ParameterizedCircuit::new(3);
+                for gate in gates {
+                    template.try_push(gate).unwrap();
+                }
+                template
+            })
+            .collect();
+        let plan = ExpectationJacobian::from_templates_for_tests(
+            &compiled,
+            templates,
+            JacobianWrt::Params,
+        )
+        .unwrap();
+        (compiled, rows, theta, plan, first)
+    }
+
+    /// The memory's `NoExactGradient` of a model only the adjoint
+    /// differentiates, at three qubits, naming the `Cp` at `first`.
+    fn assert_memory_refusal(outcome: Option<Result<(), PrimitiveError>>, first: usize) {
+        match outcome {
+            Some(Err(PrimitiveError::Qml(QmlError::NoExactGradient { reason }))) => {
+                let instruction = format!("instruction {first} (Cp");
+                for needle in [
+                    instruction.as_str(),
+                    "two statevectors of 3 qubits",
+                    "exact",
+                ] {
+                    assert!(reason.contains(needle), "{needle:?} missing: {reason}");
+                }
+            }
+            other => panic!("expected the memory's NoExactGradient, got {other:?}"),
+        }
+    }
+
+    /// #561: `qml.jacobian(exact=True)` on a model only the adjoint
+    /// differentiates. With room for two statevectors it takes the adjoint;
+    /// without, the block stops with the memory's `NoExactGradient` before
+    /// anything runs or is read — where a model of Pauli rotations falls back
+    /// to its shifted circuits (`None`). The decision is the injected one: the
+    /// budget is the process's, which a test must not set.
+    #[test]
+    fn the_exact_jacobian_of_a_model_only_the_adjoint_differentiates_cannot_fall_back() {
+        let (_, rows, theta, plan, first) = adjoint_only_plan();
+        let mut run = JacobianRun {
+            plan,
+            params: theta.clone(),
+            by_params: Vec::new(),
+            by_inputs: Vec::new(),
+        };
+        let native = NativeStatevectorBackend::new(0);
+        let cancel = CancelToken::default();
+        let all = 0..rows.len();
+        assert_memory_refusal(
+            run.run_exact_block_with(&native, all.clone(), &cancel, |_| Ok(false))
+                .map(|outcome| outcome.map(|_| ())),
+            first,
+        );
+        assert!(run.by_params.is_empty(), "nothing may be read");
+
+        // With room for two statevectors, the adjoint Jacobian.
+        assert!(matches!(
+            run.run_exact_block_with(&native, all, &cancel, |_| Ok(true)),
+            Some(Ok(()))
+        ));
+        let apart = adjoint_jacobian(&run.plan, &theta);
+        assert_eq!(Some(run.by_params.as_slice()), apart.params());
+
+        // A model of Pauli rotations falls back to its shifted circuits.
+        let mut pauli = jacobian_run(JacobianWrt::Params);
+        assert!(pauli
+            .run_exact_block_with(&native, 0..1, &cancel, |_| Ok(false))
+            .is_none());
+        assert!(pauli.by_params.is_empty());
+    }
+
+    /// #561, Diego's carry-over from #577: `qml.vjp(exact=True)` goes through
+    /// the same `run_exact_adjoint` as the Jacobian, so a model only the
+    /// adjoint differentiates cannot fall back to the shifted circuits there
+    /// either — before this check it returned `None` and the shifted circuits
+    /// were asked for, failing with the shift's message, to a user already in
+    /// exact mode. Without room the block stops with the memory's
+    /// `NoExactGradient` before anything runs; with room it is the adjoint
+    /// Jacobian's contraction, to rounding (the combined observable sums in
+    /// another order); and a model of Pauli rotations still falls back.
+    #[test]
+    fn the_exact_vjp_of_a_model_only_the_adjoint_differentiates_cannot_fall_back() {
+        let (compiled, rows, theta, plan, first) = adjoint_only_plan();
+        let v = cotangent(rows.len(), plan.num_observables());
+        let mut run = VjpRun::new(plan, theta.clone(), v.clone());
+        let native = NativeStatevectorBackend::new(0);
+        let cancel = CancelToken::default();
+        let all = 0..rows.len();
+        assert_memory_refusal(
+            run.exact_block_with(&native, all.clone(), &cancel, |_| Ok(false))
+                .map(|outcome| outcome.map(|_| ())),
+            first,
+        );
+        assert_eq!(run.adjoint_runs, 0, "nothing may run");
+
+        // With room for two statevectors: one run per sample, and the product
+        // is the adjoint Jacobian's contraction.
+        let vjps = match run.exact_block_with(&native, all, &cancel, |_| Ok(true)) {
+            Some(Ok(vjps)) => vjps,
+            other => panic!("expected the products, got {other:?}"),
+        };
+        assert_eq!(vjps.len(), rows.len());
+        let contracted = adjoint_jacobian(&run.plan, &theta).vjp(&v).unwrap();
+        let num_params = contracted.num_params();
+        let expected = contracted.params().expect("wrt asks for the parameters");
+        for (s, vjp) in vjps.iter().enumerate() {
+            let got = vjp.params().expect("wrt asks for the parameters");
+            assert_close(got, &expected[s * num_params..(s + 1) * num_params]);
+        }
+        assert!(
+            expected.iter().any(|d| d.abs() > 1e-4),
+            "the comparison would be vacuous"
+        );
+
+        // A model of Pauli rotations falls back to its shifted circuits.
+        let mut pauli = vjp_run(
+            &compiled,
+            JacobianWrt::Params,
+            cotangent(rows.len(), compiled.num_observables()),
+        );
+        assert!(pauli
+            .exact_block_with(&native, 0..1, &cancel, |_| Ok(false))
+            .is_none());
     }
 
     /// `qml.jacobian(exact=True)` takes the adjoint (#503): with both parts,

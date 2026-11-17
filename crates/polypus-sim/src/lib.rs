@@ -56,10 +56,13 @@
 //! ## Exact gradients
 //!
 //! [`StatevectorSimulator::adjoint_gradient`] differentiates the expectation of
-//! a diagonal observable with respect to the angles of a circuit's Pauli
-//! rotations (`Rx`, `Ry`, `Rz`, `Rxx`, `Rzz`) by adjoint differentiation: one
-//! sweep forward and one back, holding [`ADJOINT_STATEVECTORS`] statevectors,
-//! where the parameter-shift rule runs two circuits per rotation.
+//! a diagonal observable with respect to gate angles ([`AngleRef`]) by adjoint
+//! differentiation: one sweep forward and one back, holding
+//! [`ADJOINT_STATEVECTORS`] statevectors, where the parameter-shift rule runs
+//! two circuits per gate. It takes the Pauli rotations (`Rx`, `Ry`, `Rz`,
+//! `Rxx`, `Rzz`) and, through each angle's generator, the controlled
+//! rotations, the phase gates and the `u` family, which the two-term shift
+//! rule does not.
 
 #![warn(missing_docs)]
 
@@ -86,6 +89,9 @@ pub use calibration::{
     CalibrationOutcome, CalibrationResult, FallbackReason,
 };
 pub use error::SimError;
+/// Re-exported from `polypus-circuit`, where gates and their angles are
+/// defined: the argument of [`StatevectorSimulator::adjoint_gradient`].
+pub use polypus_circuit::AngleRef;
 pub use rng::SplitMix64;
 pub use simulator::{sample_projected, Simulator, StatevectorSimulator};
 pub use statevector::Statevector;
