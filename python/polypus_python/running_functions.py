@@ -10,8 +10,9 @@ from qiskit.exceptions import MissingOptionalLibraryError, QiskitError
 from qiskit.qpy import dump, load
 from qiskit.qpy.exceptions import QpyError
 
-# Contract C-9, mirrored from `validate_id` in crates/polypus/src/bindings/mod.rs:
-# same charset, same length bound, same order of checks and same messages.
+# Contract C-9, mirrored from `validate_id` in
+# crates/polypus/src/bindings/backend_config.rs: same charset, same length
+# bound, same order of checks and same messages.
 _ID_MAX_LEN = 64
 # Spelled out rather than `str.isalnum()`, which also accepts non-ASCII letters
 # and digits (e.g. "ñ", "١").
