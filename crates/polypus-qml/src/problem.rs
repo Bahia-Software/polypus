@@ -19,16 +19,24 @@
 //! *occurrence* of a parameter on its own, over an "untied" copy of every
 //! template in which each occurrence has its own index, and the occurrences of
 //! the same `θ` are summed (product rule).
+//!
+//! A caller that holds the statevector gets the same gradient by adjoint
+//! differentiation instead ([`adjoint_runs`](QmlProblem::adjoint_runs)), over
+//! the same untied templates. That one also differentiates the gates the
+//! two-term shift rule has no rule for — the controlled rotations, the phase
+//! gates and the `u` family (issue #561) — so a model with one has an exact
+//! gradient by the adjoint only: it is built like any other, and only the
+//! parameter-shift methods fail on it, with [`QmlError::NoExactGradient`].
 
 use std::collections::HashMap;
 
 use polypus_circuit::{
-    CircuitError, ConcreteCircuit, GateInstruction, GateParam, ParameterizedCircuit,
+    AngleRef, CircuitError, ConcreteCircuit, GateInstruction, GateParam, ParameterizedCircuit,
 };
 
 use crate::adjoint::{check_rows, AdjointRun, DiagonalObservable};
 use crate::dataset::Dataset;
-use crate::error::{QmlError, ValidationError};
+use crate::error::{AdjointOnlyGate, QmlError, ValidationError};
 use crate::loss::{categorical_cross_entropy, categorical_cross_entropy_gradient, Loss};
 use crate::model::{CompiledModel, InputGate};
 use crate::observables::BitstringWeight;
@@ -47,9 +55,11 @@ pub struct QmlProblem {
     /// One template per training sample, in sample order.
     templates: Vec<ParameterizedCircuit>,
     /// The same templates with every parameter occurrence untied, for the exact
-    /// gradient; or why this model has no exact gradient. Kept as a `Result`
-    /// rather than failing [`new`](Self::new): gradient-free optimizers never
-    /// need it, so a model the gradient cannot handle still trains with them.
+    /// gradient; or why this model has no exact gradient at all. Kept as a
+    /// `Result` rather than failing [`new`](Self::new): gradient-free
+    /// optimizers never need it, so a model the gradient cannot handle still
+    /// trains with them. Whether the parameter shift, and not only the adjoint,
+    /// differentiates it is [`Untied::shift`].
     untied: Result<Untied, QmlError>,
 }
 
@@ -212,8 +222,34 @@ impl QmlProblem {
                         .iter()
                         .map(|&i| untied.positions[i].clone())
                         .collect(),
+                    shift: untied.shift.clone(),
                 }),
         })
+    }
+
+    /// This problem with its templates replaced by `templates`, one per
+    /// sample, and untied again — for the tests of the crates downstream,
+    /// which cannot build a model whose templates hold the gates no layer
+    /// emits (those only the adjoint differentiates). Behind the `test-support`
+    /// feature, which only `[dev-dependencies]` enable: no build of the library
+    /// or of the wheel has it. A count other than
+    /// [`num_circuits`](Self::num_circuits) is
+    /// [`QmlError::CountsLengthMismatch`].
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn with_templates_for_tests(
+        mut self,
+        templates: Vec<ParameterizedCircuit>,
+    ) -> Result<Self, QmlError> {
+        if templates.len() != self.templates.len() {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: self.templates.len(),
+                got: templates.len(),
+            });
+        }
+        self.untied = Untied::from_templates(&templates);
+        self.templates = templates;
+        Ok(self)
     }
 
     /// Bind `theta` into one [`ConcreteCircuit`] per training sample, in stable
@@ -379,10 +415,40 @@ impl QmlProblem {
     /// parameter is reused.
     ///
     /// Fails with [`QmlError::NoExactGradient`] when the model has no exact
-    /// gradient, so a gradient-based caller can check it before training.
+    /// parameter-shift gradient (none at all, or one by adjoint differentiation
+    /// only), so a gradient-based caller can check it before training.
     pub fn num_gradient_circuits(&self) -> Result<usize, QmlError> {
-        let untied = self.untied.as_ref().map_err(Clone::clone)?;
+        let untied = self.shift_untied()?;
         Ok(self.num_circuits() * (1 + 2 * untied.owners.len()))
+    }
+
+    /// The untied templates, for the parameter shift: why the model has no
+    /// exact gradient at all comes first (it holds for the adjoint too), then
+    /// why the shift in particular has none.
+    fn shift_untied(&self) -> Result<&Untied, QmlError> {
+        let untied = self.untied.as_ref().map_err(Clone::clone)?;
+        untied
+            .shift
+            .as_ref()
+            .map_err(AdjointOnlyGate::shift_error)?;
+        Ok(untied)
+    }
+
+    /// Whether the exact gradient can fall back to the parameter shift when
+    /// the adjoint's two statevectors of `num_qubits` qubits do not fit the
+    /// memory budget (contract C-11 (f)): `Ok` when the shift differentiates
+    /// this model too; [`QmlError::NoExactGradient`] saying so — the memory,
+    /// and the instruction only the adjoint differentiates — when it does not;
+    /// and, for a model no exact gradient differentiates, the error the adjoint
+    /// itself gives. A caller about to fall back asks this first, so the end
+    /// user learns why exact mode failed rather than being told to use it.
+    pub fn check_shift_fallback(&self, num_qubits: usize) -> Result<(), QmlError> {
+        let untied = self.untied.as_ref().map_err(Clone::clone)?;
+        untied
+            .shift
+            .as_ref()
+            .map_err(|gate| gate.memory_error(num_qubits))?;
+        Ok(())
     }
 
     /// Every circuit the exact parameter-shift gradient at `theta` needs, in
@@ -404,7 +470,7 @@ impl QmlProblem {
     /// does; a model without an exact gradient fails with
     /// [`QmlError::NoExactGradient`].
     pub fn gradient_circuits(&self, theta: &[f64]) -> Result<Vec<ConcreteCircuit>, QmlError> {
-        let untied = self.untied.as_ref().map_err(Clone::clone)?;
+        let untied = self.shift_untied()?;
         if theta.len() != self.num_params() {
             return Err(QmlError::Circuit(CircuitError::WrongNumberOfParams {
                 expected: self.num_params(),
@@ -458,7 +524,7 @@ impl QmlProblem {
         &self,
         weights: &[HashMap<String, W>],
     ) -> Result<Vec<f64>, QmlError> {
-        let untied = self.untied.as_ref().map_err(Clone::clone)?;
+        let untied = self.shift_untied()?;
         let expected = self.num_gradient_circuits()?;
         if weights.len() != expected {
             return Err(QmlError::CountsLengthMismatch {
@@ -717,12 +783,15 @@ impl QmlProblem {
     /// `−(1/n) · Σ_j CE'(z_i, y_i)[j] · O_j`
     ///
     /// — one run per sample whatever the number of classes. Each run
-    /// differentiates every trainable gate of its untied template, the gates the
-    /// shift rule of [`gradient_circuits`](Self::gradient_circuits) moves; hand
-    /// the derivatives to [`gradient_from_adjoint`](Self::gradient_from_adjoint).
+    /// differentiates every trainable angle of its untied template: the gates
+    /// the shift rule of [`gradient_circuits`](Self::gradient_circuits) moves,
+    /// and those only the adjoint differentiates (each trainable angle of a
+    /// multi-angle gate its own occurrence, in angle order); hand the
+    /// derivatives to [`gradient_from_adjoint`](Self::gradient_from_adjoint).
     ///
     /// A model without an exact gradient fails with
-    /// [`QmlError::NoExactGradient`]; a `theta` of the wrong length as
+    /// [`QmlError::NoExactGradient`] (one the adjoint alone differentiates does
+    /// not); a `theta` of the wrong length as
     /// [`bind_batch`](Self::bind_batch) does; a `base` of the wrong length with
     /// [`QmlError::CountsLengthMismatch`], and an unreadable one as
     /// [`fitness_from_probabilities`](Self::fitness_from_probabilities) does.
@@ -786,12 +855,12 @@ impl QmlProblem {
     /// `∂fitness/∂θ` from the derivatives of the runs of
     /// [`adjoint_runs`](Self::adjoint_runs): one row per run, in order, one
     /// derivative per entry of its `wrt`. Each derivative is added to the
-    /// parameter its gate reads, so a parameter that several gates share gets
-    /// the sum of theirs.
+    /// parameter its angle reads, so a parameter that several angles share
+    /// gets the sum of theirs.
     ///
     /// The wrong number of rows is [`QmlError::CountsLengthMismatch`] (expected
     /// [`num_circuits`](Self::num_circuits)), as is a row of the wrong length
-    /// (expected the number of trainable gates); a model without an exact
+    /// (expected the number of trainable angles); a model without an exact
     /// gradient fails with [`QmlError::NoExactGradient`].
     pub fn gradient_from_adjoint(&self, derivatives: &[Vec<f64>]) -> Result<Vec<f64>, QmlError> {
         let untied = self.untied.as_ref().map_err(Clone::clone)?;
@@ -831,19 +900,23 @@ pub fn minibatch_indices(
 
 /// Every training template with each trainable-parameter occurrence given its
 /// own index, for the per-occurrence parameter shift (see
-/// [`QmlProblem::gradient_circuits`]).
+/// [`QmlProblem::gradient_circuits`]) and the adjoint runs (see
+/// [`QmlProblem::adjoint_runs`]).
 #[derive(Debug, Clone)]
 struct Untied {
     /// One untied template per training sample, in sample order. Occurrence `j`
-    /// is `Param(j)`, numbered in gate order.
+    /// is `Param(j)`, numbered in gate order and, within a gate, in angle order.
     templates: Vec<ParameterizedCircuit>,
     /// `owners[j]` is the trainable parameter occurrence `j` reads. The same for
     /// every sample: the trainable gates never depend on the data.
     owners: Vec<usize>,
-    /// `positions[i][j]`: where occurrence `j`'s gate sits in template `i`.
-    /// Per sample, since an encoder may emit a different number of gates for
-    /// different samples ahead of the trainable ones.
-    positions: Vec<Vec<usize>>,
+    /// `positions[i][j]`: the gate (and its angle) occurrence `j` is in
+    /// template `i`. Per sample, since an encoder may emit a different number
+    /// of gates for different samples ahead of the trainable ones.
+    positions: Vec<Vec<AngleRef>>,
+    /// Whether the parameter shift differentiates the model too, or the first
+    /// instruction only the adjoint differentiates.
+    shift: Result<(), AdjointOnlyGate>,
 }
 
 impl Untied {
@@ -852,8 +925,14 @@ impl Untied {
         let mut untied = Vec::with_capacity(templates.len());
         let mut positions = Vec::with_capacity(templates.len());
         let mut owners: Option<Vec<usize>> = None;
+        let mut shift = Ok(());
         for (sample, template) in templates.iter().enumerate() {
-            let (circuit, sample_owners, sample_positions) = untie(template)?;
+            let UntiedParams {
+                template: circuit,
+                owners: sample_owners,
+                positions: sample_positions,
+                shift: sample_shift,
+            } = untie(template)?;
             match &owners {
                 Some(first) if *first != sample_owners => {
                     return Err(QmlError::NoExactGradient {
@@ -866,6 +945,9 @@ impl Untied {
                 Some(_) => {}
                 None => owners = Some(sample_owners),
             }
+            if shift.is_ok() {
+                shift = sample_shift;
+            }
             untied.push(circuit);
             positions.push(sample_positions);
         }
@@ -873,6 +955,7 @@ impl Untied {
             templates: untied,
             owners: owners.unwrap_or_default(),
             positions,
+            shift,
         })
     }
 }
@@ -881,14 +964,19 @@ impl Untied {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GateClass {
     /// `exp(−iθP/2)` for a Pauli string `P`: the two-term `±π/2` shift rule is
-    /// exact for it, so a trainable angle here is untied.
+    /// exact for it, and the adjoint differentiates it, so a trainable angle
+    /// here — or one that reads the sample — is untied.
     PauliRotation,
+    /// Takes angles the adjoint differentiates through their generators but
+    /// the two-term shift rule does not (the controlled rotations, the phase
+    /// gates, the `u` family and `u0`): a trainable angle here is untied for the
+    /// adjoint, and the parameter shift rejects the model.
+    AdjointOnly,
     /// No angle at all: copied unchanged.
     ParameterFree,
-    /// Takes an angle but is not a Pauli rotation (controlled rotations, phase
-    /// and `u` gates, custom gates): no layer of this crate emits one, so it is
-    /// rejected rather than given a gradient that might be wrong.
-    OtherAngle,
+    /// Takes angles no exact gradient differentiates: the call of a declared
+    /// gate, whose body may use them in any way. Rejected.
+    NotDifferentiable,
     /// Not named below. Rejected.
     Unknown,
 }
@@ -900,13 +988,28 @@ enum GateClass {
 /// this list does not know never passes silently. Keep the list complete: the
 /// test `every_instruction_kind_is_classified` names one instruction of every
 /// kind (`GateInstruction::KINDS`) and fails as soon as `polypus-circuit` adds a
-/// kind that falls into the wildcard (contract C-2).
+/// kind that falls into the wildcard (contract C-2). The gates of
+/// [`GateClass::AdjointOnly`] are exactly those of `polypus-sim`'s table of
+/// generators, whose own test fails for a kind it does not differentiate.
 fn classify(gate: &GateInstruction) -> GateClass {
     use GateInstruction as G;
     match gate {
         G::Rx { .. } | G::Ry { .. } | G::Rz { .. } | G::Rxx { .. } | G::Rzz { .. } => {
             GateClass::PauliRotation
         }
+        G::Cp { .. }
+        | G::Crx { .. }
+        | G::Cry { .. }
+        | G::Crz { .. }
+        | G::Cu1 { .. }
+        | G::Cu3 { .. }
+        | G::Cu { .. }
+        | G::U { .. }
+        | G::UGate { .. }
+        | G::U0 { .. }
+        | G::P { .. }
+        | G::U1 { .. }
+        | G::U2 { .. } => GateClass::AdjointOnly,
         G::H(_)
         | G::X(_)
         | G::Y(_)
@@ -934,34 +1037,32 @@ fn classify(gate: &GateInstruction) -> GateClass {
         | G::Barrier(_)
         | G::Measure { .. }
         | G::MeasureAll => GateClass::ParameterFree,
-        G::Cp { .. }
-        | G::Crx { .. }
-        | G::Cry { .. }
-        | G::Crz { .. }
-        | G::Cu1 { .. }
-        | G::Cu3 { .. }
-        | G::Cu { .. }
-        | G::U { .. }
-        | G::UGate { .. }
-        | G::U0 { .. }
-        | G::P { .. }
-        | G::U1 { .. }
-        | G::U2 { .. }
-        | G::Custom(_) => GateClass::OtherAngle,
+        G::Custom(_) => GateClass::NotDifferentiable,
         _ => GateClass::Unknown,
     }
 }
 
+/// What [`untie`] returns: [`UntiedTemplate`] with no input slot, each slot the
+/// trainable parameter it reads.
+#[derive(Debug, Clone)]
+struct UntiedParams {
+    template: ParameterizedCircuit,
+    /// `owners[j] = k`: occurrence `j` reads `θ[k]`.
+    owners: Vec<usize>,
+    positions: Vec<AngleRef>,
+    shift: Result<(), AdjointOnlyGate>,
+}
+
 /// Copy `template` with every `Param(k)` occurrence renumbered `Param(j)` in
-/// gate order, returning the copy, `owners` (`owners[j] = k`) and the position
-/// of each occurrence's gate.
+/// gate order (and angle order within a gate), returning the copy, `owners`
+/// (`owners[j] = k`), the gate and angle of each occurrence, and whether the
+/// parameter shift differentiates it too.
 ///
-/// Only Pauli rotations are untied; fixed angles (the encoders') are copied.
-/// Anything else that could carry an angle, an expression angle, or an
-/// instruction [`classify`] does not know, is a [`QmlError::NoExactGradient`].
-fn untie(
-    template: &ParameterizedCircuit,
-) -> Result<(ParameterizedCircuit, Vec<usize>, Vec<usize>), QmlError> {
+/// The Pauli rotations and the gates only the adjoint differentiates are
+/// untied; fixed angles (the encoders') are copied. The call of a declared
+/// gate, an expression angle, or an instruction [`classify`] does not know, is
+/// a [`QmlError::NoExactGradient`].
+fn untie(template: &ParameterizedCircuit) -> Result<UntiedParams, QmlError> {
     let untied = untie_traced(template, &[])?;
     // With no input gates every slot is a parameter occurrence.
     let owners = untied
@@ -972,13 +1073,18 @@ fn untie(
             Slot::Input { .. } => None,
         })
         .collect();
-    Ok((untied.template, owners, untied.positions))
+    Ok(UntiedParams {
+        template: untied.template,
+        owners,
+        positions: untied.positions,
+        shift: untied.shift,
+    })
 }
 
 /// What occurrence `j` (`Param(j)` of an untied template) stands for.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Slot {
-    /// A gate that reads trainable parameter `k`.
+    /// A gate angle that reads trainable parameter `k`.
     Param(usize),
     /// A gate whose angle reads the sample: its angle in the template, and
     /// `(f, ∂angle/∂x_f)` for each feature it reads.
@@ -989,7 +1095,8 @@ pub(crate) enum Slot {
 }
 
 /// What [`untie_traced`] returns: the untied template, what each of its slots
-/// reads, and where each slot's gate sits in the template.
+/// reads, where each slot's gate and angle sit in the template, and whether
+/// the parameter shift differentiates it.
 #[derive(Debug, Clone)]
 pub(crate) struct UntiedTemplate {
     /// The template with occurrence `j` as `Param(j)`.
@@ -997,53 +1104,79 @@ pub(crate) struct UntiedTemplate {
     /// `slots[j]`: what occurrence `j` stands for.
     pub(crate) slots: Vec<Slot>,
     /// `positions[j]`: the position of occurrence `j`'s gate in `template`
-    /// (the same as in the template it was untied from, gate for gate) — the
-    /// gate an adjoint gradient differentiates for that slot.
-    pub(crate) positions: Vec<usize>,
+    /// (the same as in the template it was untied from, gate for gate) and
+    /// which of its angles — the angle an adjoint gradient differentiates for
+    /// that slot.
+    pub(crate) positions: Vec<AngleRef>,
+    /// `Ok` when the parameter shift differentiates every slot (every gate
+    /// with an angle is a Pauli rotation); otherwise the first instruction
+    /// only the adjoint differentiates. A model with one has no parameter-shift
+    /// rule even where it holds a fixed angle, as before the adjoint took
+    /// these gates: the shift side is unchanged.
+    pub(crate) shift: Result<(), AdjointOnlyGate>,
 }
 
 /// [`untie`], also giving a slot of its own to each gate in `inputs` (a
 /// template's [`InputTrace`](crate::model::InputTrace) gates, in gate order),
 /// whose fixed angle becomes a free one so it can be shifted too.
 ///
+/// One pass gives what both gradients need: the untied template is the same
+/// for the adjoint and for the parameter shift (on a model of Pauli rotations
+/// they untie the same gates), and [`UntiedTemplate::shift`] says whether the
+/// shift can use it.
+///
 /// An `inputs` gate that is not a Pauli rotation with a fixed angle, or a
 /// position past the template, is a [`QmlError::NoExactGradient`]: the trace
-/// and the template disagree, and a wrong derivative must not follow.
+/// and the template disagree (or the sample would be read through a gate the
+/// shift has no rule for), and a wrong derivative must not follow.
 pub(crate) fn untie_traced(
     template: &ParameterizedCircuit,
     inputs: &[InputGate],
 ) -> Result<UntiedTemplate, QmlError> {
-    use GateInstruction as G;
     let mut untied = ParameterizedCircuit::new(template.num_qubits());
     let mut slots = Vec::new();
     let mut positions = Vec::new();
+    let mut shift = Ok(());
     let mut inputs = inputs.iter().peekable();
     for (position, gate) in template.gates().iter().enumerate() {
         let rejected = |what: &str| QmlError::NoExactGradient {
             reason: format!("instruction {position} ({gate:?}) {what}"),
         };
         let input = inputs.next_if(|input| input.position == position);
-        let gate = match classify(gate) {
+        let class = classify(gate);
+        let gate = match class {
             GateClass::ParameterFree if input.is_none() => gate.clone(),
             GateClass::ParameterFree => {
                 return Err(rejected("reads the sample but takes no angle"));
             }
-            GateClass::OtherAngle => {
+            GateClass::NotDifferentiable => {
                 return Err(rejected(
-                    "takes an angle but is not a Pauli rotation, the only gates the exact \
-                     parameter shift supports",
+                    "is the call of a declared gate, whose angles no exact gradient \
+                     differentiates (its body may use them in any way)",
                 ))
             }
             GateClass::Unknown => return Err(rejected("is not a known instruction kind")),
-            GateClass::PauliRotation => {
-                let mut fresh = |theta: &GateParam| match (theta, input) {
+            GateClass::AdjointOnly if input.is_some() => {
+                return Err(rejected(
+                    "reads the sample but is not a Pauli rotation, the only gates whose angle \
+                     may read it for an exact gradient",
+                ))
+            }
+            GateClass::PauliRotation | GateClass::AdjointOnly => {
+                if class == GateClass::AdjointOnly && shift.is_ok() {
+                    shift = Err(AdjointOnlyGate {
+                        position,
+                        gate: format!("{gate:?}"),
+                    });
+                }
+                let mut fresh = |angle: usize, theta: &GateParam| match (theta, input) {
                     (GateParam::Fixed(_), None) => Ok(*theta),
-                    (GateParam::Fixed(angle), Some(input)) => {
+                    (GateParam::Fixed(value), Some(input)) => {
                         slots.push(Slot::Input {
-                            angle: *angle,
+                            angle: *value,
                             features: input.features.clone(),
                         });
-                        positions.push(position);
+                        positions.push(AngleRef::new(position, angle));
                         Ok(GateParam::Param(slots.len() - 1))
                     }
                     (GateParam::Param(_), Some(_)) => Err(rejected(
@@ -1051,39 +1184,16 @@ pub(crate) fn untie_traced(
                     )),
                     (GateParam::Param(k), None) => {
                         slots.push(Slot::Param(*k));
-                        positions.push(position);
+                        positions.push(AngleRef::new(position, angle));
                         Ok(GateParam::Param(slots.len() - 1))
                     }
                     _ => Err(rejected(
-                        "has an expression angle; the exact parameter shift needs each \
-                         parameter used directly",
+                        "has an expression angle; the exact gradient needs each parameter used \
+                         directly",
                     )),
                 };
-                match gate {
-                    G::Rx { qubit, theta } => G::Rx {
-                        qubit: *qubit,
-                        theta: fresh(theta)?,
-                    },
-                    G::Ry { qubit, theta } => G::Ry {
-                        qubit: *qubit,
-                        theta: fresh(theta)?,
-                    },
-                    G::Rz { qubit, theta } => G::Rz {
-                        qubit: *qubit,
-                        theta: fresh(theta)?,
-                    },
-                    G::Rxx { q0, q1, theta } => G::Rxx {
-                        q0: *q0,
-                        q1: *q1,
-                        theta: fresh(theta)?,
-                    },
-                    G::Rzz { q0, q1, theta } => G::Rzz {
-                        q0: *q0,
-                        q1: *q1,
-                        theta: fresh(theta)?,
-                    },
-                    _ => return Err(rejected("is not a known instruction kind")),
-                }
+                with_fresh_angles(gate, &mut fresh)?
+                    .ok_or_else(|| rejected("is not a known instruction kind"))?
             }
         };
         untied.try_push(gate)?;
@@ -1101,7 +1211,148 @@ pub(crate) fn untie_traced(
         template: untied,
         slots,
         positions,
+        shift,
     })
+}
+
+/// `gate` with each of its angles replaced by `fresh(angle index, angle)`,
+/// called in [`AngleRef`] angle order (`θ, φ, λ`, then `Cu`'s `γ`; `U2`'s
+/// `φ, λ`), or `None` for a gate that is neither a Pauli rotation nor one of
+/// the gates only the adjoint differentiates.
+fn with_fresh_angles(
+    gate: &GateInstruction,
+    fresh: &mut impl FnMut(usize, &GateParam) -> Result<GateParam, QmlError>,
+) -> Result<Option<GateInstruction>, QmlError> {
+    use GateInstruction as G;
+    Ok(Some(match gate {
+        G::Rx { qubit, theta } => G::Rx {
+            qubit: *qubit,
+            theta: fresh(0, theta)?,
+        },
+        G::Ry { qubit, theta } => G::Ry {
+            qubit: *qubit,
+            theta: fresh(0, theta)?,
+        },
+        G::Rz { qubit, theta } => G::Rz {
+            qubit: *qubit,
+            theta: fresh(0, theta)?,
+        },
+        G::Rxx { q0, q1, theta } => G::Rxx {
+            q0: *q0,
+            q1: *q1,
+            theta: fresh(0, theta)?,
+        },
+        G::Rzz { q0, q1, theta } => G::Rzz {
+            q0: *q0,
+            q1: *q1,
+            theta: fresh(0, theta)?,
+        },
+        G::Crx {
+            control,
+            target,
+            theta,
+        } => G::Crx {
+            control: *control,
+            target: *target,
+            theta: fresh(0, theta)?,
+        },
+        G::Cry {
+            control,
+            target,
+            theta,
+        } => G::Cry {
+            control: *control,
+            target: *target,
+            theta: fresh(0, theta)?,
+        },
+        G::Crz {
+            control,
+            target,
+            theta,
+        } => G::Crz {
+            control: *control,
+            target: *target,
+            theta: fresh(0, theta)?,
+        },
+        G::Cp { q0, q1, theta } => G::Cp {
+            q0: *q0,
+            q1: *q1,
+            theta: fresh(0, theta)?,
+        },
+        G::Cu1 { q0, q1, theta } => G::Cu1 {
+            q0: *q0,
+            q1: *q1,
+            theta: fresh(0, theta)?,
+        },
+        G::P { qubit, lam } => G::P {
+            qubit: *qubit,
+            lam: fresh(0, lam)?,
+        },
+        G::U1 { qubit, lam } => G::U1 {
+            qubit: *qubit,
+            lam: fresh(0, lam)?,
+        },
+        G::U0 { qubit, gamma } => G::U0 {
+            qubit: *qubit,
+            gamma: fresh(0, gamma)?,
+        },
+        G::U {
+            qubit,
+            theta,
+            phi,
+            lam,
+        } => G::U {
+            qubit: *qubit,
+            theta: fresh(0, theta)?,
+            phi: fresh(1, phi)?,
+            lam: fresh(2, lam)?,
+        },
+        G::UGate {
+            qubit,
+            theta,
+            phi,
+            lam,
+        } => G::UGate {
+            qubit: *qubit,
+            theta: fresh(0, theta)?,
+            phi: fresh(1, phi)?,
+            lam: fresh(2, lam)?,
+        },
+        G::U2 { qubit, phi, lam } => G::U2 {
+            qubit: *qubit,
+            phi: fresh(0, phi)?,
+            lam: fresh(1, lam)?,
+        },
+        G::Cu3 {
+            control,
+            target,
+            theta,
+            phi,
+            lam,
+        } => G::Cu3 {
+            control: *control,
+            target: *target,
+            theta: fresh(0, theta)?,
+            phi: fresh(1, phi)?,
+            lam: fresh(2, lam)?,
+        },
+        G::Cu {
+            control,
+            target,
+            theta,
+            phi,
+            lam,
+            gamma,
+        } => G::Cu {
+            control: *control,
+            target: *target,
+            theta: fresh(0, theta)?,
+            phi: fresh(1, phi)?,
+            lam: fresh(2, lam)?,
+            gamma: fresh(3, gamma)?,
+        },
+        _ => return Ok(None),
+    }))
 }
 
 #[cfg(test)]
@@ -2140,86 +2391,183 @@ mod tests {
     /// `GateInstruction` is `#[non_exhaustive]`, so `classify` ends in a
     /// wildcard arm. This keeps the closed list complete: it must name every
     /// kind `polypus-circuit` has (`kind_index` is exhaustive inside that
-    /// crate), and only the five Pauli rotations may be untied. A new kind fails
-    /// here until it is classified (contract C-2).
+    /// crate), and it declares the three sets of angle-taking kinds — the five
+    /// Pauli rotations both gradients differentiate, the thirteen kinds only
+    /// the adjoint does (#561), and the one no exact gradient does. A new kind
+    /// fails here until it is classified (contract C-2).
     #[test]
     fn every_instruction_kind_is_classified() {
+        use std::collections::BTreeSet;
+        use GateInstruction as G;
         let mut seen = [false; GateInstruction::KINDS];
-        let mut pauli_rotations = Vec::new();
+        let mut by_class: HashMap<&'static str, BTreeSet<usize>> = HashMap::new();
         for gate in one_instruction_of_every_kind() {
             seen[gate.kind_index()] = true;
-            let class = classify(&gate);
-            assert_ne!(class, GateClass::Unknown, "{gate:?} is not classified");
-            if class == GateClass::PauliRotation {
-                pauli_rotations.push(gate.kind_index());
-            }
+            let class = match classify(&gate) {
+                GateClass::PauliRotation => "pauli",
+                GateClass::AdjointOnly => "adjoint only",
+                GateClass::NotDifferentiable => "not differentiable",
+                GateClass::ParameterFree => "parameter free",
+                GateClass::Unknown => panic!("{gate:?} is not classified"),
+            };
+            by_class.entry(class).or_default().insert(gate.kind_index());
         }
         let missing: Vec<usize> = (0..GateInstruction::KINDS).filter(|&k| !seen[k]).collect();
         assert!(
             missing.is_empty(),
             "instruction kinds not exercised: {missing:?}"
         );
-        pauli_rotations.sort_unstable();
-        let expected: Vec<usize> = [
-            GateInstruction::Rx {
+        let kinds = |gates: &[G]| -> BTreeSet<usize> {
+            gates.iter().map(GateInstruction::kind_index).collect()
+        };
+        let a = || Fixed(0.0);
+        let pauli = kinds(&[
+            G::Rx {
                 qubit: 0,
-                theta: Fixed(0.0),
+                theta: a(),
             },
-            GateInstruction::Ry {
+            G::Ry {
                 qubit: 0,
-                theta: Fixed(0.0),
+                theta: a(),
             },
-            GateInstruction::Rz {
+            G::Rz {
                 qubit: 0,
-                theta: Fixed(0.0),
+                theta: a(),
             },
-            GateInstruction::Rzz {
+            G::Rzz {
                 q0: 0,
                 q1: 1,
-                theta: Fixed(0.0),
+                theta: a(),
             },
-            GateInstruction::Rxx {
+            G::Rxx {
                 q0: 0,
                 q1: 1,
-                theta: Fixed(0.0),
+                theta: a(),
             },
+        ]);
+        let adjoint_only = kinds(&adjoint_only_gates(GateParam::Fixed(0.0)));
+        let declared = kinds(&[one_instruction_of_every_kind()
+            .into_iter()
+            .find(|g| matches!(g, G::Custom(_)))
+            .expect("a declared gate")]);
+        assert_eq!(pauli.len(), 5);
+        assert_eq!(adjoint_only.len(), 13);
+        assert_eq!(by_class["pauli"], pauli);
+        assert_eq!(by_class["adjoint only"], adjoint_only);
+        assert_eq!(by_class["not differentiable"], declared);
+    }
+
+    /// One gate of each kind only the adjoint differentiates, every angle
+    /// `angle`, on qubits 0 and 1 (control 0).
+    fn adjoint_only_gates(angle: GateParam) -> Vec<GateInstruction> {
+        use GateInstruction as G;
+        let a = angle;
+        vec![
+            G::Crx {
+                control: 0,
+                target: 1,
+                theta: a,
+            },
+            G::Cry {
+                control: 0,
+                target: 1,
+                theta: a,
+            },
+            G::Crz {
+                control: 0,
+                target: 1,
+                theta: a,
+            },
+            G::Cp {
+                q0: 0,
+                q1: 1,
+                theta: a,
+            },
+            G::Cu1 {
+                q0: 0,
+                q1: 1,
+                theta: a,
+            },
+            G::P { qubit: 1, lam: a },
+            G::U1 { qubit: 1, lam: a },
+            G::U {
+                qubit: 1,
+                theta: a,
+                phi: a,
+                lam: a,
+            },
+            G::UGate {
+                qubit: 1,
+                theta: a,
+                phi: a,
+                lam: a,
+            },
+            G::U2 {
+                qubit: 1,
+                phi: a,
+                lam: a,
+            },
+            G::Cu3 {
+                control: 0,
+                target: 1,
+                theta: a,
+                phi: a,
+                lam: a,
+            },
+            G::Cu {
+                control: 0,
+                target: 1,
+                theta: a,
+                phi: a,
+                lam: a,
+                gamma: a,
+            },
+            G::U0 { qubit: 1, gamma: a },
         ]
-        .iter()
-        .map(GateInstruction::kind_index)
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-        assert_eq!(pauli_rotations, expected);
+    }
+
+    fn template_of(num_qubits: usize, gates: Vec<GateInstruction>) -> ParameterizedCircuit {
+        let mut template = ParameterizedCircuit::new(num_qubits);
+        for gate in gates {
+            template.try_push(gate).unwrap();
+        }
+        template
     }
 
     #[test]
     fn untie_renumbers_each_occurrence_and_copies_fixed_angles() {
-        let mut template = ParameterizedCircuit::new(2);
-        for gate in [
-            GateInstruction::Ry {
-                qubit: 0,
-                theta: Fixed(0.4),
-            },
-            GateInstruction::Ry {
-                qubit: 0,
-                theta: GateParam::Param(1),
-            },
-            GateInstruction::Ry {
-                qubit: 1,
-                theta: GateParam::Param(1),
-            },
-            GateInstruction::Cx(0, 1),
-            GateInstruction::Rzz {
-                q0: 0,
-                q1: 1,
-                theta: GateParam::Param(0),
-            },
-        ] {
-            template.try_push(gate).unwrap();
-        }
-        let (untied, owners, positions) = untie(&template).unwrap();
+        let template = template_of(
+            2,
+            vec![
+                GateInstruction::Ry {
+                    qubit: 0,
+                    theta: Fixed(0.4),
+                },
+                GateInstruction::Ry {
+                    qubit: 0,
+                    theta: GateParam::Param(1),
+                },
+                GateInstruction::Ry {
+                    qubit: 1,
+                    theta: GateParam::Param(1),
+                },
+                GateInstruction::Cx(0, 1),
+                GateInstruction::Rzz {
+                    q0: 0,
+                    q1: 1,
+                    theta: GateParam::Param(0),
+                },
+            ],
+        );
+        let UntiedParams {
+            template: untied,
+            owners,
+            positions,
+            shift,
+        } = untie(&template).unwrap();
         assert_eq!(owners, vec![1, 1, 0]);
-        assert_eq!(positions, vec![1, 2, 4]);
+        assert_eq!(positions, [1, 2, 4].map(|p| AngleRef::new(p, 0)).to_vec());
+        assert_eq!(shift, Ok(()));
         assert_eq!(untied.num_params(), 3);
         assert_eq!(untied.gates()[0], template.gates()[0]);
         assert_eq!(
@@ -2239,32 +2587,308 @@ mod tests {
         );
     }
 
+    /// #561: every gate only the adjoint differentiates is untied — trainable
+    /// or fixed — and marks the model as one the parameter shift rejects, with
+    /// a message naming the gate and pointing at exact mode. As before, even a
+    /// fixed angle on one of them is enough for the shift side.
     #[test]
-    fn untie_rejects_angle_gates_it_cannot_shift() {
-        // A trainable controlled rotation has no two-term shift rule.
-        let mut trainable = ParameterizedCircuit::new(2);
-        trainable
-            .try_push(GateInstruction::Crx {
-                control: 0,
-                target: 1,
-                theta: GateParam::Param(0),
-            })
+    fn untie_accepts_for_the_adjoint_and_rejects_for_the_shift_the_gates_only_it_differentiates() {
+        for angle in [GateParam::Param(0), Fixed(0.3)] {
+            for gate in adjoint_only_gates(angle) {
+                let template = template_of(2, vec![GateInstruction::H(0), gate.clone()]);
+                let untied = untie(&template).unwrap_or_else(|e| panic!("{gate:?}: {e}"));
+                let expected = AdjointOnlyGate {
+                    position: 1,
+                    gate: format!("{gate:?}"),
+                };
+                assert_eq!(untied.shift, Err(expected.clone()), "{gate:?}");
+                let message = expected.shift_error().to_string();
+                assert!(message.contains("instruction 1"), "{message}");
+                assert!(message.contains("exact=True"), "{message}");
+                let trainable = matches!(angle, GateParam::Param(_));
+                assert_eq!(
+                    untied.positions.is_empty(),
+                    !trainable,
+                    "{gate:?}: {:?}",
+                    untied.positions
+                );
+            }
+        }
+    }
+
+    /// Occurrences are numbered in gate order and, within a gate, in angle
+    /// order (`AngleRef`'s): `U` with `θ` and `φ` trainable and `λ` fixed, a
+    /// parameter that a `Cry` and `U`'s `φ` share, and `Cu`'s `γ`.
+    #[test]
+    fn untie_numbers_occurrences_by_gate_then_angle() {
+        use GateInstruction as G;
+        let template = template_of(
+            2,
+            vec![
+                G::H(0),
+                G::Cry {
+                    control: 0,
+                    target: 1,
+                    theta: GateParam::Param(2),
+                },
+                G::U {
+                    qubit: 1,
+                    theta: GateParam::Param(0),
+                    phi: GateParam::Param(2),
+                    lam: Fixed(0.5),
+                },
+                G::Ry {
+                    qubit: 0,
+                    theta: GateParam::Param(1),
+                },
+                G::Cu {
+                    control: 1,
+                    target: 0,
+                    theta: Fixed(0.1),
+                    phi: Fixed(0.2),
+                    lam: GateParam::Param(0),
+                    gamma: GateParam::Param(1),
+                },
+            ],
+        );
+        let untied = untie(&template).unwrap();
+        assert_eq!(untied.owners, vec![2, 0, 2, 1, 0, 1]);
+        assert_eq!(
+            untied.positions,
+            vec![
+                AngleRef::new(1, 0),
+                AngleRef::new(2, 0),
+                AngleRef::new(2, 1),
+                AngleRef::new(3, 0),
+                AngleRef::new(4, 2),
+                AngleRef::new(4, 3),
+            ]
+        );
+        assert_eq!(
+            untied.template.gates()[2],
+            G::U {
+                qubit: 1,
+                theta: GateParam::Param(1),
+                phi: GateParam::Param(2),
+                lam: Fixed(0.5),
+            }
+        );
+        assert_eq!(
+            untied.template.gates()[4],
+            G::Cu {
+                control: 1,
+                target: 0,
+                theta: Fixed(0.1),
+                phi: Fixed(0.2),
+                lam: GateParam::Param(4),
+                gamma: GateParam::Param(5),
+            }
+        );
+        // Binding each occurrence to the parameter it reads gives back the
+        // template bound at θ.
+        let theta = [0.3, -0.8, 1.4];
+        let values: Vec<f64> = untied.owners.iter().map(|&k| theta[k]).collect();
+        assert_eq!(
+            untied.template.assign_parameters(&values).unwrap(),
+            template.assign_parameters(&theta).unwrap()
+        );
+    }
+
+    /// Every gate only the adjoint differentiates, with a parameter of its own
+    /// on each angle — `Param(k)` on angle `k` of `AngleRef`'s order (`θ, φ,
+    /// λ`, then `Cu`'s `γ`; `U2`'s `φ, λ`), the angle count written out here —
+    /// unties to occurrence `k` at `AngleRef::new(1, k)` reading `θ[k]`. This
+    /// pins the per-gate order of `with_fresh_angles` independently of the
+    /// simulator: two of its indices swapped would hand the derivative of one
+    /// angle to the parameter of another, and every other test would pass.
+    #[test]
+    fn untie_numbers_every_angle_of_each_adjoint_only_gate_in_angle_order() {
+        use GateInstruction as G;
+        let p = GateParam::Param;
+        let gates: [(G, usize); 13] = [
+            (
+                G::Crx {
+                    control: 0,
+                    target: 1,
+                    theta: p(0),
+                },
+                1,
+            ),
+            (
+                G::Cry {
+                    control: 0,
+                    target: 1,
+                    theta: p(0),
+                },
+                1,
+            ),
+            (
+                G::Crz {
+                    control: 0,
+                    target: 1,
+                    theta: p(0),
+                },
+                1,
+            ),
+            (
+                G::Cp {
+                    q0: 0,
+                    q1: 1,
+                    theta: p(0),
+                },
+                1,
+            ),
+            (
+                G::Cu1 {
+                    q0: 0,
+                    q1: 1,
+                    theta: p(0),
+                },
+                1,
+            ),
+            (
+                G::P {
+                    qubit: 1,
+                    lam: p(0),
+                },
+                1,
+            ),
+            (
+                G::U1 {
+                    qubit: 1,
+                    lam: p(0),
+                },
+                1,
+            ),
+            (
+                G::U {
+                    qubit: 1,
+                    theta: p(0),
+                    phi: p(1),
+                    lam: p(2),
+                },
+                3,
+            ),
+            (
+                G::UGate {
+                    qubit: 1,
+                    theta: p(0),
+                    phi: p(1),
+                    lam: p(2),
+                },
+                3,
+            ),
+            (
+                G::U2 {
+                    qubit: 1,
+                    phi: p(0),
+                    lam: p(1),
+                },
+                2,
+            ),
+            (
+                G::Cu3 {
+                    control: 0,
+                    target: 1,
+                    theta: p(0),
+                    phi: p(1),
+                    lam: p(2),
+                },
+                3,
+            ),
+            (
+                G::Cu {
+                    control: 0,
+                    target: 1,
+                    theta: p(0),
+                    phi: p(1),
+                    lam: p(2),
+                    gamma: p(3),
+                },
+                4,
+            ),
+            (
+                G::U0 {
+                    qubit: 1,
+                    gamma: p(0),
+                },
+                1,
+            ),
+        ];
+        // The same 13 kinds `classify` calls adjoint-only.
+        let kinds: std::collections::BTreeSet<usize> =
+            gates.iter().map(|(g, _)| g.kind_index()).collect();
+        let expected: std::collections::BTreeSet<usize> = adjoint_only_gates(Fixed(0.0))
+            .iter()
+            .map(GateInstruction::kind_index)
+            .collect();
+        assert_eq!(kinds, expected);
+        for (gate, n) in gates {
+            let template = template_of(2, vec![G::H(0), gate.clone()]);
+            let untied = untie(&template).unwrap();
+            assert_eq!(
+                untied.positions,
+                (0..n).map(|a| AngleRef::new(1, a)).collect::<Vec<_>>(),
+                "{gate:?}"
+            );
+            assert_eq!(untied.owners, (0..n).collect::<Vec<_>>(), "{gate:?}");
+            // Bound through `owners`, the untied template is the original.
+            let theta: Vec<f64> = (0..n).map(|k| 0.3 + 0.4 * k as f64).collect();
+            let values: Vec<f64> = untied.owners.iter().map(|&k| theta[k]).collect();
+            assert_eq!(
+                untied.template.assign_parameters(&values).unwrap(),
+                template.assign_parameters(&theta).unwrap(),
+                "{gate:?}"
+            );
+        }
+    }
+
+    /// What no exact gradient differentiates fails in both modes: the call of a
+    /// declared gate, an expression angle (on a Pauli rotation or on a gate
+    /// only the adjoint takes), and a gate other than a Pauli rotation that
+    /// reads the sample.
+    #[test]
+    fn untie_rejects_what_no_exact_gradient_differentiates() {
+        let declared = one_instruction_of_every_kind()
+            .into_iter()
+            .find(|g| matches!(g, GateInstruction::Custom(_)))
+            .expect("a declared gate");
+        let mut circuit = ParameterizedCircuit::new(2);
+        let doubled = circuit
+            .add_expr(polypus_circuit::ParamExpr::param(0) * 2.0)
             .unwrap();
-        // Fail closed: even a fixed angle on a non-rotation is rejected, since no
-        // layer of this crate emits one.
-        let mut fixed = ParameterizedCircuit::new(2);
-        fixed
-            .try_push(GateInstruction::Cp {
-                q0: 0,
-                q1: 1,
-                theta: Fixed(0.3),
-            })
-            .unwrap();
-        for template in [trainable, fixed] {
+        let expression = |gate: fn(GateParam) -> GateInstruction| gate(doubled);
+        let cases = [
+            (declared, "declared gate"),
+            (
+                expression(|theta| GateInstruction::Ry { qubit: 1, theta }),
+                "expression angle",
+            ),
+            (
+                expression(|lam| GateInstruction::P { qubit: 1, lam }),
+                "expression angle",
+            ),
+        ];
+        for (gate, needle) in cases {
+            let mut template = circuit.clone();
+            template.try_push(GateInstruction::H(0)).unwrap();
+            template.try_push(gate.clone()).unwrap();
             match untie(&template).unwrap_err() {
                 QmlError::NoExactGradient { reason } => {
-                    assert!(reason.contains("instruction 0"), "{reason}");
-                    assert!(reason.contains("Pauli rotation"), "{reason}");
+                    assert!(reason.contains("instruction 1"), "{gate:?}: {reason}");
+                    assert!(reason.contains(needle), "{gate:?}: {reason}");
+                }
+                other => panic!("unexpected error {other:?}"),
+            }
+        }
+        // The sample read through a gate the shift has no rule for: rejected
+        // for the adjoint too, fixed angle or not.
+        for gate in adjoint_only_gates(Fixed(0.4)) {
+            let template = template_of(2, vec![gate.clone()]);
+            match untie_traced(&template, &[input_gate(0, vec![(0, 1.0)])]).unwrap_err() {
+                QmlError::NoExactGradient { reason } => {
+                    assert!(reason.contains("reads the sample"), "{gate:?}: {reason}");
+                    assert!(reason.contains("Pauli rotation"), "{gate:?}: {reason}");
                 }
                 other => panic!("unexpected error {other:?}"),
             }
@@ -2309,8 +2933,10 @@ mod tests {
             template: untied,
             slots,
             positions,
+            shift,
         } = untie_traced(&template, &inputs).unwrap();
-        assert_eq!(positions, vec![0, 1, 3]);
+        assert_eq!(positions, [0, 1, 3].map(|p| AngleRef::new(p, 0)).to_vec());
+        assert_eq!(shift, Ok(()));
         assert_eq!(
             slots,
             vec![
@@ -2338,9 +2964,12 @@ mod tests {
             template.assign_parameters(&[0.0, 0.5]).unwrap()
         );
         // With no trace it is `untie` exactly.
-        let (plain, owners, _) = untie(&template).unwrap();
-        assert_eq!(untie_traced(&template, &[]).unwrap().template, plain);
-        assert_eq!(owners, vec![1]);
+        let plain = untie(&template).unwrap();
+        assert_eq!(
+            untie_traced(&template, &[]).unwrap().template,
+            plain.template
+        );
+        assert_eq!(plain.owners, vec![1]);
     }
 
     #[test]
@@ -2383,6 +3012,192 @@ mod tests {
         assert_eq!(problem.gradient_circuits(&theta).unwrap_err(), error);
         assert_eq!(problem.adjoint_runs(&theta, &[]).unwrap_err(), error);
         assert_eq!(problem.gradient_from_adjoint(&[]).unwrap_err(), error);
+        // Nor a fallback: the memory is not what stops it.
+        assert_eq!(problem.check_shift_fallback(4).unwrap_err(), error);
+    }
+
+    /// A two-qubit model whose templates also hold, by hand, gates only the
+    /// adjoint differentiates (#561) — no layer emits them — reading
+    /// parameters the ansatz's Pauli rotations read too, several angles of a
+    /// gate trainable, and `θ₀` read by three gates.
+    fn adjoint_only_problem() -> QmlProblem {
+        use GateInstruction as G;
+        let readout = Readout::new(
+            vec![Observable::new(vec![(
+                1.0,
+                PauliString::new(vec![(0, Pauli::Z), (1, Pauli::Z)]).unwrap(),
+            )])
+            .unwrap()],
+            Decision::Raw,
+        )
+        .unwrap();
+        let model = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .readout(readout)
+            .compile(2)
+            .unwrap();
+        let rows = vec![vec![0.4, 1.1], vec![1.3, -0.2], vec![-0.7, 0.5]];
+        let data = Dataset::from_rows(&rows, &[0.5, -0.3, 0.1]).unwrap();
+        let mut problem = QmlProblem::new(model.clone(), data, Loss::SquaredError).unwrap();
+        assert!(problem.num_params() >= 3);
+        let p = GateParam::Param;
+        let templates: Vec<ParameterizedCircuit> = rows
+            .iter()
+            .map(|row| {
+                let mut gates = model.template_for(row).unwrap().gates().to_vec();
+                assert_eq!(gates.pop(), Some(G::MeasureAll));
+                gates.extend([
+                    G::Crx {
+                        control: 0,
+                        target: 1,
+                        theta: p(0),
+                    },
+                    G::U {
+                        qubit: 1,
+                        theta: p(1),
+                        phi: p(0),
+                        lam: Fixed(0.3),
+                    },
+                    G::Cu {
+                        control: 1,
+                        target: 0,
+                        theta: Fixed(0.7),
+                        phi: p(2),
+                        lam: Fixed(-0.4),
+                        gamma: p(1),
+                    },
+                    G::Cp {
+                        q0: 0,
+                        q1: 1,
+                        theta: p(2),
+                    },
+                    G::U2 {
+                        qubit: 0,
+                        phi: Fixed(0.2),
+                        lam: p(0),
+                    },
+                    G::Sx(0),
+                    G::H(1),
+                    G::MeasureAll,
+                ]);
+                template_of(2, gates)
+            })
+            .collect();
+        problem.untied = Untied::from_templates(&templates);
+        problem.templates = templates;
+        problem
+    }
+
+    /// The exact probabilities of `circuits`, keyed as the native backend
+    /// keys them.
+    fn exact_probabilities(circuits: &[ConcreteCircuit]) -> Vec<HashMap<String, f64>> {
+        use polypus_sim::{Simulator, StatevectorSimulator};
+        let sim = StatevectorSimulator::new();
+        circuits
+            .iter()
+            .map(|circuit| {
+                let width = circuit.num_qubits();
+                sim.run(circuit)
+                    .unwrap()
+                    .probabilities()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(state, p)| (format!("{state:0width$b}"), p))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn reason(error: QmlError) -> String {
+        match error {
+            QmlError::NoExactGradient { reason } => reason,
+            other => panic!("expected NoExactGradient, got {other:?}"),
+        }
+    }
+
+    /// Acceptance criteria 4 and 5 of #561 at the problem level: a model only
+    /// the adjoint differentiates is built like any other; every
+    /// parameter-shift method fails with the shift's message, and the memory
+    /// fallback with its own; and the adjoint gradient is the derivative of
+    /// the exact fitness — the loss's chain rule and a parameter several
+    /// angles share included — to central differences with the step and
+    /// tolerance of `tests/gradient_exactness.rs`.
+    #[test]
+    fn a_model_only_the_adjoint_differentiates_gets_its_exact_gradient_from_it() {
+        use polypus_sim::StatevectorSimulator;
+        const STEP: f64 = 1e-5;
+        const TOLERANCE: f64 = 1e-8;
+        let problem = adjoint_only_problem();
+        let theta: Vec<f64> = (0..problem.num_params())
+            .map(|k| 0.35 - 0.21 * k as f64)
+            .collect();
+
+        // The parameter shift: the instruction, the gate, and exact mode.
+        let first = problem
+            .templates
+            .first()
+            .unwrap()
+            .gates()
+            .iter()
+            .position(|g| matches!(g, GateInstruction::Crx { .. }))
+            .unwrap();
+        let shift_errors = [
+            problem.num_gradient_circuits().unwrap_err(),
+            problem.gradient_circuits(&theta).unwrap_err(),
+            problem.gradient_from_counts(&[]).unwrap_err(),
+            problem.gradient_from_probabilities(&[]).unwrap_err(),
+        ];
+        for error in shift_errors {
+            let reason = reason(error);
+            assert!(
+                reason.contains(&format!("instruction {first} (Crx")),
+                "{reason}"
+            );
+            assert!(reason.contains("exact=True"), "{reason}");
+        }
+        let memory = reason(problem.check_shift_fallback(2).unwrap_err());
+        assert!(memory.contains("two statevectors of 2 qubits"), "{memory}");
+        assert!(
+            memory.contains(&format!("instruction {first} (Crx")),
+            "{memory}"
+        );
+        // A model of Pauli rotations can fall back.
+        assert_eq!(catalogue()[0].check_shift_fallback(4), Ok(()));
+
+        // The adjoint, end to end.
+        let fitness = |theta: &[f64]| {
+            let probabilities = exact_probabilities(&problem.bind_batch(theta).unwrap());
+            problem.fitness_from_probabilities(&probabilities).unwrap()
+        };
+        let base = exact_probabilities(&problem.bind_batch(&theta).unwrap());
+        let runs = problem.adjoint_runs(&theta, &base).unwrap();
+        assert_eq!(runs.len(), problem.num_circuits());
+        let sim = StatevectorSimulator::new();
+        let derivatives: Vec<Vec<f64>> = runs
+            .iter()
+            .map(|run| {
+                sim.adjoint_gradient(&run.circuit, &run.wrt, |b| run.observable.weight(b), None)
+                    .unwrap()
+                    .derivatives
+            })
+            .collect();
+        let gradient = problem.gradient_from_adjoint(&derivatives).unwrap();
+        for k in 0..problem.num_params() {
+            let mut plus = theta.clone();
+            plus[k] += STEP;
+            let mut minus = theta.clone();
+            minus[k] -= STEP;
+            let fd = (fitness(&plus) - fitness(&minus)) / (2.0 * STEP);
+            assert!(
+                (gradient[k] - fd).abs() < TOLERANCE,
+                "θ[{k}]: adjoint {} vs finite difference {fd}",
+                gradient[k]
+            );
+        }
+        for (k, g) in gradient.iter().take(3).enumerate() {
+            assert!(g.abs() > 1e-4, "θ[{k}]: {g} is vacuous");
+        }
     }
 
     /// Models covering every layer that emits trainable gates, the shared

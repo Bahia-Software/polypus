@@ -36,7 +36,7 @@
 //! `--features parallel` every arm runs the sequential kernels.
 
 use polypus_circuit::{ConcreteCircuit, GateInstruction as G, GateParam::Fixed};
-use polypus_sim::{Simulator, StatevectorSimulator};
+use polypus_sim::{AngleRef, Simulator, StatevectorSimulator};
 use std::f64::consts::FRAC_PI_2;
 use std::time::{Duration, Instant};
 
@@ -190,9 +190,10 @@ fn main() {
         let w = weight(n);
         for &p in &rotations {
             let (circuit, positions) = hea(n, p);
+            let wrt: Vec<AngleRef> = positions.iter().map(|&p| AngleRef::new(p, 0)).collect();
 
             let (adjoint_time, adjoint) = best_of(reps, || {
-                sim.adjoint_gradient(&circuit, &positions, &w, None)
+                sim.adjoint_gradient(&circuit, &wrt, &w, None)
                     .expect("a differentiable circuit")
                     .derivatives
             });

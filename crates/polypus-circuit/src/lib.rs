@@ -57,7 +57,7 @@ pub use custom_gate::{CustomGate, GateDefinition};
 pub use error::CircuitError;
 pub use expr::{ExprId, ParamExpr};
 pub use gate::{
-    qubit_index_violation, repeated_qubit_violation, terminal_measurement_violation,
+    qubit_index_violation, repeated_qubit_violation, terminal_measurement_violation, AngleRef,
     GateInstruction, GateParam,
 };
 // Variant re-exports so call sites can write `Param(0)` / `Fixed(0.5)` directly.

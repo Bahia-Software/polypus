@@ -16,7 +16,7 @@
 //! ~30x the checkpoint interval in release, ~40x that in debug).
 
 use polypus_circuit::{ConcreteCircuit, GateInstruction as G, GateParam::Fixed};
-use polypus_sim::{SimError, Simulator, StatevectorSimulator, MAX_QUBITS};
+use polypus_sim::{AngleRef, SimError, Simulator, StatevectorSimulator, MAX_QUBITS};
 
 /// Qubits for the long circuits. High enough that a single gate is expensive
 /// (16k amplitudes), so a modest gate count buys a run of a few hundred
@@ -180,7 +180,7 @@ fn adjoint_gradient_honours_a_request_to_stop() {
             true
         };
         sequential_sim()
-            .adjoint_gradient(&circuit, &[0], z0, Some(&mut cancel))
+            .adjoint_gradient(&circuit, &[AngleRef::new(0, 0)], z0, Some(&mut cancel))
             .unwrap_err()
     };
     // `Cancelled`, not `NonFiniteAmplitude`: the forward sweep never reached
@@ -195,6 +195,7 @@ fn adjoint_gradient_with_a_hook_that_never_cancels_matches_no_hook() {
     let mut gates = nan_terminated_circuit(SHORT).gates().to_vec();
     gates.pop();
     let circuit = ConcreteCircuit::new_unchecked(N, gates);
+    let wrt = [AngleRef::new(0, 0), AngleRef::new(2, 0)];
     let mut calls = 0usize;
     let with_hook = {
         let mut never = || {
@@ -202,12 +203,12 @@ fn adjoint_gradient_with_a_hook_that_never_cancels_matches_no_hook() {
             false
         };
         sequential_sim()
-            .adjoint_gradient(&circuit, &[0, 2], z0, Some(&mut never))
+            .adjoint_gradient(&circuit, &wrt, z0, Some(&mut never))
             .unwrap()
     };
     assert!(calls >= 1, "the hook was never polled");
     let without = sequential_sim()
-        .adjoint_gradient(&circuit, &[0, 2], z0, None)
+        .adjoint_gradient(&circuit, &wrt, z0, None)
         .unwrap();
     assert_eq!(with_hook, without);
 }

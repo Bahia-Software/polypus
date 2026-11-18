@@ -551,6 +551,88 @@ pub(crate) fn pauli_inner(lambda: &[C64], psi: &[C64], x: usize, z: usize, paral
     (0..blocks).fold(C64::new(0.0, 0.0), |acc, k| acc + block(k))
 }
 
+/// One block of [`generator_inner`], over the basis states `start..end`.
+#[inline]
+fn generator_inner_block(
+    lambda: &[C64],
+    psi: &[C64],
+    start: usize,
+    end: usize,
+    bit: usize,
+    control: usize,
+    g: &[[C64; 2]; 2],
+) -> C64 {
+    let mut acc = C64::new(0.0, 0.0);
+    for b in start..end {
+        if b & control != control {
+            continue;
+        }
+        // Row `r` of `G` (the target bit of `b`): `(Gψ)[b] = g[r][r]·ψ[b] +
+        // g[r][1−r]·ψ[b ⊕ bit]`.
+        let r = usize::from(b & bit != 0);
+        let g_psi = g[r][r] * psi[b] + g[r][1 - r] * psi[b ^ bit];
+        acc += lambda[b].conj() * g_psi;
+    }
+    acc
+}
+
+/// `Σ_b conj(λ[b]) · ((Π ⊗ G)ψ)[b]`, which is `⟨λ|(Π ⊗ G)|ψ⟩` for the 2×2
+/// matrix `g` on qubit `t` and `Π` the projector onto the basis states whose
+/// bits in `control` are all `1` (`control = 0`: no control, `Π = I`). The
+/// generator of a controlled gate `Π₀⊗I + Π₁⊗V(α)` is `Π₁ ⊗ (i·∂V·V†)`: not
+/// unitary, so not a gate this crate applies, only read here. Reads both
+/// buffers, allocates no third one, and sums in the fixed block order described
+/// above.
+pub(crate) fn generator_inner(
+    lambda: &[C64],
+    psi: &[C64],
+    t: usize,
+    control: usize,
+    g: &[[C64; 2]; 2],
+    parallel: bool,
+) -> C64 {
+    // `b ^ (1 << t)` must stay inside the buffer, and `control` must not name
+    // the target: callers build both from a gate's validated, distinct qubits;
+    // reaching this is a bug, and indexing would panic anyway.
+    assert!(
+        lambda.len() == psi.len()
+            && psi.len().is_power_of_two()
+            && t < usize::BITS as usize
+            && (1usize << t) < psi.len()
+            && control < psi.len()
+            && control & (1 << t) == 0
+    );
+    let len = psi.len();
+    let bit = 1usize << t;
+    let block = |k: usize| {
+        let start = k * REDUCTION_BLOCK;
+        generator_inner_block(
+            lambda,
+            psi,
+            start,
+            (start + REDUCTION_BLOCK).min(len),
+            bit,
+            control,
+            g,
+        )
+    };
+    let blocks = len.div_ceil(REDUCTION_BLOCK);
+
+    #[cfg(feature = "parallel")]
+    if parallel {
+        use rayon::prelude::*;
+        let partials: Vec<C64> = (0..blocks).into_par_iter().map(block).collect();
+        return partials
+            .into_iter()
+            .fold(C64::new(0.0, 0.0), |acc, partial| acc + partial);
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    let _ = parallel;
+
+    (0..blocks).fold(C64::new(0.0, 0.0), |acc, k| acc + block(k))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -869,6 +951,80 @@ mod tests {
         }
     }
 
+    /// A Hermitian 2×2 with distinct, non-zero entries everywhere, so a dropped
+    /// or transposed entry shows up.
+    fn hermitian() -> [[C64; 2]; 2] {
+        [
+            [C64::new(0.3, 0.0), C64::new(-0.4, 0.9)],
+            [C64::new(-0.4, -0.9), C64::new(-1.2, 0.0)],
+        ]
+    }
+
+    /// `(Π ⊗ G)` as a dense `2^n × 2^n` matrix, from its definition: entry
+    /// `(b', b)` is `g[b'_t][b_t]` when `b'` and `b` differ at most in bit `t`
+    /// and `b` has every bit of `control` set (so does `b'`, as `t` is not one
+    /// of them), `0` otherwise.
+    fn dense_projected(n: usize, t: usize, control: usize, g: &[[C64; 2]; 2]) -> Vec<Vec<C64>> {
+        let dim = 1usize << n;
+        let bit = |b: usize| (b >> t) & 1;
+        (0..dim)
+            .map(|row| {
+                (0..dim)
+                    .map(|col| {
+                        if (row ^ col) & !(1 << t) == 0 && col & control == control {
+                            g[bit(row)][bit(col)]
+                        } else {
+                            C64::new(0.0, 0.0)
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// `⟨λ|(Π ⊗ G)|ψ⟩` against the dense matrix applied by hand, for every
+    /// target, no control, one control and two controls (the kernel takes a
+    /// mask; the gates use at most one).
+    #[test]
+    fn generator_inner_matches_the_dense_projected_generator() {
+        let n = 4;
+        let psi = sample_data(n);
+        let lambda: Vec<C64> = psi.iter().rev().map(|a| a * C64::new(0.3, -0.7)).collect();
+        let g = hermitian();
+        for t in 0..n {
+            let others: Vec<usize> = (0..n).filter(|&q| q != t).collect();
+            let controls = [
+                0,
+                1 << others[0],
+                1 << others[2],
+                (1 << others[0]) | (1 << others[1]),
+            ];
+            for control in controls {
+                let m = dense_projected(n, t, control, &g);
+                let expected: C64 = (0..1usize << n)
+                    .map(|row| {
+                        let m_psi: C64 = m[row].iter().zip(&psi).map(|(e, a)| e * a).sum();
+                        lambda[row].conj() * m_psi
+                    })
+                    .sum();
+                let got = generator_inner(&lambda, &psi, t, control, &g, false);
+                assert!(
+                    (got - expected).norm() < 1e-9,
+                    "t={t} control={control:b}: {got} vs {expected}"
+                );
+            }
+        }
+    }
+
+    /// The precondition is a real `assert!`: a control naming the target is a
+    /// caller bug, refused before any read.
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn generator_inner_panics_on_a_control_that_names_the_target() {
+        let psi = sample_data(2);
+        generator_inner(&psi, &psi, 0, 0b01, &hermitian(), false);
+    }
+
     /// docs/ENGINEERING.md §4: the parallel reductions equal the sequential ones
     /// bit for bit, whatever the thread count, because the blocks and the order
     /// in which their sums are combined do not depend on it.
@@ -879,12 +1035,20 @@ mod tests {
         let psi = sample_data(n);
         let lambda: Vec<C64> = psi.iter().map(|a| a * C64::new(-0.2, 0.9)).collect();
         let masks = [(0b10, 0b10), (0b1_0000_0001, 0), (0, 0b10_0000_0000_0100)];
+        // `(target, control)`: a low and a high target (the partner inside and
+        // outside the block), with and without a control.
+        let local = [(0, 0), (13, 0), (2, 1 << 12), (12, 0b1)];
+        let g = hermitian();
 
         let mut seq_data = psi.clone();
         let seq_weigh = weigh(&mut seq_data, &weight, false);
         let seq_inner: Vec<C64> = masks
             .iter()
             .map(|&(x, z)| pauli_inner(&lambda, &psi, x, z, false))
+            .collect();
+        let seq_local: Vec<C64> = local
+            .iter()
+            .map(|&(t, control)| generator_inner(&lambda, &psi, t, control, &g, false))
             .collect();
 
         for threads in [1, 2, 3, 8] {
@@ -904,6 +1068,11 @@ mod tests {
                 assert!(par_data == seq_data, "{threads} threads");
                 for (&(x, z), seq) in masks.iter().zip(&seq_inner) {
                     let par = pauli_inner(&lambda, &psi, x, z, true);
+                    assert_eq!(par.re.to_bits(), seq.re.to_bits(), "{threads} threads");
+                    assert_eq!(par.im.to_bits(), seq.im.to_bits(), "{threads} threads");
+                }
+                for (&(t, control), seq) in local.iter().zip(&seq_local) {
+                    let par = generator_inner(&lambda, &psi, t, control, &g, true);
                     assert_eq!(par.re.to_bits(), seq.re.to_bits(), "{threads} threads");
                     assert_eq!(par.im.to_bits(), seq.im.to_bits(), "{threads} threads");
                 }
