@@ -269,8 +269,12 @@ class TestStronglyEntangling:
         for build, match in (
             (lambda a: a.strongly_entangling(2**70), f"got {2**70}"),
             (lambda a: a.strongly_entangling(1, ranges=[2**70]), f"got {2**70}"),
-            # 3 × 2 qubits × 2**62 parameters do not fit in a usize.
-            (lambda a: a.strongly_entangling(2**62), "layer 1 needs more trainable"),
+            # 3 × 2 qubits × 2**62 parameters (and more gates) do not fit in
+            # a usize.
+            (
+                lambda a: a.strongly_entangling(2**62),
+                "layer 1 needs more gates than fit",
+            ),
         ):
             with pytest.raises(ValueError, match=match):
                 build(ansatz)
@@ -420,8 +424,9 @@ class TestSimplifiedTwoDesign:
             (-1, "non-negative integer, got -1"),
             (2**64, f"got {2**64}"),
             (2**70, f"got {2**70}"),
-            # 2 × 1 pair × (2**64 − 1) parameters do not fit in a usize.
-            (2**64 - 1, "layer 1 needs more trainable"),
+            # 2 × 1 pair × (2**64 − 1) parameters (and more gates) do not fit
+            # in a usize.
+            (2**64 - 1, "layer 1 needs more gates than fit"),
         ):
             with pytest.raises(ValueError, match=match):
                 ansatz.simplified_two_design(reps)
@@ -491,6 +496,25 @@ class TestAmplitudeEncoder:
 
     def test_it_reserves_no_parameters(self):
         _assert_param_count(_amplitude_model(), 8)
+
+    def test_its_gate_count_bounds_the_qubits(self):
+        from polypus.qml import Encoder
+
+        # 2**(n+1) − 3 gates: 20 qubits fit the budget, 21 do not, and from 63
+        # on the count does not fit in a usize (once a panic, at 64).
+        assert Encoder(20).amplitude_encoder().num_layers == 1
+        encoder = Encoder(21)
+        with pytest.raises(
+            ValueError,
+            match="layer 0 takes the model to 4194301 gates, past the limit of 4000000",
+        ):
+            encoder.amplitude_encoder()
+        assert encoder.num_layers == 0
+        for num_qubits in (63, 64, 1000):
+            with pytest.raises(
+                ValueError, match="layer 0 needs more gates than fit in a usize"
+            ):
+                Encoder(num_qubits).amplitude_encoder()
 
 
 def _iqp_model(entanglement):
@@ -591,8 +615,9 @@ _COUNT_IDS = ["hardware-efficient", "real-amplitudes"]
 
 class TestCountArguments:
     """``reps`` is a count. A negative or oversized one, and a layer whose
-    parameter count does not fit, are a ``ValueError`` at the call that leaves
-    the ``Ansatz`` unchanged, never an ``OverflowError`` or a panic (contract
+    gate count does not fit in a ``usize`` or takes the model past
+    ``MAX_MODEL_GATES``, are a ``ValueError`` at the call that leaves the
+    ``Ansatz`` unchanged, never an ``OverflowError`` or a panic (contract
     C-11)."""
 
     @pytest.mark.parametrize(
@@ -631,26 +656,90 @@ class TestCountArguments:
         ],
         ids=_COUNT_IDS,
     )
-    def test_a_parameter_count_that_does_not_fit_is_a_value_error(self, build):
+    def test_a_gate_count_that_does_not_fit_is_a_value_error(self, build):
         from polypus.qml import Ansatz
 
         ansatz = Ansatz(2).real_amplitudes(1)
-        with pytest.raises(ValueError, match="layer 1 needs more trainable parameters"):
+        with pytest.raises(
+            ValueError, match="layer 1 needs more gates than fit in a usize"
+        ):
             build(ansatz)
         assert (ansatz.num_layers, ansatz.num_params) == (1, 4)
 
-    def test_a_layer_after_a_full_parameter_space_is_a_value_error(self):
+    def test_a_layer_past_the_gate_budget_is_a_value_error(self):
         from polypus.qml import Ansatz
 
-        # 2·(2**63 − 1) = 2**64 − 2 parameters still fit in a usize; the four
-        # of the convolution after them do not.
+        # [ry, rz] on 2 qubits over 2**40 + 1 blocks, and a cx per entangling
+        # block: 4·(2**40 + 1) + 2**40 gates fit in a usize, not in the budget.
+        ansatz = Ansatz(2)
+        with pytest.raises(
+            ValueError,
+            match="layer 0 takes the model to 5497558138884 gates, past the limit of 4000000",
+        ):
+            ansatz.hardware_efficient(2**40)
+        assert (ansatz.num_layers, ansatz.num_params) == (0, 0)
+        # Without rotations the layer has no parameter, but its 2**40 cx do
+        # not fit either, after the 5 gates of `real_amplitudes(1)`.
+        ansatz = Ansatz(2).real_amplitudes(1)
+        with pytest.raises(
+            ValueError, match="layer 1 takes the model to 1099511627781 gates"
+        ):
+            ansatz.hardware_efficient(2**40, rotations=[])
+        assert (ansatz.num_layers, ansatz.num_params) == (1, 4)
+
+    def test_a_layer_after_a_nearly_full_budget_is_a_value_error(self):
+        from polypus.qml import Ansatz
+
+        # 1 333 333 blocks of one rx on 2 qubits and one cx: 3 999 999 gates,
+        # within the budget; the 5 of the convolution after them are not.
         ansatz = Ansatz(2).hardware_efficient(
-            2**63 - 1, rotations=["rx"], final_rotation_layer=False
+            1_333_333, rotations=["rx"], final_rotation_layer=False
         )
-        assert ansatz.num_params == 2**64 - 2
-        with pytest.raises(ValueError, match="layer 1 needs more trainable parameters"):
+        assert ansatz.num_params == 2_666_666
+        with pytest.raises(
+            ValueError,
+            match="layer 1 takes the model to 4000004 gates, past the limit of 4000000",
+        ):
             ansatz.conv("basic")
-        assert (ansatz.num_layers, ansatz.num_params) == (1, 2**64 - 2)
+        assert (ansatz.num_layers, ansatz.num_params) == (1, 2_666_666)
+        # 2**64 − 1 gates fit in a usize on their own, but not after the one
+        # before them: an overflow, not the budget.
+        ansatz = Ansatz(1).real_amplitudes(0)
+        with pytest.raises(
+            ValueError, match="layer 1 needs more gates than fit in a usize"
+        ):
+            ansatz.real_amplitudes(2**64 - 2)
+        with pytest.raises(
+            ValueError, match="layer 0 takes the model to 18446744073709551615"
+        ):
+            Ansatz(1).real_amplitudes(2**64 - 2)
+
+    def test_no_rotation_on_one_qubit_builds_its_circuit_whatever_the_reps(self):
+        import subprocess
+        import sys
+        import textwrap
+
+        # No rotation and no pair: no gate for any reps, so the budget accepts
+        # 2**62 blocks, and the circuit must not take time in them. In a child
+        # process with a timeout, so that a regression fails instead of hanging.
+        code = textwrap.dedent(
+            """
+            from polypus.qml import Ansatz, Encoder, Model, Readout, Z
+
+            def circuit(ansatz):
+                model = Model(Encoder(1).angle_encoder("ry"), ansatz, Readout([Z(0)]))
+                return model.circuit([0.5], [0.1, 0.2]).to_qasm2()
+
+            base = Ansatz(1).real_amplitudes(1)
+            empty = Ansatz(1).real_amplitudes(1).hardware_efficient(2**62, rotations=[])
+            print("RESULT", circuit(empty) == circuit(base))
+            """
+        )
+        child = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+        )
+        assert child.returncode == 0, child.stdout + child.stderr
+        assert "RESULT True" in child.stdout, child.stdout
 
     @pytest.mark.parametrize(
         "build",
@@ -696,6 +785,15 @@ class TestQubitCountsAndPositions:
     def test_zero_qubits_keeps_its_own_message(self, cls):
         with pytest.raises(ValueError, match=f"{cls} needs at least one qubit"):
             _qml(cls)(0)
+
+    @pytest.mark.parametrize("cls", ["Encoder", "Ansatz"])
+    def test_more_qubits_than_the_limit_is_a_value_error(self, cls):
+        with pytest.raises(
+            ValueError,
+            match=f"{cls} takes at most 1000000 qubits, got num_qubits=1000001",
+        ):
+            _qml(cls)(10**6 + 1)
+        assert _qml(cls)(10**6).num_qubits == 10**6
 
     @pytest.mark.parametrize("cls", ["Encoder", "Ansatz"])
     @pytest.mark.parametrize("value", ["3", 3.0], ids=["str", "float"])

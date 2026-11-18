@@ -15,7 +15,7 @@
 use polypus_circuit::{GateInstruction, Param, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
-use crate::layers::even_pairs;
+use crate::layers::{even_pair_count, even_pairs};
 use crate::model::{InputTrace, LayerAllocation, LayerContext, LayerOps};
 
 /// The two-qubit block emitted on every pooled pair.
@@ -84,8 +84,10 @@ impl LayerOps for PoolLayer {
         if active < 2 {
             return Err(ValidationError::PoolNeedsTwoQubits { active });
         }
-        // Parameter sharing: reserve the block's θ once for the whole layer.
-        let params = ctx.reserve(self.param_count())?;
+        // Parameter sharing: reserve the block's θ once for the whole layer,
+        // while every pair gets the block's four gates ([`emit_basic`]).
+        let gates = even_pair_count(active).checked_mul(4);
+        let params = ctx.reserve(gates, Some(self.param_count()))?;
 
         // The allocation snapshots the active set *before* pooling — `emit`
         // needs it to map every logical position to its physical qubit.
@@ -162,6 +164,7 @@ fn emit_basic(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::SizeLimit;
 
     fn ctx(num_qubits: usize) -> LayerContext {
         LayerContext {
@@ -169,6 +172,7 @@ mod tests {
             num_features: 0,
             param_cursor: 0,
             layers_planned: 0,
+            gate_count: 0,
         }
     }
 
@@ -266,7 +270,26 @@ mod tests {
     }
 
     #[test]
-    fn plan_rejects_parameters_that_do_not_fit_after_the_earlier_ones() {
+    fn plan_rejects_counts_that_do_not_fit_after_the_earlier_ones() {
+        let overflow = ValidationError::ModelTooLarge {
+            layer: 4,
+            reason: SizeLimit::Overflow,
+        };
+        // The 8 gates of two pairs after the earlier ones'.
+        let mut c = LayerContext {
+            gate_count: usize::MAX - 7,
+            layers_planned: 4,
+            ..ctx(4)
+        };
+        assert_eq!(
+            PoolLayer::new(PoolBlock::Basic).plan(&mut c).unwrap_err(),
+            overflow
+        );
+        // Neither the counts nor the active qubits change.
+        assert_eq!((c.param_cursor, c.gate_count), (0, usize::MAX - 7));
+        assert_eq!(c.active, vec![0, 1, 2, 3]);
+        // The shared θ after the earlier ones' (a state `compile` cannot
+        // reach, see `LayerContext::reserve`): refused the same way.
         let mut c = LayerContext {
             param_cursor: usize::MAX - 1,
             layers_planned: 4,
@@ -274,11 +297,14 @@ mod tests {
         };
         assert_eq!(
             PoolLayer::new(PoolBlock::Basic).plan(&mut c).unwrap_err(),
-            ValidationError::TooManyParams { layer: 4 }
+            overflow
         );
-        // Neither the cursor nor the active qubits change.
-        assert_eq!(c.param_cursor, usize::MAX - 1);
+        assert_eq!((c.param_cursor, c.gate_count), (usize::MAX - 1, 0));
         assert_eq!(c.active, vec![0, 1, 2, 3]);
+        // Within the budget, the pool counts its gates.
+        let mut c = ctx(4);
+        PoolLayer::new(PoolBlock::Basic).plan(&mut c).unwrap();
+        assert_eq!(c.gate_count, 8);
     }
 
     /// The active set pooling leaves, computed the slow, obvious way: list the

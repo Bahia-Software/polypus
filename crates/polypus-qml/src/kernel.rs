@@ -876,6 +876,39 @@ mod tests {
     }
 
     #[test]
+    fn compile_bounds_the_qubits_and_the_gates() {
+        let angle = || vec![Layer::AngleEncoder(AngleEncoder::new(RotationAxis::Ry))];
+        for num_qubits in [crate::MAX_MODEL_QUBITS + 1, usize::MAX] {
+            assert_eq!(
+                FeatureMap::compile(num_qubits, angle(), 1).unwrap_err(),
+                ValidationError::TooManyQubits {
+                    num_qubits,
+                    max_qubits: 1_000_000,
+                }
+            );
+        }
+        // The limit itself compiles, with a feature on every qubit.
+        let map = FeatureMap::compile(crate::MAX_MODEL_QUBITS, angle(), 1_000_000).unwrap();
+        assert_eq!(map.num_qubits(), 1_000_000);
+        // 21 qubits of amplitude encoding are 2^22 − 3 gates, past the budget.
+        assert_eq!(
+            FeatureMap::compile(
+                21,
+                vec![Layer::AmplitudeEncoder(crate::AmplitudeEncoder)],
+                1
+            )
+            .unwrap_err(),
+            ValidationError::ModelTooLarge {
+                layer: 0,
+                reason: crate::SizeLimit::Budget {
+                    gates: 4_194_301,
+                    max_gates: crate::MAX_MODEL_GATES,
+                },
+            }
+        );
+    }
+
+    #[test]
     fn samples_are_checked_at_construction_x_before_y() {
         let map = angle_map(2, 2);
         let good = [vec![0.1, 0.2]];
