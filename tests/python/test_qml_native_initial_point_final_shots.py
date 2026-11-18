@@ -254,7 +254,11 @@ class TestStartingPoint:
     def test_the_optimizer_starts_at_the_point(self, monkeypatch, name):
         batches = _record_batches(monkeypatch)
         result = _fit(_method(name), initial_point=POINT)
-        first = [_candidate(qc) for qc in batches[0]]
+        # The QML oracle hands a batch to the seam in windows of
+        # available_parallelism() × 2 candidates, so with two CPUs or fewer the
+        # first batch spans several calls (#475): read the circuits in order
+        # across every call and take the first batch's worth.
+        sent = [_candidate(qc) for batch in batches for qc in batch]
         p0, p1 = POINT
         if name == "qng":
             # The finite-difference stencil around θ₀ = POINT.
@@ -264,6 +268,7 @@ class TestStartingPoint:
                 [p0, p1 + QNG_STEP],
                 [p0, p1 - QNG_STEP],
             ]
+            first = sent[: len(stencil)]
             assert len(first) == len(stencil)
             for got, want in zip(first, stencil):
                 assert got == pytest.approx(want, abs=1e-12)
@@ -277,6 +282,7 @@ class TestStartingPoint:
                 [p0, p1 + shift],
                 [p0, p1 - shift],
             ]
+            first = sent[: len(batch)]
             assert len(first) == len(batch)
             assert first[0] == POINT
             for got, want in zip(first, batch):
@@ -284,7 +290,6 @@ class TestStartingPoint:
         elif name == "spsa":
             # 25 pairs θ₀ ± c·Δ around θ₀ = POINT, then the first iteration
             # measures θ₀ first.
-            sent = [_candidate(qc) for batch in batches for qc in batch]
             calibration = sent[:50]
             for plus, minus in zip(calibration[::2], calibration[1::2]):
                 assert [(a + b) / 2 for a, b in zip(plus, minus)] == pytest.approx(
@@ -296,12 +301,13 @@ class TestStartingPoint:
             assert sent[50] == POINT
         elif name == "cmaes":
             # 4 + floor(3 ln 2) = 6 candidates, all on the first mean.
+            first = sent[:6]
             assert len(first) == 6
             for got in first:
                 assert got == pytest.approx(POINT, abs=1e-6)
         else:
             # DE's first member, PSO's first particle, Rotosolve's θ₀.
-            assert first[0] == POINT
+            assert sent[0] == POINT
         assert len(result.best_params) == NUM_PARAMS
 
     def test_de_wraps_the_point_and_draws_the_rest_as_without_it(self, monkeypatch):
