@@ -1,42 +1,7 @@
 //! Measuring a sum of multi-qubit Pauli strings from computational-basis
 //! counts: qubit-wise-commuting grouping and a parity reducer (issue #530).
-//!
-//! Hardware measures every qubit in the `Z` basis. A term with `X` or `Y`
-//! factors is measured by rotating those qubits first (`H` for `X`; `S†` then
-//! `H` for `Y`), after which the term reads as a product of `Z`s on the same
-//! qubits. Terms that agree on the Pauli of every qubit they share
-//! (*qubit-wise commuting*) share one rotation, hence one circuit:
-//! [`group_qubit_wise`] partitions a sum into such groups, and each group's
-//! [`ParityObservable`] turns that circuit's counts into the group's
-//! contribution. The energy is [`Grouping::constant`] plus the sum of the
-//! groups' values.
-//!
-//! ## Design decisions (recorded here, as issue #530 asks)
-//!
-//! 1. **Own bitmask type, not `polypus-physics`' `PauliSum`.** A
-//!    [`PauliMask`] stores a string as two `u64` masks (`X → (1, 0)`,
-//!    `Z → (0, 1)`, `Y → (1, 1)` per qubit), so qubit-wise commutation and
-//!    parity are a few bit operations. The price is a limit of
-//!    [`MAX_QUBITS`] = 64 qubits. This crate does not depend on
-//!    `polypus-physics`; converting a `PauliSum` term by term is the caller's
-//!    job (the oracle of #424), and the physics crate is a test-only
-//!    dependency here.
-//! 2. **Not unified with `polypus-qml`'s Pauli types.** `polypus-qml`'s
-//!    `PauliString` names *logical* positions of a model, resolved to physical
-//!    qubits when the model is compiled; the types here act on physical
-//!    qubits. What the two crates share is the algorithms: `polypus-qml`'s
-//!    `DiagonalObservable` is the same parity reduction, and its readout
-//!    grouping is the same greedy qubit-wise grouping, so it can call these
-//!    once its indices are physical (follow-up issue).
-//! 3. **Identity terms are a constant, not a group.** Their value is the same
-//!    in every state, so no shots are spent on them: [`group_qubit_wise`] sums
-//!    them into [`Grouping::constant`]. A [`ParityObservable`] still accepts a
-//!    mask-0 term (always `+c`), as `polypus-qml`'s `DiagonalObservable` does.
-//!
-//! ## Bit ordering
-//!
-//! Qubit `i` is bit `i` of a mask and the character at position `w - 1 - i` of
-//! a counts key of width `w`, the crate-wide convention (see the crate docs).
+//! The design and its decisions are documented in the crate docs, section
+//! "Pauli sums", where every public item here is re-exported.
 
 use std::collections::HashMap;
 
@@ -47,6 +12,44 @@ use crate::{CostObservable, ObservableError};
 /// The largest number of qubits a [`PauliMask`] or [`ParityObservable`] can
 /// address: one bit of a `u64` per qubit.
 pub const MAX_QUBITS: usize = 64;
+
+/// The largest accepted `Σ_k |c_k| · |scale|`: `f64::MAX / 2⁶⁵`, about
+/// `4.9e288`.
+///
+/// It bounds every value the reducers compute, so none overflows:
+///
+/// - The value of one bitstring is at most the bound: rounding is monotonic,
+///   so each partial sum of `±c_k` stays within the matching partial sum of
+///   `|c_k|`, and the same holds after the multiplication by `scale`.
+/// - A count-weighted sum weighs those values by counts whose total is at most
+///   `u64::MAX < 2⁶⁴` (a larger total is an error, see
+///   [`ParityObservable`]'s `CostObservable` implementation), and an exact
+///   expectation weighs them by probabilities of at most `1`, at most `2⁶⁴`
+///   of them. Without rounding, either sum is below `bound · 2⁶⁴`.
+/// - Rounding (of each count to `f64`, of each product and of each addition)
+///   multiplies that by at most `(1 + 2⁻⁵³)^(k + 2)` for `k` summed terms,
+///   which stays below `2` for any `k` below `2⁵¹`, far more keys or
+///   probabilities than fit in memory. The extra factor `2` in the bound
+///   absorbs it, so both sums stay below `bound · 2⁶⁵ = f64::MAX`.
+pub const MAX_WEIGHT_BOUND: f64 = f64::MAX / 36_893_488_147_419_103_232.0;
+
+/// `Σ |c|` over `coefficients`, summed in order, times `|scale|`; an error
+/// unless it is at most [`MAX_WEIGHT_BOUND`] (a non-finite or `NaN` input
+/// fails too).
+fn check_weight_bound(
+    coefficients: impl Iterator<Item = f64>,
+    scale: f64,
+) -> Result<(), ObservableError> {
+    let bound = coefficients.fold(0.0, |sum, c| sum + c.abs()) * scale.abs();
+    if bound <= MAX_WEIGHT_BOUND {
+        Ok(())
+    } else {
+        Err(ObservableError::Invalid(format!(
+            "Σ|c|·|scale| = {bound:e} exceeds {MAX_WEIGHT_BOUND:e}: a value or \
+             a weighted mean of counts could overflow"
+        )))
+    }
+}
 
 /// A single-qubit Pauli operator. The identity is not a variant: it is the
 /// absence of an operator on that qubit.
@@ -60,10 +63,26 @@ pub enum Pauli {
     Z,
 }
 
+/// The gates that rotate one qubit's measured Pauli onto `Z`, so that a
+/// computational-basis measurement reads it. `Z` needs none.
+///
+/// Each variant names its gates **in application order**: the order matters,
+/// and so does `S†` versus `S`. `S` then `H` maps `Y` to `−Z`, which flips
+/// the sign of every term with an odd number of `Y`; `H` then `S†` measures
+/// `X` instead of `Y`, since a diagonal gate just before a `Z` measurement
+/// changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BasisRotation {
+    /// `H`, to measure `X` (`H·X·H = Z`).
+    H,
+    /// `S†` first, then `H`, to measure `Y` (`H·S†·Y·S·H = Z`).
+    SdgThenH,
+}
+
 /// A tensor product of Pauli operators on distinct qubits (`X₀Y₂Z₃`), stored
 /// as two bitmasks: bit `i` of `x` is set for `X` or `Y` on qubit `i`, bit `i`
 /// of `z` for `Z` or `Y`. The empty string is the identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PauliMask {
     x: u64,
     z: u64,
@@ -171,8 +190,9 @@ impl ParityObservable {
     /// # Errors
     ///
     /// [`ObservableError::Invalid`] if `num_qubits` is `0` or above
-    /// [`MAX_QUBITS`], a mask selects a qubit `>= num_qubits`, or a coefficient
-    /// or `scale` is not finite.
+    /// [`MAX_QUBITS`], a mask selects a qubit `>= num_qubits`, a coefficient
+    /// or `scale` is not finite, or `Σ|c|·|scale|` exceeds
+    /// [`MAX_WEIGHT_BOUND`], above which a result could overflow.
     pub fn new(
         num_qubits: usize,
         terms: Vec<(f64, u64)>,
@@ -199,6 +219,7 @@ impl ParityObservable {
                 )));
             }
         }
+        check_weight_bound(terms.iter().map(|&(c, _)| c), scale)?;
         Ok(ParityObservable {
             num_qubits,
             terms,
@@ -236,7 +257,8 @@ impl ParityObservable {
     /// # Errors
     ///
     /// [`ObservableError::Invalid`] if the length is not a power of two of at
-    /// least `2^num_qubits`, or a probability is negative or not finite.
+    /// least `2^num_qubits`, or a probability is not in `[0, 1]` (which also
+    /// rejects `NaN`).
     pub fn expectation_from_probabilities(
         &self,
         probabilities: &[f64],
@@ -251,7 +273,7 @@ impl ParityObservable {
         }
         let mut sum = 0.0;
         for (index, &p) in probabilities.iter().enumerate() {
-            if !p.is_finite() || p < 0.0 {
+            if !(0.0..=1.0).contains(&p) {
                 return Err(ObservableError::Invalid(format!(
                     "probability {p} of basis state {index} is not a probability"
                 )));
@@ -284,7 +306,8 @@ impl ParityObservable {
 
     /// Count-weighted mean over one candidate's counts, in ascending bitstring
     /// order so the result does not depend on `HashMap` iteration order.
-    /// Empty counts (or counts summing to zero) yield `0.0`.
+    /// Empty counts (or counts summing to zero) yield `0.0`; counts whose total
+    /// exceeds `u64::MAX` are an [`ObservableError::Invalid`].
     fn expectation_one(&self, counts: &HashMap<String, u64>) -> Result<f64, ObservableError> {
         let mut outcomes: Vec<(&str, u64)> =
             counts.iter().map(|(key, &n)| (key.as_str(), n)).collect();
@@ -293,7 +316,11 @@ impl ParityObservable {
         let mut den = 0u64;
         for (key, n) in outcomes {
             num += self.value(self.decode(key)?) * n as f64;
-            den += n;
+            // A total above u64::MAX would trap (overflow checks are on in
+            // release too) and would break the bound of `MAX_WEIGHT_BOUND`.
+            den = den.checked_add(n).ok_or_else(|| {
+                ObservableError::Invalid("the total of the counts overflows u64".to_string())
+            })?;
         }
         Ok(if den == 0 { 0.0 } else { num / den as f64 })
     }
@@ -324,14 +351,15 @@ impl MeasurementGroup {
         self.basis
     }
 
-    /// The rotations to append before measuring, as the `X`/`Y` qubits of the
-    /// basis in ascending order: `H` for `X`, `S†` then `H` for `Y`. `Z`
-    /// qubits need none.
-    pub fn rotations(&self) -> Vec<(usize, Pauli)> {
+    /// The rotations to append before measuring, one per `X`/`Y` qubit of
+    /// the basis, in ascending qubit order: [`BasisRotation::H`] for `X`,
+    /// [`BasisRotation::SdgThenH`] for `Y`. `Z` qubits need none.
+    pub fn rotations(&self) -> Vec<(usize, BasisRotation)> {
         (0..MAX_QUBITS)
             .filter_map(|qubit| match self.basis.pauli(qubit) {
+                Some(Pauli::X) => Some((qubit, BasisRotation::H)),
+                Some(Pauli::Y) => Some((qubit, BasisRotation::SdgThenH)),
                 Some(Pauli::Z) | None => None,
-                Some(pauli) => Some((qubit, pauli)),
             })
             .collect()
     }
@@ -378,7 +406,9 @@ impl Grouping {
 /// # Errors
 ///
 /// [`ObservableError::Invalid`] if `num_qubits > MAX_QUBITS`, a term acts on a
-/// qubit `>= num_qubits`, or a coefficient is not finite.
+/// qubit `>= num_qubits`, a coefficient is not finite, or `Σ|c|` over all
+/// terms exceeds [`MAX_WEIGHT_BOUND`], so neither the constant nor the total
+/// (the constant plus every group's value) can overflow.
 pub fn group_qubit_wise(
     num_qubits: usize,
     terms: &[(f64, PauliMask)],
@@ -424,6 +454,7 @@ pub fn group_qubit_wise(
             }),
         }
     }
+    check_weight_bound(terms.iter().map(|&(c, _)| c), 1.0)?;
     let groups = open
         .into_iter()
         .map(|group| {
@@ -510,7 +541,8 @@ mod tests {
     #[test]
     fn parity_value_and_bit_order() {
         // f = 2·Z0 + 3·Z1Z2 + 0.5·I. Key "011": qubit 0 = 1, qubit 1 = 1,
-        // qubit 2 = 0 → Z0 = −1, Z1Z2 = −1 → −2 − 3 + 0.5.
+        // qubit 2 = 0 → Z0 = −1, Z1Z2 = −1 → −2 − 3 + 0.5. Compared exactly:
+        // every value and partial sum is dyadic, so no rounding occurs.
         let obs =
             ParityObservable::new(3, vec![(2.0, 0b001), (3.0, 0b110), (0.5, 0)], 1.0).unwrap();
         let ev = obs
@@ -529,7 +561,7 @@ mod tests {
                 counts(&[("1", 0)]),
             ])
             .unwrap();
-        // ⟨Z⟩ = (3 − 1)/4 = 0.5, scaled by −2.
+        // ⟨Z⟩ = (3 − 1)/4 = 0.5, scaled by −2. Exact: dyadic values.
         assert_eq!(ev, vec![-1.0, 0.0, 0.0]);
     }
 
@@ -548,6 +580,7 @@ mod tests {
             Err(ObservableError::InvalidBitstring(_))
         ));
         // Bits beyond num_qubits are neither read nor validated, as in QUBO.
+        // Exact: ±1 sums.
         assert_eq!(
             obs.expectation_batch(&[counts(&[("x101", 1)])]).unwrap(),
             vec![-1.0]
@@ -559,9 +592,87 @@ mod tests {
         assert!(ParityObservable::new(0, vec![], 1.0).is_err());
         assert!(ParityObservable::new(MAX_QUBITS + 1, vec![], 1.0).is_err());
         assert!(ParityObservable::new(2, vec![(1.0, 0b100)], 1.0).is_err());
-        assert!(ParityObservable::new(2, vec![(f64::NAN, 0b1)], 1.0).is_err());
+        // The specific message, not just any error: the weight bound would
+        // also reject a NaN, but without naming the term.
+        let nan = ParityObservable::new(2, vec![(1.0, 0b1), (f64::NAN, 0b1)], 1.0);
+        assert!(
+            matches!(&nan, Err(ObservableError::Invalid(m)) if m == "coefficient of term 1 is not finite"),
+            "{nan:?}"
+        );
         assert!(ParityObservable::new(2, vec![(1.0, 0b1)], f64::INFINITY).is_err());
         assert!(ParityObservable::new(MAX_QUBITS, vec![(1.0, u64::MAX)], 1.0).is_ok());
+    }
+
+    #[test]
+    fn coefficient_sums_that_could_overflow_are_rejected() {
+        // Each coefficient is finite, their sum is not.
+        assert!(ParityObservable::new(1, vec![(1e308, 0), (1e308, 0b1)], 1.0).is_err());
+        // The scale counts: 1e200 · 1e100 exceeds the bound.
+        assert!(ParityObservable::new(1, vec![(1e200, 0b1)], 1e100).is_err());
+        assert!(ParityObservable::new(1, vec![(1e200, 0b1)], 1.0).is_ok());
+        // Exactly at the bound is accepted, the next float above it is not.
+        let above = f64::from_bits(MAX_WEIGHT_BOUND.to_bits() + 1);
+        assert!(ParityObservable::new(1, vec![(MAX_WEIGHT_BOUND, 0b1)], 1.0).is_ok());
+        assert!(ParityObservable::new(1, vec![(above, 0b1)], 1.0).is_err());
+        assert!(ParityObservable::new(1, vec![(MAX_WEIGHT_BOUND, 0b1)], -1.0).is_ok());
+        assert!(ParityObservable::new(1, vec![(MAX_WEIGHT_BOUND, 0b1)], 2.0).is_err());
+    }
+
+    #[test]
+    fn the_weight_bound_keeps_every_result_finite() {
+        // The bound is f64::MAX / 2⁶⁵ exactly (scaling by a power of two is
+        // exact): 2⁶⁴ for the counts, and a factor 2 for rounding.
+        assert_eq!(MAX_WEIGHT_BOUND * 2f64.powi(65), f64::MAX);
+        // At the bound, the largest possible count-weighted sum stays finite:
+        // one value of magnitude MAX_WEIGHT_BOUND seen u64::MAX times.
+        let obs = ParityObservable::new(1, vec![(MAX_WEIGHT_BOUND, 0b1)], 1.0).unwrap();
+        // Exact: one value times a count, divided by the same count (both
+        // round to 2⁶⁴, a power of two).
+        let mean = obs
+            .expectation_batch(&[counts(&[("1", u64::MAX)])])
+            .unwrap()[0];
+        assert_eq!(mean, -MAX_WEIGHT_BOUND);
+        // The worst case for the sum: two keys of the same sign (qubit 0 set
+        // in both; opposite signs would cancel) whose counts total exactly
+        // u64::MAX and both round up when converted to f64, so the sum before
+        // dividing exceeds MAX_WEIGHT_BOUND · 2⁶⁴: the case the factor 2 of
+        // the bound is for.
+        let a: u64 = (1 << 63) + 1025;
+        let b: u64 = u64::MAX - a;
+        assert!((a as f64) as u128 > a as u128 && (b as f64) as u128 > b as u128);
+        // Exactly (in u128, as f64 addition would round it back): 2⁶⁴ + 1024.
+        assert_eq!(
+            (a as f64) as u128 + (b as f64) as u128,
+            (1u128 << 64) + 1024
+        );
+        let obs2 = ParityObservable::new(2, vec![(MAX_WEIGHT_BOUND, 0b01)], 1.0).unwrap();
+        let mean = obs2
+            .expectation_batch(&[counts(&[("01", a), ("11", b)])])
+            .unwrap()[0];
+        assert!(mean.is_finite());
+        assert!(
+            (mean + MAX_WEIGHT_BOUND).abs() <= 1e-15 * MAX_WEIGHT_BOUND,
+            "{mean}"
+        );
+        // And an exact expectation with every probability at its largest, 1.
+        // Exact: ±MAX_WEIGHT_BOUND times 0 or 1, and a sum with 0 or ±B.
+        let exact = obs.expectation_from_probabilities(&[1.0, 1.0]).unwrap();
+        assert_eq!(exact, 0.0);
+        let exact = obs.expectation_from_probabilities(&[0.0, 1.0]).unwrap();
+        assert_eq!(exact, -MAX_WEIGHT_BOUND);
+    }
+
+    #[test]
+    fn a_count_total_above_u64_is_an_error_not_a_panic() {
+        let obs = ParityObservable::new(2, vec![(1.0, 0b01)], 1.0).unwrap();
+        let result = obs.expectation_batch(&[counts(&[("00", u64::MAX), ("10", 1)])]);
+        assert!(
+            matches!(&result, Err(ObservableError::Invalid(m)) if m.contains("overflows u64")),
+            "{result:?}"
+        );
+        // Exactly u64::MAX in total is fine.
+        let result = obs.expectation_batch(&[counts(&[("00", u64::MAX - 1), ("10", 1)])]);
+        assert!(result.unwrap()[0].is_finite());
     }
 
     #[test]
@@ -569,6 +680,7 @@ mod tests {
         let obs =
             ParityObservable::new(MAX_QUBITS, vec![(1.0, 1u64 << 63), (1.0, 1)], 1.0).unwrap();
         let key = format!("1{}", "0".repeat(63));
+        // Exact: −1 + 1.
         assert_eq!(
             obs.expectation_batch(&[counts(&[(&key, 1)])]).unwrap(),
             vec![0.0]
@@ -578,6 +690,7 @@ mod tests {
     #[test]
     fn probabilities_are_validated() {
         let obs = ParityObservable::new(2, vec![(1.0, 0b10)], 1.0).unwrap();
+        // Exact: dyadic probabilities, 0.25 + 0.25 − 0.5 − 0.
         assert_eq!(
             obs.expectation_from_probabilities(&[0.25, 0.25, 0.5, 0.0])
                 .unwrap(),
@@ -594,6 +707,16 @@ mod tests {
         assert!(obs
             .expectation_from_probabilities(&[f64::NAN, 0.0, 0.0, 0.0])
             .is_err());
+        // A probability is at most 1 (else the weight bound would not hold).
+        assert!(obs
+            .expectation_from_probabilities(&[1.5, 0.0, 0.0, 0.0])
+            .is_err());
+        assert!(obs
+            .expectation_from_probabilities(&[1e300, 0.0, 0.0, 0.0])
+            .is_err());
+        assert!(obs
+            .expectation_from_probabilities(&[1.0, 0.0, 0.0, 0.0])
+            .is_ok());
     }
 
     #[test]
@@ -608,17 +731,18 @@ mod tests {
             (5.0, mask(&[(0, Pauli::Y)])),
         ];
         let grouping = group_qubit_wise(2, &terms).unwrap();
+        // Exact: 0.5 − 0.25, dyadic.
         assert_eq!(grouping.constant(), 0.25);
         let indices: Vec<&[usize]> = grouping.groups().iter().map(|g| g.term_indices()).collect();
         assert_eq!(indices, vec![&[0, 3][..], &[2, 4][..], &[6][..]]);
-        let rotations: Vec<Vec<(usize, Pauli)>> =
+        let rotations: Vec<Vec<(usize, BasisRotation)>> =
             grouping.groups().iter().map(|g| g.rotations()).collect();
         assert_eq!(
             rotations,
             vec![
                 vec![],
-                vec![(0, Pauli::X), (1, Pauli::X)],
-                vec![(0, Pauli::Y)]
+                vec![(0, BasisRotation::H), (1, BasisRotation::H)],
+                vec![(0, BasisRotation::SdgThenH)]
             ]
         );
         assert_eq!(
@@ -630,12 +754,27 @@ mod tests {
     #[test]
     fn grouping_rejects_invalid_input() {
         let z2 = mask(&[(2, Pauli::Z)]);
-        assert!(group_qubit_wise(2, &[(1.0, z2)]).is_err());
+        // The specific message: building the group's reducer would also fail,
+        // but without naming the term.
+        let outside = group_qubit_wise(2, &[(1.0, z2)]);
+        assert!(
+            matches!(&outside, Err(ObservableError::Invalid(m)) if m == "term 0 acts outside 2 qubits"),
+            "{outside:?}"
+        );
         assert!(group_qubit_wise(3, &[(f64::NAN, z2)]).is_err());
         assert!(group_qubit_wise(MAX_QUBITS + 1, &[]).is_err());
+        // The bound is over all terms: identity terms alone (the constant)
+        // and terms spread over several groups both count.
+        let identity = PauliMask::identity();
+        assert!(group_qubit_wise(1, &[(1e308, identity), (1e308, identity)]).is_err());
+        let x0 = mask(&[(0, Pauli::X)]);
+        let z0 = mask(&[(0, Pauli::Z)]);
+        assert!(group_qubit_wise(1, &[(1e308, x0), (1e308, z0)]).is_err());
+        assert!(group_qubit_wise(1, &[(1e280, x0), (1e280, z0)]).is_ok());
         // Only identity terms: no groups, even over zero qubits.
         let only_constant = group_qubit_wise(0, &[(1.5, PauliMask::identity())]).unwrap();
         assert!(only_constant.groups().is_empty());
+        // Exact: 0 + 1.5.
         assert_eq!(only_constant.constant(), 1.5);
     }
 }

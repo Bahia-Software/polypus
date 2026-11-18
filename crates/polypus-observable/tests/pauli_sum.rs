@@ -1,13 +1,15 @@
 //! Acceptance tests of issue #530: qubit-wise-commuting grouping of the
 //! 4-qubit Jordan–Wigner H2 Hamiltonian, and the parity reducer against the
 //! simulator's exact `⟨Z…Z⟩`, against seeded samples, and against
-//! `IsingObservable`.
+//! `IsingObservable`. Also the documented basis rotations (`H` for `X`; `S†`
+//! then `H` for `Y`), end to end on states with complex amplitudes.
 
 use std::collections::HashMap;
 
 use polypus_circuit::{GateInstruction, GateParam};
 use polypus_observable::{
-    group_qubit_wise, CostObservable, IsingObservable, ParityObservable, Pauli, PauliMask,
+    group_qubit_wise, BasisRotation, CostObservable, Grouping, IsingObservable, ParityObservable,
+    Pauli, PauliMask,
 };
 use polypus_physics::chemistry::{H2Encoding, H2Molecule};
 use polypus_physics::hamiltonians::{PauliAxis, PauliSum, PhysicsHamiltonian};
@@ -71,6 +73,61 @@ fn entangled_state() -> Statevector {
     state
 }
 
+/// `⟨ψ|Σ c P|ψ⟩` measured the way issue #424 will: per group, rotate a copy
+/// of the state with the gates each `BasisRotation` names, in its order
+/// (`H`; or `S†` then `H`), reduce its exact probabilities, then add the
+/// constant.
+fn grouped_expectation(state: &Statevector, grouping: &Grouping) -> f64 {
+    let mut value = grouping.constant();
+    for group in grouping.groups() {
+        let mut rotated = state.clone();
+        for (qubit, rotation) in group.rotations() {
+            let gates = match rotation {
+                BasisRotation::H => vec![GateInstruction::H(qubit)],
+                BasisRotation::SdgThenH => {
+                    vec![GateInstruction::Sdg(qubit), GateInstruction::H(qubit)]
+                }
+            };
+            for gate in &gates {
+                rotated.apply(gate).unwrap();
+            }
+        }
+        value += group
+            .observable()
+            .expectation_from_probabilities(&rotated.probabilities())
+            .unwrap();
+    }
+    value
+}
+
+/// `⟨ψ|Σ c P|ψ⟩` computed independently of any basis rotation: apply each
+/// string's `X`/`Y`/`Z` gates to a copy of the state and take the inner
+/// product with the original.
+fn direct_expectation(state: &Statevector, terms: &[(f64, Vec<(usize, Pauli)>)]) -> f64 {
+    let mut value = 0.0;
+    for (coefficient, ops) in terms {
+        let mut image = state.clone();
+        for &(qubit, pauli) in ops {
+            let gate = match pauli {
+                Pauli::X => GateInstruction::X(qubit),
+                Pauli::Y => GateInstruction::Y(qubit),
+                Pauli::Z => GateInstruction::Z(qubit),
+            };
+            image.apply(&gate).unwrap();
+        }
+        let (mut re, mut im) = (0.0, 0.0);
+        for (a, b) in state.amplitudes().iter().zip(image.amplitudes()) {
+            let product = a.conj() * b;
+            re += product.re;
+            im += product.im;
+        }
+        // A Pauli string is Hermitian: its expectation is real.
+        assert!(im.abs() < 1e-12, "⟨P⟩ has imaginary part {im}");
+        value += coefficient * re;
+    }
+    value
+}
+
 #[test]
 fn h2_groups_cover_every_term_once_and_commute_qubit_wise() {
     let terms = to_masks(&h2());
@@ -99,6 +156,7 @@ fn h2_groups_cover_every_term_once_and_commute_qubit_wise() {
             assert_eq!(seen[index], 1, "term {index} is in {} groups", seen[index]);
         }
     }
+    // Exact: the constant is the same additions, in the same order.
     assert_eq!(grouping.constant(), identity);
     assert_ne!(identity, 0.0);
 
@@ -116,20 +174,7 @@ fn h2_energy_from_rotated_groups_equals_the_dense_expectation() {
     let grouping = group_qubit_wise(NUM_QUBITS, &to_masks(&sum)).unwrap();
     let state = entangled_state();
 
-    let mut energy = grouping.constant();
-    for group in grouping.groups() {
-        let mut rotated = state.clone();
-        for (qubit, pauli) in group.rotations() {
-            if pauli == Pauli::Y {
-                rotated.apply(&GateInstruction::Sdg(qubit)).unwrap();
-            }
-            rotated.apply(&GateInstruction::H(qubit)).unwrap();
-        }
-        energy += group
-            .observable()
-            .expectation_from_probabilities(&rotated.probabilities())
-            .unwrap();
-    }
+    let energy = grouped_expectation(&state, &grouping);
 
     let matrix = sum.to_dense_real().unwrap();
     let psi: Vec<f64> = state.amplitudes().iter().map(|a| a.re).collect();
@@ -145,6 +190,123 @@ fn h2_energy_from_rotated_groups_equals_the_dense_expectation() {
         (energy - dense).abs() < 1e-12,
         "grouped {energy} vs dense {dense}"
     );
+}
+
+#[test]
+fn y_rotation_gives_the_analytic_expectation() {
+    // Rx(θ)|0⟩ = cos(θ/2)|0⟩ − i·sin(θ/2)|1⟩ has ⟨Y⟩ = −sin θ and ⟨X⟩ = 0.
+    // A single `Y` pins the rotation: with `S` instead of `S†` it reads
+    // `+sin θ`, and with `H` alone `0`. (The H2 test cannot see this: every
+    // H2 term has an even number of `Y`, so a wrong sign cancels.)
+    for theta in [0.3, 1.0, 2.2, -0.9] {
+        let mut state = Statevector::new(1).unwrap();
+        state
+            .apply(&GateInstruction::Rx {
+                qubit: 0,
+                theta: GateParam::Fixed(theta),
+            })
+            .unwrap();
+        let y0 = PauliMask::new([(0, Pauli::Y)]).unwrap();
+        let grouping = group_qubit_wise(1, &[(1.0, y0)]).unwrap();
+        assert_eq!(
+            grouping.groups()[0].rotations(),
+            vec![(0, BasisRotation::SdgThenH)]
+        );
+        let value = grouped_expectation(&state, &grouping);
+        assert!(
+            (value + theta.sin()).abs() < 1e-12,
+            "θ = {theta}: ⟨Y⟩ = {value}, expected {}",
+            -theta.sin()
+        );
+    }
+}
+
+#[test]
+fn odd_y_terms_on_a_complex_state_match_the_direct_expectation() {
+    // A 3-qubit state with complex amplitudes, and terms with an odd number
+    // of `Y` (one or three) mixed with `X`, `Z` and the identity, compared
+    // with the expectation computed by applying the Pauli gates directly.
+    // Angles chosen so every odd-Y term below has |⟨P⟩| > 0.5 on this state.
+    let gates = [
+        GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Fixed(-1.4),
+        },
+        GateInstruction::Ry {
+            qubit: 1,
+            theta: GateParam::Fixed(-0.6),
+        },
+        GateInstruction::Rx {
+            qubit: 2,
+            theta: GateParam::Fixed(1.4),
+        },
+        GateInstruction::Cx(0, 1),
+        GateInstruction::Rz {
+            qubit: 1,
+            theta: GateParam::Fixed(0.1),
+        },
+        GateInstruction::Cx(1, 2),
+        GateInstruction::Ry {
+            qubit: 0,
+            theta: GateParam::Fixed(0.8),
+        },
+        GateInstruction::Rx {
+            qubit: 1,
+            theta: GateParam::Fixed(1.7),
+        },
+        GateInstruction::Ry {
+            qubit: 2,
+            theta: GateParam::Fixed(1.6),
+        },
+    ];
+    let mut state = Statevector::new(3).unwrap();
+    for gate in &gates {
+        state.apply(gate).unwrap();
+    }
+    assert!(state.amplitudes().iter().any(|a| a.im.abs() > 0.1));
+
+    use Pauli::{X, Y, Z};
+    let terms: Vec<(f64, Vec<(usize, Pauli)>)> = vec![
+        (0.7, vec![(0, Y)]),
+        (-1.1, vec![(0, X), (1, Y)]),
+        (0.4, vec![(0, Z), (2, Y)]),
+        (0.9, vec![(0, Y), (1, Y), (2, Y)]),
+        (-0.5, vec![(1, X)]),
+        (0.25, vec![(1, Z), (2, Z)]),
+        (0.3, vec![]),
+    ];
+    let masks: Vec<(f64, PauliMask)> = terms
+        .iter()
+        .map(|(c, ops)| (*c, PauliMask::new(ops.iter().copied()).unwrap()))
+        .collect();
+    let grouping = group_qubit_wise(3, &masks).unwrap();
+    assert!(grouping.groups().iter().any(|g| g
+        .rotations()
+        .iter()
+        .any(|&(_, r)| r == BasisRotation::SdgThenH)));
+
+    let grouped = grouped_expectation(&state, &grouping);
+    let direct = direct_expectation(&state, &terms);
+    assert!(
+        (grouped - direct).abs() < 1e-12,
+        "grouped {grouped} vs direct {direct}"
+    );
+    // Term by term too, so a sign error on one term cannot be offset by
+    // another; each odd-Y term must have a sizeable expectation on this
+    // state, or flipping its sign would go unnoticed.
+    for (index, term) in terms.iter().enumerate() {
+        let single = std::slice::from_ref(term);
+        let direct = direct_expectation(&state, single);
+        let grouped = grouped_expectation(&state, &group_qubit_wise(3, &[masks[index]]).unwrap());
+        assert!(
+            (grouped - direct).abs() < 1e-12,
+            "term {index}: grouped {grouped} vs direct {direct}"
+        );
+        if index < 4 {
+            let pauli = direct_expectation(&state, &[(1.0, term.1.clone())]);
+            assert!(pauli.abs() > 0.5, "odd-Y term {index} has ⟨P⟩ = {pauli}");
+        }
+    }
 }
 
 /// A diagonal observable with `Z` strings of every weight 0..=4 (as
@@ -207,7 +369,7 @@ fn seeded_samples_are_within_three_sigma() {
     let counts: HashMap<String, u64> = state
         .sample(shots, &mut rng)
         .into_iter()
-        .map(|(b, n)| (format!("{b:0width$b}", width = NUM_QUBITS), n))
+        .map(|(b, n)| (format!("{b:0NUM_QUBITS$b}"), n))
         .collect();
     let estimate = observable.expectation_batch(&[counts]).unwrap()[0];
     assert!(
@@ -275,7 +437,7 @@ fn random_counts(rng: &mut StdRng) -> HashMap<String, u64> {
     let mut counts = HashMap::new();
     for b in 0..1u64 << NUM_QUBITS {
         if rng.random_bool(0.8) {
-            let key = format!("{b:0width$b}", width = NUM_QUBITS);
+            let key = format!("{b:0NUM_QUBITS$b}");
             counts.insert(key, rng.random_range(1..1000));
         }
     }
@@ -326,5 +488,6 @@ fn weight_two_agrees_with_ising_to_rounding_on_any_coefficients() {
 
     let example = ParityObservable::new(2, vec![(0.3, 0), (0.1, 0b01), (0.7, 0b10)], 1.0).unwrap();
     let counts = HashMap::from([("11".to_string(), 1)]);
+    // Exact on purpose: the point is that the parity sum gives −0.5 itself.
     assert_eq!(example.expectation_batch(&[counts]).unwrap(), vec![-0.5]);
 }

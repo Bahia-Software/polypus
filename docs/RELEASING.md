@@ -147,10 +147,11 @@ PyPI: the release gate, every wheel and sdist build and their smoke tests.
 - **Order.** Dependencies first, computed from `cargo metadata` by
   [`.github/scripts/publish_crates.py`](../.github/scripts/publish_crates.py)
   (dev-dependencies included, ties broken alphabetically). Today:
-  `polypus-circuit`, `polypus-logger`, `polypus-observable`, `polypus-backend`,
-  `polypus-backend-conformance`, `polypus-optimizers`, `polypus-physics`,
-  `polypus-sim`, `polypus-qml`, `polypus-subprocess-backend`, `polypus-infrastructure`,
-  `polypus-orchestration`, `polypus-evaluation`, `polypus`. Print the plan
+  `polypus-circuit`, `polypus-logger`, `polypus-optimizers`, `polypus-physics`,
+  `polypus-sim`, `polypus-observable`, `polypus-backend`,
+  `polypus-backend-conformance`, `polypus-qml`, `polypus-subprocess-backend`,
+  `polypus-infrastructure`, `polypus-orchestration`, `polypus-evaluation`,
+  `polypus`. Print the plan
   locally with `python .github/scripts/publish_crates.py --plan`.
 - **Authentication.** crates.io Trusted Publishing (OIDC, no stored token)
   when no `CARGO_REGISTRY_TOKEN` secret exists; while one exists (repository
