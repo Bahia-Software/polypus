@@ -14,6 +14,9 @@ analysed range, and reports:
 * notebook-output  tutorials/**/*.ipynb committed with outputs
 * file-size        blobs larger than 1 MiB
 * version-mismatch Cargo.toml [workspace.package].version vs CITATION.cff
+* changelog-edit   CHANGELOG.md changed while Cargo.toml carries an X.Y.Z-dev
+                   version: entries go in changelog.d/, and only the release
+                   pull request (an X.Y.Z version) assembles CHANGELOG.md
 * submodule        added or changed gitlinks (their content is not analysed)
 
 Exit codes: 0 clean, 1 violations, 2 configuration or operational error.
@@ -95,6 +98,9 @@ FIX_HINTS = {
     "or request a narrow file-size exception with a reason",
     "submodule": "submodule content is not covered by this check; "
     "submodules are not accepted",
+    "changelog-edit": "add a fragment in changelog.d/ instead (see Changelog "
+    "entries in docs/CONTRIBUTING.md); only the release pull request edits "
+    "CHANGELOG.md",
 }
 LEAK_HINT = "line contains {} data; remove or replace it with a placeholder"
 
@@ -911,6 +917,12 @@ def analyse(args, report):
             "version {}".format(cff, cargo),
         )
     completed.append("version-mismatch")
+
+    # Pull requests that all edited CHANGELOG.md conflicted on the same lines;
+    # between releases entries are fragments in changelog.d/.
+    if dev and any(path == "CHANGELOG.md" for _s, path, *_ in changes):
+        violation("CHANGELOG.md", 1, "changelog-edit")
+    completed.append("changelog-edit")
     return completed
 
 
