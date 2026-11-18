@@ -161,8 +161,11 @@ parametrized cases). Any other skip fails the run and is listed at its end
 does not fail it. A test that needs something a leg lacks either gets it
 installed there or goes on that leg's list in `.github/workflows/ci.yml`.
 
-CI also builds the wheel on Linux, macOS and Windows and executes every
-notebook under `tutorials/` (`jupyter nbconvert --to notebook --execute`).
+CI also builds the wheel on Linux, macOS and Windows, installs it there and
+runs the README Bell example and a few Python test files on it
+(`build-extension`), tests `polypus-sim` and `polypus-circuit` on macOS and
+Windows (`test-portable`), and executes every notebook under `tutorials/`
+(`jupyter nbconvert --to notebook --execute`).
 Three jobs set another toolchain with `RUSTUP_TOOLCHAIN`: `msrv` checks the
 workspace with the MSRV (`rust-version` in `Cargo.toml`), and `fuzz` and
 `miri` fuzz the OpenQASM importers and run Miri over `polypus-sim`'s `unsafe`
