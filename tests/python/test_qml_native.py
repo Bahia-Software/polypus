@@ -357,6 +357,78 @@ def _indexed(n=6):
     )
 
 
+class TestZeroWidthSamples:
+    """A sample with no features is rejected at every native entry point, with
+    one message (contract C-11, #513): the encoders emit nothing for zero
+    features, so such a model would predict a constant whatever the input.
+    Fewer features than qubits stays accepted."""
+
+    _MESSAGE = "at least one feature"
+
+    @pytest.mark.parametrize("x", [[[]], [[], []]])
+    def test_dataset(self, x):
+        from polypus.qml import Dataset
+
+        with pytest.raises(ValueError, match=self._MESSAGE):
+            Dataset(x, [1] * len(x))
+        with pytest.raises(ValueError, match=self._MESSAGE):
+            Dataset(x)
+
+    def test_fit(self):
+        import polypus
+
+        with pytest.raises(polypus.ConfigurationError, match=self._MESSAGE):
+            make_model(num_qubits=2).fit(
+                [[]] * 4,
+                [1, 1, -1, -1],
+                method=polypus.DE(generations=3, population_size=6),
+                loss="hinge",
+                exact=True,
+                seed=1,
+            )
+
+    def test_predict_run_and_circuit(self):
+        import polypus
+
+        model = make_model(num_qubits=2)
+        trained = model.bind([0.1, -0.2, 0.3, -0.4])
+        with pytest.raises(polypus.ConfigurationError, match=self._MESSAGE):
+            trained.predict([[], []], exact=True)
+        with pytest.raises(polypus.ConfigurationError, match=self._MESSAGE):
+            trained.run([[]], exact=True)
+        with pytest.raises(ValueError, match=self._MESSAGE):
+            model.circuit([])
+        with pytest.raises(ValueError, match=self._MESSAGE):
+            trained.circuit([])
+
+    def test_expval_and_kernel_matrix(self):
+        import polypus
+        from polypus import qml
+
+        model = make_model(num_qubits=2)
+        with pytest.raises(polypus.ConfigurationError, match=self._MESSAGE):
+            qml.expval(model, [[]], [0.1, -0.2, 0.3, -0.4], exact=True)
+        encoder = qml.Encoder(2).angle_encoder("ry")
+        with pytest.raises(polypus.ConfigurationError, match=self._MESSAGE):
+            qml.kernel_matrix(encoder, [[]], exact=True)
+
+    def test_the_amplitude_encoder_gets_the_same_message(self):
+        from polypus.qml import Ansatz, Encoder, Model, Readout, Z
+
+        model = Model(
+            Encoder(2).amplitude_encoder(),
+            Ansatz(2).hardware_efficient(1),
+            Readout([Z(0)], decision="raw"),
+        )
+        with pytest.raises(ValueError, match=self._MESSAGE) as raised:
+            model.circuit([])
+        assert "L2 norm" not in str(raised.value)
+
+    def test_fewer_features_than_qubits_stay_accepted(self):
+        model = make_model(num_qubits=2)
+        assert model.circuit([0.3]) is not None
+
+
 class TestDatasetSplit:
     def test_the_test_partition_rounds_down(self):
         # floor(6 × 0.4) = 2 test samples, so 4 train, both at full width.
