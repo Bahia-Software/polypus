@@ -208,6 +208,8 @@ rejects:
 - blobs larger than 1 MiB;
 - a `CITATION.cff` version different from `Cargo.toml`, or not an earlier
   release when `Cargo.toml` is `X.Y.Z-dev` (contract C-6);
+- a change to `CHANGELOG.md` while `Cargo.toml` is `X.Y.Z-dev`: entries go in
+  `changelog.d/` (see [Changelog entries](#changelog-entries));
 - submodules.
 
 Run it before pushing:
@@ -226,9 +228,10 @@ result; `nbstripout --install` once per clone prevents it.
 
 Legitimate exceptions go in `.github/hygiene-allow.txt`, one per line as
 `RULE<TAB>PATTERN<TAB># reason`: one rule, the narrowest path or glob, and a
-reason. Forbidden names, notebooks, versions, submodules and commit messages
-admit none: merge commits keep every message in the history of `main`, so
-reword the commit instead (`git commit --amend` or `git rebase -i`).
+reason. Forbidden names, notebooks, versions, `CHANGELOG.md` edits, submodules
+and commit messages admit none: merge commits keep every message in the
+history of `main`, so reword the commit instead (`git commit --amend` or
+`git rebase -i`).
 Changes to the allow list, the script, the workflow or the policy-relevant
 `.gitignore` files need explicit human review.
 

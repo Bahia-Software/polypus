@@ -947,7 +947,9 @@ def test_changelog_edit_cannot_be_exempted(repo):
     )
     repo.write("CHANGELOG.md", CHANGELOG + "\n")
     repo.commit()
-    assert repo.run().code in (1, 2)
+    res = repo.run()
+    assert res.code == 2
+    assert "rule without exceptions" in res.out
 
 
 # -------------------------------------------------- revisions and robustness ---
