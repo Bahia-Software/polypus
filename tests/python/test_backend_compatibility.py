@@ -799,13 +799,45 @@ class TestResources:
     def test_a_circuit_over_the_qubit_ceiling_is_rejected(self):
         import polypus
 
-        qc = polypus.Circuit(31).measure_all()
+        qc = polypus.Circuit(41).measure_all()
         assert _report(qc)["polypus"] == []
         (reason,) = _report(qc, resources=True)["polypus"]
-        assert "supports at most 30" in reason
+        assert "supports at most 40" in reason
         with pytest.raises(polypus.NativeCircuitError) as info:
             _run(qc, "polypus")
         assert str(info.value) == reason
+
+    @pytest.mark.parametrize(
+        ("budget", "expected"), [("16G", "refused"), ("1T", "accepted")]
+    )
+    def test_above_30_qubits_the_budget_decides(self, tmp_path, budget, expected):
+        # Issue #428: a 31-qubit circuit (32 GiB) is checked against the memory
+        # budget, not refused by a fixed 30-qubit ceiling: 16G refuses it with
+        # the error the run raises, 1T accepts it. The accepted circuit is not
+        # run (it would allocate 32 GiB). In a child interpreter, as
+        # test_memory_budget.py sets the budget.
+        from test_memory_budget import _assert_ok, _run_child
+
+        code = """
+        import polypus
+        qc = polypus.Circuit(31).measure_all()
+        reasons = polypus.backend_compatibility(qc, resources=True)["polypus"]
+        if not reasons:
+            print("accepted")
+        else:
+            (reason,) = reasons
+            assert "31-qubit" in reason and "POLYPUS_MEM_BUDGET" in reason, reason
+            try:
+                polypus.run_quantum_circuit(
+                    qc, shots=32, infrastructure="local", backend="polypus", seed=5
+                )
+            except polypus.InsufficientMemoryError as exc:
+                assert str(exc) == reason, (str(exc), reason)
+                print("refused")
+        """
+        result = _run_child(code, budget, tmp_path)
+        _assert_ok(result)
+        assert result.stdout.strip() == expected, result.stdout
 
     def test_a_structural_rejection_is_not_followed_by_a_resource_one(
         self, monkeypatch

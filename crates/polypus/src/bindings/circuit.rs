@@ -15,7 +15,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use super::expr::{self, Operand, ParamExpr};
-use crate::infrastructure::{attach_or, check_statevector_fits, InterpreterUnavailable};
+use crate::infrastructure::{
+    active_budget, attach_or, check_statevector_against, InterpreterUnavailable, StatevectorRefusal,
+};
 
 /// Map a native [`CircuitError`] onto a Python `ValueError`.
 fn to_py_err(e: CircuitError) -> PyErr {
@@ -197,17 +199,19 @@ fn push(mut slf: PyRefMut<'_, Circuit>, gate: GateInstruction) -> PyResult<PyRef
 /// expensive an individual gate is, and the interval stretches to keep the
 /// callback under ~5% of the run (which matters when another Python thread
 /// holds the GIL and reacquiring it costs milliseconds). What is *not*
-/// interruptible is the `2^n` allocation below, which is a single `vec![]`.
+/// interruptible is the `2^n` allocation below.
 ///
 /// **Qubit ceiling.** A dense statevector needs `2^n` complex amplitudes
 /// (`16 · 2^n` bytes), so the backend refuses circuits with more than
-/// [`polypus_sim::MAX_QUBITS`] qubits (30 ≈ 16 GiB) and raises a `ValueError`
+/// [`polypus_sim::MAX_QUBITS`] qubits (40 ≈ 16 TiB) and raises a `ValueError`
 /// naming the requested and the supported count **before** attempting any
-/// allocation. `polypus.Circuit` itself is deliberately unbounded (see
+/// allocation. Below 40, the memory budget decides (see below); where no memory
+/// limit is detected (macOS, Windows) the ceiling stays at 30 qubits (≈ 16 GiB),
+/// with the same `ValueError`, unless `POLYPUS_MEM_BUDGET` is set (issue #428). `polypus.Circuit` itself is deliberately unbounded (see
 /// `Circuit::new`): the ceiling belongs to this backend, not to the IR. Note
 /// that what a call near the ceiling spends its time on is *allocating* that
 /// buffer, not handing it to Python: even a gateless 30-qubit circuit costs ~5s
-/// (measured), essentially all of it `Statevector::new`'s 16 GiB `vec![]`. The
+/// (measured), essentially all of it `Statevector::new`'s 16 GiB allocation. The
 /// ceiling bounds memory, not wall-clock time — cost scales with gates × `2^n`
 /// and nothing bounds the gate count, which is why the run has to stay
 /// interruptible (see above) rather than relying on being short.
@@ -217,9 +221,10 @@ fn push(mut slf: PyRefMut<'_, Circuit>, gate: GateInstruction) -> PyResult<PyRef
 /// #215): `POLYPUS_MEM_BUDGET` when set, else the detected RAM/cgroup limit minus
 /// a safety reserve. One that does not fit raises
 /// `polypus.InsufficientMemoryError` (a `polypus.PolypusError`) before anything
-/// is allocated, instead of the process being killed by the out-of-memory killer.
-/// With no limit detected (macOS, Windows) nothing is refused. The ceiling's
-/// `ValueError` is checked first and is unchanged.
+/// is allocated, instead of the process being killed by the out-of-memory killer;
+/// one that fits runs, whatever its width up to the ceiling. With no limit
+/// detected (macOS, Windows) nothing below 30 qubits is refused. The ceiling's
+/// `ValueError` is checked first.
 ///
 /// **`fusion`** (default `true`) controls [`polypus_sim::StatevectorSimulator::fusion`]:
 /// whether consecutive gates may be fused into fewer buffer passes before
@@ -249,10 +254,7 @@ pub fn statevector<'py>(
     let concrete = qc.native().assign_parameters(&params).map_err(to_py_err)?;
     // Refuse a statevector the memory budget cannot hold before allocating it
     // (issue #215). Above the ceiling the simulator's `ValueError` stays the error.
-    if concrete.num_qubits() <= polypus_sim::MAX_QUBITS {
-        check_statevector_fits(concrete.num_qubits())
-            .map_err(|e| crate::exceptions::insufficient_memory_to_pyerr(&e))?;
-    }
+    statevector_memory_check(concrete.num_qubits(), active_budget())?;
     // The simulation is the expensive, pure-Rust part: release the GIL for it
     // so it cannot stall every other Python thread (docs/ENGINEERING.md §3).
     //
@@ -302,6 +304,35 @@ pub fn statevector<'py>(
     // buffer moves into the array instead of being copied: `sv` is owned here
     // and dropped immediately after.
     Ok(sv.into_amplitudes().into_pyarray(qc.py()))
+}
+
+/// What `statevector` checks before allocating a `num_qubits`-qubit statevector
+/// under `budget` (issue #428): with a known limit, the budget decides up to
+/// [`polypus_sim::MAX_QUBITS`] (`polypus.InsufficientMemoryError` when it does
+/// not fit); with no limit detected, statevectors stop at 30 qubits with the
+/// simulator's ceiling `ValueError`, naming `POLYPUS_MEM_BUDGET`. Above
+/// `MAX_QUBITS` nothing is checked here: the simulator's own `ValueError` is the
+/// error.
+pub(super) fn statevector_memory_check(
+    num_qubits: usize,
+    budget: crate::infrastructure::MemBudget,
+) -> PyResult<()> {
+    match check_statevector_against(num_qubits, polypus_sim::MAX_QUBITS, budget) {
+        Ok(()) => Ok(()),
+        Err(StatevectorRefusal::Ceiling(refused)) => {
+            let ceiling = SimError::TooManyQubits {
+                requested: refused.num_qubits,
+                max: refused.max,
+            };
+            Err(PyValueError::new_err(format!(
+                "{ceiling}; {}",
+                refused.hint()
+            )))
+        }
+        Err(StatevectorRefusal::Memory(e)) => {
+            Err(crate::exceptions::insufficient_memory_to_pyerr(&e))
+        }
+    }
 }
 
 /// The part of `statevector` that runs detached: simulate `circuit`, polling

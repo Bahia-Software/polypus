@@ -260,9 +260,21 @@ The Rust orchestration layer now returns a typed `Result` on every path:
   and budgeted sizes, where the budget came from, and how to override it with
   `POLYPUS_MEM_BUDGET`. It is never raised against the blind 16 GiB fallback used
   when no limit can be detected (macOS, Windows): the Rust check skips it and
-  `max_memory_mb` is not sent. A circuit above `polypus_sim::MAX_QUBITS` keeps its
+  `max_memory_mb` is not sent. A circuit above `polypus_sim::MAX_QUBITS` (40) keeps its
   `ValueError` (native `statevector`) / `NativeCircuitError` (native backend),
-  checked first. This replaces the old failure mode, in which such a run was
+  checked first. Between 31 and 40 qubits the budget decides on the native
+  paths (issue #428): a known limit refuses with this error what does not fit
+  and lets through what does; under the blind fallback such a circuit gets the
+  ceiling `ValueError` / `NativeCircuitError` it got when the ceiling was 30,
+  its message adding that `POLYPUS_MEM_BUDGET` lets the budget decide.
+  A statevector the system refuses to allocate after passing these checks
+  (`polypus_sim::SimError::AllocationFailed`: a budget above the real free
+  memory, or a widening transpiler's circuit) is not this error: it surfaces as
+  the simulator's other failures do, `ValueError` from `polypus.statevector` and
+  `NativeCircuitError` from the native backend, with a message naming the
+  qubits and bytes and "the system refused the memory". With Linux overcommit
+  the system may instead grant the memory and the process be killed when it is
+  written; the budget is the guard against that. This replaces the old failure mode, in which such a run was
   started and the process killed by the out-of-memory killer with no Python
   exception at all.
 

@@ -90,6 +90,19 @@ pub const BYTES_PER_AMPLITUDE: u64 = 16;
 /// limit replaces it (see the [module docs](self)).
 pub const DEFAULT_MEM_BUDGET_BYTES: u64 = 16 * GIB;
 
+/// Widest statevector a backend runs under the [`BudgetSource::Fallback`]
+/// budget: 30 qubits, the 16 GiB statevector [`DEFAULT_MEM_BUDGET_BYTES`] is
+/// sized for.
+///
+/// With a known limit (explicit or detected) the budget decides how wide a
+/// statevector may be, up to the simulator's own technical ceiling
+/// (`polypus_sim::MAX_QUBITS`); [`check_fits`] refuses what does not fit. The
+/// fallback is a guess that never refuses, so on a host where no limit is
+/// detected (macOS, Windows) this is what still stops a run from attempting an
+/// allocation far beyond the machine (issue #428). Setting
+/// [`MEM_BUDGET_ENV`] there lifts it.
+pub const FALLBACK_MAX_QUBITS: usize = 30;
+
 /// Environment variable that sets the budget explicitly, in the format accepted
 /// by [`parse_mem_budget`] (e.g. `32G`).
 pub const MEM_BUDGET_ENV: &str = "POLYPUS_MEM_BUDGET";
@@ -653,8 +666,143 @@ pub fn check_fits(num_qubits: usize, budget: MemBudget) -> Result<(), Insufficie
     }
 }
 
+/// The widest statevector a backend whose own ceiling is `hard_max` runs under
+/// `budget`: `hard_max` when the budget is a known limit (below it,
+/// [`check_fits`] decides), and [`FALLBACK_MAX_QUBITS`] (or `hard_max`, if
+/// lower) under the [`BudgetSource::Fallback`] guess.
+///
+/// ```
+/// use polypus_backend::mem_budget::{qubit_ceiling, BudgetSource, MemBudget};
+/// let known = MemBudget { bytes: 1 << 40, source: BudgetSource::Detected };
+/// let guess = MemBudget { bytes: 1 << 34, source: BudgetSource::Fallback };
+/// assert_eq!(qubit_ceiling(40, known), 40);
+/// assert_eq!(qubit_ceiling(40, guess), 30);
+/// ```
+pub fn qubit_ceiling(hard_max: usize, budget: MemBudget) -> usize {
+    if budget.source == BudgetSource::Fallback {
+        hard_max.min(FALLBACK_MAX_QUBITS)
+    } else {
+        hard_max
+    }
+}
+
+/// What a ceiling error lowered by [`qubit_ceiling`] adds to its message: no
+/// limit was detected, and [`MEM_BUDGET_ENV`] lets the budget decide up to
+/// `hard_max`. The error itself (its type and the rest of its text) is the
+/// simulator's, as it was before the ceiling was raised.
+pub fn fallback_ceiling_hint(hard_max: usize) -> String {
+    format!(
+        "no memory limit was detected on this host, so statevectors stop at \
+         {FALLBACK_MAX_QUBITS} qubits; set {MEM_BUDGET_ENV} (e.g. {MEM_BUDGET_ENV}=64G) to let \
+         the memory budget decide, up to {hard_max} qubits"
+    )
+}
+
+/// A statevector wider than the ceiling the [`BudgetSource::Fallback`] budget
+/// lowers to [`FALLBACK_MAX_QUBITS`] (see [`qubit_ceiling`]), though within the
+/// backend's own ceiling `hard_max`: returned by [`check_fallback_ceiling`].
+///
+/// A backend reports it with the error its simulator gives a circuit above its
+/// ceiling (the native one, `polypus_sim::SimError::TooManyQubits` with `max`),
+/// as it did before the ceiling was raised (issue #428), followed by
+/// [`hint`](Self::hint).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FallbackCeiling {
+    /// Qubits of the refused statevector.
+    pub num_qubits: usize,
+    /// The lowered ceiling ([`FALLBACK_MAX_QUBITS`]).
+    pub max: usize,
+    /// The backend's own ceiling, which a known budget lets it reach.
+    pub hard_max: usize,
+}
+
+impl FallbackCeiling {
+    /// What the ceiling error adds: no limit was detected, and
+    /// [`MEM_BUDGET_ENV`] lets the budget decide up to `hard_max`
+    /// ([`fallback_ceiling_hint`]).
+    pub fn hint(&self) -> String {
+        fallback_ceiling_hint(self.hard_max)
+    }
+}
+
+/// Refuse a `num_qubits`-qubit statevector that the [`qubit_ceiling`] of
+/// `budget` does not allow for a backend whose own ceiling is `hard_max`. A
+/// width above `hard_max` passes: the backend's own ceiling error is the one
+/// to report there.
+///
+/// # Errors
+///
+/// [`FallbackCeiling`] when the budget is the fallback guess and
+/// `FALLBACK_MAX_QUBITS < num_qubits <= hard_max`.
+pub fn check_fallback_ceiling(
+    num_qubits: usize,
+    hard_max: usize,
+    budget: MemBudget,
+) -> Result<(), FallbackCeiling> {
+    let max = qubit_ceiling(hard_max, budget);
+    if num_qubits <= max || num_qubits > hard_max {
+        return Ok(());
+    }
+    Err(FallbackCeiling {
+        num_qubits,
+        max,
+        hard_max,
+    })
+}
+
+/// Why [`check_statevector_against`] refuses a statevector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatevectorRefusal {
+    /// Wider than the 30-qubit ceiling of the fallback budget.
+    Ceiling(FallbackCeiling),
+    /// Larger than a known budget.
+    Memory(InsufficientMemory),
+}
+
+/// Everything a dense-statevector backend whose own ceiling is `hard_max`
+/// checks before allocating one `num_qubits`-qubit statevector under `budget`:
+/// the fallback's [`check_fallback_ceiling`], then [`check_fits`]. A width
+/// above `hard_max` passes both, so the backend's own ceiling error stays the
+/// one a run fails with. This is the check to call for a backend built on
+/// `polypus-sim`: [`check_statevector_fits`] alone never refuses under the
+/// fallback, where the simulator now accepts up to 40 qubits (issue #428).
+///
+/// ```
+/// use polypus_backend::mem_budget::{
+///     check_statevector_against, BudgetSource, MemBudget, StatevectorRefusal,
+/// };
+/// let guess = MemBudget { bytes: 16 << 30, source: BudgetSource::Fallback };
+/// let known = MemBudget { bytes: 1 << 40, source: BudgetSource::Explicit };
+/// assert!(matches!(
+///     check_statevector_against(35, 40, guess),
+///     Err(StatevectorRefusal::Ceiling(_))
+/// ));
+/// assert!(check_statevector_against(35, 40, known).is_ok()); // 512 GiB of 1 TiB
+/// assert!(matches!(
+///     check_statevector_against(39, 40, known),
+///     Err(StatevectorRefusal::Memory(_))
+/// ));
+/// ```
+///
+/// # Errors
+///
+/// [`StatevectorRefusal::Ceiling`] or [`StatevectorRefusal::Memory`], as above.
+pub fn check_statevector_against(
+    num_qubits: usize,
+    hard_max: usize,
+    budget: MemBudget,
+) -> Result<(), StatevectorRefusal> {
+    if num_qubits > hard_max {
+        return Ok(());
+    }
+    check_fallback_ceiling(num_qubits, hard_max, budget).map_err(StatevectorRefusal::Ceiling)?;
+    check_fits(num_qubits, budget).map_err(StatevectorRefusal::Memory)
+}
+
 /// [`check_fits`] against the [active budget](active_budget): what a backend
-/// calls before allocating a statevector.
+/// calls before allocating a statevector. It never refuses under the fallback
+/// budget; a backend built on `polypus-sim` calls [`check_statevector_against`]
+/// instead, which also applies the fallback's 30-qubit ceiling.
 ///
 /// # Errors
 ///
@@ -1128,6 +1276,63 @@ mod tests {
 
     fn budget(bytes: u64, source: BudgetSource) -> MemBudget {
         MemBudget { bytes, source }
+    }
+
+    #[test]
+    fn a_known_budget_lifts_the_ceiling_and_the_fallback_keeps_30_428() {
+        for source in [BudgetSource::Explicit, BudgetSource::Detected] {
+            assert_eq!(qubit_ceiling(40, budget(GIB, source)), 40);
+        }
+        let fallback = budget(DEFAULT_MEM_BUDGET_BYTES, BudgetSource::Fallback);
+        assert_eq!(qubit_ceiling(40, fallback), FALLBACK_MAX_QUBITS);
+        assert_eq!(FALLBACK_MAX_QUBITS, 30);
+        // A simulator with a lower ceiling of its own keeps it.
+        assert_eq!(qubit_ceiling(20, fallback), 20);
+        assert_eq!(qubit_ceiling(20, budget(GIB, BudgetSource::Explicit)), 20);
+    }
+
+    #[test]
+    fn check_statevector_against_applies_the_ceiling_then_the_budget_428() {
+        let fallback = budget(DEFAULT_MEM_BUDGET_BYTES, BudgetSource::Fallback);
+        // Under the fallback: 30 passes, 31..=40 is the ceiling, 41 is left to
+        // the backend's own error.
+        assert_eq!(check_statevector_against(30, 40, fallback), Ok(()));
+        for n in [31, 35, 40] {
+            assert_eq!(
+                check_statevector_against(n, 40, fallback),
+                Err(StatevectorRefusal::Ceiling(FallbackCeiling {
+                    num_qubits: n,
+                    max: 30,
+                    hard_max: 40,
+                }))
+            );
+        }
+        assert_eq!(check_statevector_against(41, 40, fallback), Ok(()));
+        // With a known budget the budget decides, up to the backend's ceiling.
+        for source in [BudgetSource::Explicit, BudgetSource::Detected] {
+            let tib = budget(1 << 40, source);
+            assert_eq!(check_statevector_against(35, 40, tib), Ok(()));
+            assert!(matches!(
+                check_statevector_against(39, 40, tib),
+                Err(StatevectorRefusal::Memory(e)) if e.num_qubits == 39 && e.source == source
+            ));
+            assert_eq!(check_statevector_against(41, 40, budget(1, source)), Ok(()));
+        }
+        // The ceiling comes first: a fallback refusal never reads as memory.
+        assert!(matches!(
+            check_statevector_against(35, 40, budget(1, BudgetSource::Fallback)),
+            Err(StatevectorRefusal::Ceiling(_))
+        ));
+    }
+
+    #[test]
+    fn the_fallback_ceiling_hint_names_the_opt_in() {
+        let hint = fallback_ceiling_hint(40);
+        assert!(hint.contains("POLYPUS_MEM_BUDGET=64G"), "{hint}");
+        assert!(
+            hint.contains("30 qubits") && hint.contains("40 qubits"),
+            "{hint}"
+        );
     }
 
     #[test]

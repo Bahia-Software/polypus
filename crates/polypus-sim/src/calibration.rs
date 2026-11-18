@@ -81,13 +81,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{gates, kernels, C64, DEFAULT_PARALLEL_THRESHOLD, MAX_QUBITS};
+use crate::{gates, kernels, C64, DEFAULT_PARALLEL_THRESHOLD};
 
 /// Qubit counts probed during calibration, ascending. The smallest is the floor
 /// below which the parallel path is never worth it on any machine we have seen;
 /// probing stops at 18 because by then a single gate's `2^n` work dwarfs the
 /// pool overhead on every machine, so one that has not crossed over by 18 will
-/// not at a size anyone simulates densely (the ceiling is [`MAX_QUBITS`]).
+/// not at a size anyone simulates densely (the ceiling is [`MAX_QUBITS`](crate::MAX_QUBITS)).
 const CALIBRATION_SIZES: [usize; 5] = [10, 12, 14, 16, 18];
 
 /// Samples taken per (size, path) measurement, keeping the **median**. Odd, so
@@ -154,16 +154,33 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Pause between non-blocking lock attempts while waiting for [`LOCK_TIMEOUT`].
 const LOCK_POLL: Duration = Duration::from_millis(10);
 
-/// Threshold meaning "never take the gate-parallel path": one past the qubit
-/// ceiling, so no runnable circuit (`n <= MAX_QUBITS`) reaches it. Chosen when
-/// parallel never wins by [`MIN_SPEEDUP`] anywhere in the probed range — a safe
-/// outcome (equivalent to disabling gate-level parallelism) we have never seen
-/// hurt any thread count.
-const PARALLELISM_DISABLED: usize = MAX_QUBITS + 1;
+/// Threshold meaning "never take the gate-parallel path", as calibration
+/// reports it and the cache stores it. Chosen when parallel never wins by
+/// [`MIN_SPEEDUP`] anywhere in the probed range — a safe outcome (equivalent to
+/// disabling gate-level parallelism) we have never seen hurt any thread count.
+///
+/// An explicit value, not derived from [`MAX_QUBITS`](crate::MAX_QUBITS): it was `MAX_QUBITS + 1`
+/// while the ceiling was 30, so existing caches hold `31`, and raising the
+/// ceiling (issue #428) must neither misread them nor make older builds
+/// misread new ones. A runnable circuit can now be wider than this, so
+/// [`resolve_threshold`] turns it into [`usize::MAX`] before it reaches a
+/// simulator.
+const PARALLELISM_DISABLED: usize = 31;
 
-// The disabling sentinel must be unreachable by any runnable circuit
-// (`n <= MAX_QUBITS`); enforced at compile time so it can never silently regress.
-const _: () = assert!(PARALLELISM_DISABLED > MAX_QUBITS);
+// The sentinel must lie above every size calibration can pick, so it never
+// collides with a real crossover; enforced at compile time.
+const _: () = assert!(PARALLELISM_DISABLED > CALIBRATION_SIZES[CALIBRATION_SIZES.len() - 1]);
+
+/// The threshold a simulator uses for a calibrated (or cached) one:
+/// [`PARALLELISM_DISABLED`] becomes [`usize::MAX`], which no circuit reaches
+/// whatever [`MAX_QUBITS`](crate::MAX_QUBITS) is; any other value is a real crossover and stays.
+fn effective_threshold(threshold: usize) -> usize {
+    if threshold == PARALLELISM_DISABLED {
+        usize::MAX
+    } else {
+        threshold
+    }
+}
 
 /// Smallest threshold accepted from the cache: the two-qubit kernels enumerate
 /// `2^(n-2)` sub-states, so no register below 2 qubits should be routed to the
@@ -180,7 +197,12 @@ fn is_valid_threshold(threshold: usize) -> bool {
 /// The measured crossover plus the context needed to report it.
 #[derive(Debug, Clone)]
 pub struct CalibrationResult {
-    /// Qubit count at or above which the gate-parallel path should be used.
+    /// Qubit count at or above which the gate-parallel path should be used,
+    /// or `31` for *never* (parallelism paid at no probed size). `31` was one
+    /// past the old 30-qubit ceiling and stays the stored value so caches keep
+    /// their meaning (issue #428); circuits of 31 to 40 qubits now exist, so a
+    /// caller that sets a simulator's `parallel_threshold` from this value must
+    /// read `31` as [`usize::MAX`], as the process-wide resolution does.
     pub threshold: usize,
     /// `rayon::current_num_threads()` observed during calibration — one half of
     /// the cache key, alongside the CPU fingerprint (see `cache_key`).
@@ -194,7 +216,8 @@ pub struct CalibrationResult {
 /// report whether it recomputed or reused, and whether persistence succeeded.
 #[derive(Debug, Clone)]
 pub struct CalibrationOutcome {
-    /// Qubit count at or above which the gate-parallel path should be used.
+    /// Qubit count at or above which the gate-parallel path should be used,
+    /// or `31` for *never*: see [`CalibrationResult::threshold`].
     pub threshold: usize,
     /// Rayon threads detected — one half of the cache key, alongside the CPU
     /// fingerprint (see `cache_key`).
@@ -991,7 +1014,7 @@ fn resolution() -> Resolution {
 /// Threshold the default [`StatevectorSimulator`](crate::StatevectorSimulator)
 /// uses, resolved **once per process** and memoised (see [`resolution`]).
 pub(crate) fn resolve_threshold() -> usize {
-    resolution().threshold
+    effective_threshold(resolution().threshold)
 }
 
 /// Why the process-wide threshold fell back to the static default in a way worth
@@ -1478,6 +1501,31 @@ core id\t\t: 0
             decide(read_cache_from(&path), XEON_8),
             Decision::Fallback(FallbackReason::NotCalibrated)
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_existing_cache_s_disabled_sentinel_still_disables_parallelism_428() {
+        // Caches written while the qubit ceiling was 30 store "disabled" as 31
+        // (`MAX_QUBITS + 1` then). Raising the ceiling must not turn that into
+        // "parallel from 31 qubits on": the stored value is pinned …
+        assert_eq!(PARALLELISM_DISABLED, 31);
+        let dir = temp_dir("disabled-sentinel-428");
+        let path = dir.join("parallel_threshold.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            format!(r#"{{"schema":{CACHE_SCHEMA},"entries":{{"{XEON_8}":31,"{XEON_32}":16}}}}"#),
+        )
+        .unwrap();
+        let cache = read_cache_from(&path).expect("an old cache is still read");
+        assert_eq!(decide(Some(cache.clone()), XEON_8), Decision::Cached(31));
+        assert_eq!(decide(Some(cache), XEON_32), Decision::Cached(16));
+        // … and a simulator never reaches it, whatever the ceiling.
+        assert_eq!(effective_threshold(31), usize::MAX);
+        assert!(effective_threshold(31) > crate::MAX_QUBITS);
+        // A real crossover is used as calibrated.
+        assert_eq!(effective_threshold(16), 16);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
