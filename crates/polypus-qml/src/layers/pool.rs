@@ -92,15 +92,17 @@ impl LayerOps for PoolLayer {
         let snapshot = ctx.active.clone();
 
         // Every pair discards one logical position; remove those, preserving
-        // the relative order of the survivors (and any odd leftover).
-        let discarded: Vec<usize> = even_pairs(active)
-            .into_iter()
-            .map(|(a, b)| self.discard_keep(a, b).0)
-            .collect();
+        // the relative order of the survivors (and any odd leftover). The pairs
+        // are those of `even_pairs`, so position `p` belongs to the pair that
+        // starts at `p - p % 2`, and an odd count's last position to none: one
+        // pass, linear in the active qubits.
         ctx.active = snapshot
             .iter()
             .enumerate()
-            .filter(|(position, _)| !discarded.contains(position))
+            .filter(|&(position, _)| {
+                let first = position - position % 2;
+                first + 1 >= active || self.discard_keep(first, first + 1).1 == position
+            })
             .map(|(_, &qubit)| qubit)
             .collect();
 
@@ -277,6 +279,67 @@ mod tests {
         // Neither the cursor nor the active qubits change.
         assert_eq!(c.param_cursor, usize::MAX - 1);
         assert_eq!(c.active, vec![0, 1, 2, 3]);
+    }
+
+    /// The active set pooling leaves, computed the slow, obvious way: list the
+    /// discarded positions, then drop every position found in that list.
+    fn reference_survivors(layer: &PoolLayer, active: &[usize]) -> Vec<usize> {
+        let discarded: Vec<usize> = even_pairs(active.len())
+            .into_iter()
+            .map(|(a, b)| layer.discard_keep(a, b).0)
+            .collect();
+        active
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| !discarded.contains(position))
+            .map(|(_, &qubit)| qubit)
+            .collect()
+    }
+
+    #[test]
+    fn plan_leaves_the_same_active_set_as_the_reference() {
+        for keep in [KeepRule::EvenPositions, KeepRule::OddPositions] {
+            let layer = PoolLayer {
+                block: PoolBlock::Basic,
+                keep,
+            };
+            for n in 2..=9 {
+                // Non-contiguous physical qubits, as after an earlier pooling.
+                let active: Vec<usize> = (0..n).map(|q| 3 * q + 1).collect();
+                let mut c = LayerContext {
+                    active: active.clone(),
+                    ..ctx(0)
+                };
+                let alloc = layer.plan(&mut c).unwrap();
+                assert_eq!(alloc.active, active, "{keep:?}, n = {n}");
+                assert_eq!(
+                    c.active,
+                    reference_survivors(&layer, &active),
+                    "{keep:?}, n = {n}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plan_is_linear_in_the_active_qubits() {
+        // A quadratic plan would make ~2.5·10^11 comparisons here; a linear one
+        // takes milliseconds.
+        let n = 1_000_000;
+        for (keep, first_kept) in [(KeepRule::EvenPositions, 0), (KeepRule::OddPositions, 1)] {
+            let layer = PoolLayer {
+                block: PoolBlock::Basic,
+                keep,
+            };
+            let mut c = ctx(n);
+            layer.plan(&mut c).unwrap();
+            assert_eq!(c.active.len(), n / 2);
+            assert!(c
+                .active
+                .iter()
+                .enumerate()
+                .all(|(i, &q)| q == 2 * i + first_kept));
+        }
     }
 
     #[test]
