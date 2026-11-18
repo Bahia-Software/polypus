@@ -19,6 +19,12 @@ rayon = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }
+# Only for the Pauli-sum acceptance tests (tests/pauli_sum.rs, issue #530): the
+# 4-qubit H2 Hamiltonian, and a simulated state to measure it on. The library
+# itself does not depend on them.
+polypus-circuit = { workspace = true }
+polypus-physics = { workspace = true }
+polypus-sim = { workspace = true }
 
 [lints]
 workspace = true
