@@ -336,10 +336,24 @@ class TestFactor:
         assert (result.factors, result.method) == ((3, 5), "quantum")
         assert set(result.counts) == PEAKS_15
 
-    def test_a_circuit_beyond_the_simulator_raises_its_error(self):
-        # 34 qubits; the native simulator holds at most 30
-        with pytest.raises(polypus.NativeCircuitError, match="at most 30"):
-            factor(143, a=2, **NATIVE)
+    def test_a_circuit_beyond_the_simulator_raises_its_error(self, tmp_path):
+        # 34 qubits, a 256 GiB statevector: the memory budget refuses it before
+        # anything is allocated (#428). The budget is fixed so no host runs it
+        # for hours, in a child interpreter (see test_memory_budget.py).
+        from test_memory_budget import _assert_ok, _run_child
+
+        code = """
+        import polypus
+        from polypus.shor import factor
+        try:
+            factor(143, a=2, infrastructure="local", backend="polypus")
+        except polypus.InsufficientMemoryError as exc:
+            assert "34-qubit" in str(exc), str(exc)
+            print("refused")
+        """
+        result = _run_child(code, "16G", tmp_path)
+        _assert_ok(result)
+        assert "refused" in result.stdout
 
     def test_an_attempt_frees_the_last_circuit_before_building_the_next(
         self, monkeypatch

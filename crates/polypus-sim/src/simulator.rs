@@ -124,8 +124,8 @@ const CLOCK_READ_WORK_UNITS: usize = 1 << 16;
 /// traversal, not the ≤`MAX_FUSED_DIAGONAL_RUN` factors per amplitude).
 ///
 /// 64 sits comfortably above the longest diagonal run any real circuit produces
-/// — a QFT phase column is ≤ `n − 1` gates, ≤ 29 at [`MAX_QUBITS`](crate::MAX_QUBITS)
-/// = 30 — so QFT never hits the cap, while a genuinely deep run (a QAOA cost
+/// — a QFT phase column is ≤ `n − 1` gates, ≤ 39 at [`MAX_QUBITS`](crate::MAX_QUBITS)
+/// = 40 — so QFT never hits the cap, while a genuinely deep run (a QAOA cost
 /// layer, a Trotterized `ZZ`/`RZ` evolution) is chunked into bandwidth-bound
 /// passes rather than one growing pass. Unlike the parallel threshold, this is a
 /// fixed architectural safety bound, not a hardware-tuned value: it needs no
@@ -468,7 +468,7 @@ impl Simulator for StatevectorSimulator {
         sv.set_parallel_threshold(self.parallel_threshold);
         // `Statevector::new`'s `2^n` allocation above is deliberately *not* a
         // cancellation point: near the qubit ceiling it dominates the run, but
-        // it is one `vec![]` with nothing to interleave a check into. What the
+        // it is one allocation with nothing to interleave a check into. What the
         // hook covers is the gate sequence — whose cost (gates x `2^n`) is
         // unbounded, where the allocation's is capped by `max_qubits`.
         let mut cancellation = CancellationCheck::new(should_cancel, circuit.num_qubits());

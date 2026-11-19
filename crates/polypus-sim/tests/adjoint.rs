@@ -892,7 +892,9 @@ fn parallel_and_sequential_paths_are_bit_identical() {
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 /// The qubit ceiling and every structural check come before the `2^n`
-/// allocation: on a circuit at the ceiling (16 GiB) each error is immediate.
+/// allocation: on a circuit at the ceiling (16 TiB since #428) each error is
+/// immediate. A case that ever passed its check would attempt that
+/// allocation, which the system refuses (`AllocationFailed`) rather than grant.
 #[test]
 fn the_checks_run_before_anything_is_allocated() {
     let wide = |gates: Vec<G>| ConcreteCircuit::new_unchecked(MAX_QUBITS, gates);
