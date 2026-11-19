@@ -39,7 +39,8 @@ const SHORT: usize = 3_000;
 
 /// The shortest wall-clock gap the simulator leaves between two hook calls:
 /// `CANCELLATION_CHECK_INTERVAL` in `src/simulator.rs`, mirrored here because
-/// it is private. The throttle only ever *raises* the gap (for an expensive
+/// it is private. A unit test there pins that constant to this value, so the
+/// two cannot drift apart unnoticed. The throttle only ever *raises* the gap (for an expensive
 /// hook), and times the first call from its first clock read, which is after
 /// the run starts — so a run that lasted `elapsed` called the hook at most
 /// `elapsed / MIN_HOOK_INTERVAL` times, however slow the machine.
