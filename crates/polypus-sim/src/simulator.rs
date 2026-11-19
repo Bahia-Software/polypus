@@ -73,6 +73,11 @@ pub trait Simulator {
 ///
 /// Chosen so the checkpoint is imperceptible as latency: a Ctrl+C is honored
 /// within about a frame.
+///
+/// Mirrored as `MIN_HOOK_INTERVAL` in `tests/cancellation.rs`, whose throttle
+/// bound would silently weaken if only this one were raised; the unit test
+/// `the_hook_interval_matches_its_mirror_in_the_cancellation_tests` fails
+/// until both change together.
 const CANCELLATION_CHECK_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Bound on what the hook may cost the run: it is called at most once per
@@ -811,6 +816,16 @@ mod tests {
             parallel_threshold: MAX_QUBITS + 1,
             fusion: true,
         }
+    }
+
+    /// `tests/cancellation.rs` cannot see this private constant, so it mirrors
+    /// it as `MIN_HOOK_INTERVAL = 25 ms` for its throttle bound. Raising only
+    /// this one would leave that bound checking a shorter gap than the
+    /// throttle keeps; pinning the value here makes such a change fail until
+    /// the mirror is updated with it.
+    #[test]
+    fn the_hook_interval_matches_its_mirror_in_the_cancellation_tests() {
+        assert_eq!(CANCELLATION_CHECK_INTERVAL, Duration::from_millis(25));
     }
 
     /// Same as [`sequential_sim`], with fusion disabled — the reference every
