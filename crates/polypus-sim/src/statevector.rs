@@ -501,6 +501,8 @@ impl Statevector {
 
     /// [`apply`](Self::apply) for the single-qubit gates without an angle:
     /// the dense ones on the 2×2 kernel, the phase ones on the diagonal one.
+    /// Only ever called by [`apply`](Self::apply) on a gate of this family;
+    /// any other is a dispatch bug in `apply`, not a runtime error.
     fn apply_fixed_1q(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
         use GateInstruction as G;
         let par = self.use_parallel();
@@ -531,7 +533,7 @@ impl Statevector {
                 let (d0, d1) = gates::tdg();
                 kernels::apply_diagonal_1q(&mut self.data, *q, d0, d1, par);
             }
-            other => return Err(unsupported(other)),
+            other => unreachable!("{other:?} is not a gate apply_fixed_1q handles"),
         }
         Ok(())
     }
@@ -540,6 +542,8 @@ impl Statevector {
     /// the diagonal kernel, every other on the 2×2 one with its exact matrix.
     /// `p`/`u1` take the dense path (not the diagonal one) so the diagonal
     /// arms stay exactly what `diagonal_op` classifies for run fusion.
+    /// Only ever called by [`apply`](Self::apply) on a gate of this family;
+    /// any other is a dispatch bug in `apply`, not a runtime error.
     fn apply_rotation_1q(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
         use GateInstruction as G;
         let par = self.use_parallel();
@@ -576,7 +580,7 @@ impl Statevector {
                 qubit,
                 gates::u(std::f64::consts::FRAC_PI_2, angle(phi)?, angle(lam)?),
             ),
-            other => return Err(unsupported(other)),
+            other => unreachable!("{other:?} is not a gate apply_rotation_1q handles"),
         };
         kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
         Ok(())
@@ -584,6 +588,8 @@ impl Statevector {
 
     /// [`apply`](Self::apply) for `cx`, `swap`, `rxx` (dense) and `cz`,
     /// `rzz`, `cp` (diagonal).
+    /// Only ever called by [`apply`](Self::apply) on a gate of this family;
+    /// any other is a dispatch bug in `apply`, not a runtime error.
     fn apply_2q(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
         use GateInstruction as G;
         let par = self.use_parallel();
@@ -610,7 +616,7 @@ impl Statevector {
                 let diag = gates::cp_diag(angle(theta)?);
                 kernels::apply_diagonal_2q(&mut self.data, *q0, *q1, diag, par);
             }
-            other => return Err(unsupported(other)),
+            other => unreachable!("{other:?} is not a gate apply_2q handles"),
         }
         Ok(())
     }
@@ -618,6 +624,8 @@ impl Statevector {
     /// [`apply`](Self::apply) for the controlled single-qubit gates: the
     /// target's exact 2×2 on the controlled kernel (for `cu`, including its
     /// phase γ).
+    /// Only ever called by [`apply`](Self::apply) on a gate of this family;
+    /// any other is a dispatch bug in `apply`, not a runtime error.
     fn apply_controlled(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
         use GateInstruction as G;
         let par = self.use_parallel();
@@ -672,7 +680,7 @@ impl Statevector {
                 let phase = C64::from_polar(1.0, angle(gamma)?);
                 (control, target, u.map(|row| row.map(|entry| entry * phase)))
             }
-            other => return Err(unsupported(other)),
+            other => unreachable!("{other:?} is not a gate apply_controlled handles"),
         };
         kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
         Ok(())
@@ -974,6 +982,38 @@ mod tests {
             missing.is_empty(),
             "instruction kinds not exercised: {missing:?}"
         );
+    }
+
+    /// A gate sent to the wrong per-family function is a dispatch bug in
+    /// `apply`, so it panics naming the function instead of returning an
+    /// error that would read as an input problem.
+    #[test]
+    fn a_gate_routed_to_the_wrong_family_panics() {
+        type Family = fn(&mut Statevector, &GateInstruction) -> Result<(), SimError>;
+        let families: [(&str, Family); 4] = [
+            ("apply_fixed_1q", Statevector::apply_fixed_1q),
+            ("apply_rotation_1q", Statevector::apply_rotation_1q),
+            ("apply_2q", Statevector::apply_2q),
+            ("apply_controlled", Statevector::apply_controlled),
+        ];
+        // `Id` is handled in `apply` itself, by none of the four.
+        let foreign = GateInstruction::Id(0);
+        for (name, family) in families {
+            let mut sv = Statevector::new(2).expect("2 qubits is well below MAX_QUBITS");
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                family(&mut sv, &foreign)
+            }))
+            .expect_err(name);
+            let message = panic
+                .downcast_ref::<String>()
+                .expect("unreachable! formats its message");
+            assert_eq!(
+                message,
+                &format!(
+                    "internal error: entered unreachable code: Id(0) is not a gate {name} handles"
+                )
+            );
+        }
     }
 
     /// The inverse of a gate with an unresolved angle fails exactly as the gate
