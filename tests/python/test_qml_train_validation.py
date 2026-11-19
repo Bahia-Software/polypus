@@ -137,6 +137,40 @@ class TestQmlTrainLabels:
         with pytest.raises(TypeError, match=r"ndarray of length 1.*ravel"):
             self._train(monkeypatch, np.array([[0], [1]]))
 
+    @pytest.mark.parametrize(
+        "complex_label",
+        ["complex128", "complex128-real-valued", "complex64", "python"],
+    )
+    @pytest.mark.parametrize("as_array", [False, True], ids=["list", "array"])
+    def test_a_complex_label_raises_naming_its_index(
+        self, monkeypatch, complex_label, as_array
+    ):
+        # #602: `float()` drops a NumPy complex label's imaginary part (with a
+        # ComplexWarning), so it is refused by its type first, even with no
+        # imaginary part.
+        import warnings
+
+        import numpy as np
+
+        label = {
+            "complex128": np.complex128(1 + 2j),
+            "complex128-real-valued": np.complex128(1),
+            "complex64": np.complex64(1),
+            "python": 1 + 0j,
+        }[complex_label]
+        y_train = [0.5, label]
+        # As an array every label is complex, so the first one is refused.
+        index = 0 if as_array else 1
+        if as_array:
+            y_train = np.array(y_train).astype(np.result_type(label))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(
+                TypeError, match=rf"y_train\[{index}\] is .+, a complex number"
+            ):
+                self._train(monkeypatch, y_train)
+        assert not [w for w in caught if "Complex" in w.category.__name__]
+
     def test_a_non_finite_label_raises_naming_its_index(self, monkeypatch):
         with pytest.raises(ValueError, match=r"y_train\[1\] is NaN"):
             self._train(monkeypatch, [0.5, float("nan")])
