@@ -11,8 +11,8 @@ the same `seed`. The layer's gradients move in the last bits, no more:
 exactly, they come from one combined observable instead of one run per
 observable, and with shots the parameter product is summed in row order.
 The cotangent's shape is checked right after `params` (a
-`polypus.ConfigurationError`, as is a complex one) and its values are read
-as `x`'s are (a string or `None` is the same `TypeError`); a `NaN` or an
+`polypus.ConfigurationError`) and its values are read as `x`'s are (a
+string, `None` or a complex value is the same `TypeError`); a `NaN` or an
 infinity in it propagates as through the contraction, and changes only its
 own row's route. `qml.jacobian` does not change. In `polypus-qml`:
 `Jacobian::vjp`, `JacobianBlock::vjp_runs`/`num_vjp_runs`/

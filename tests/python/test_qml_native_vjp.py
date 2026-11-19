@@ -276,14 +276,24 @@ class TestCotangent:
             np.testing.assert_allclose(g[finite], e[finite], rtol=1e-9, atol=0)
 
     def test_complex_values_are_refused(self):
+        # The `TypeError` `x` raises for a complex value (#602), never the
+        # value cut to its real part.
         model = self._model()
         v = cotangent(model).astype(complex)
         v[0, 0] = 1 + 2j
-        with pytest.raises(polypus.ConfigurationError, match="real values"):
+        with pytest.raises(TypeError, match=r"complex array \(complex128\)"):
             qml.vjp(model, ROWS, point(model), v, exact=True)
         # Even with no imaginary part: the dtype decides, not the values.
-        with pytest.raises(polypus.ConfigurationError, match="real values"):
+        with pytest.raises(TypeError, match=r"complex array \(complex128\)"):
             qml.vjp(model, ROWS, point(model), cotangent(model).astype(complex))
+        # An object array is read value by value: the NumPy complex scalar is
+        # refused by its type, where `float()` would drop its imaginary part.
+        objects = cotangent(model).astype(object)
+        objects[1, 2] = np.complex128(0.5)
+        with pytest.raises(
+            TypeError, match=r"cotangent\[1\]\[2\] is .+, a complex number"
+        ):
+            qml.vjp(model, ROWS, point(model), objects, exact=True)
 
     @pytest.mark.parametrize(
         ("bad", "got"),
@@ -323,6 +333,9 @@ class TestCotangent:
             np.str_("0.5"),
             None,
             object(),
+            1j,
+            np.complex128(1),
+            np.complex64(1),
         ],
         ids=repr,
     )
