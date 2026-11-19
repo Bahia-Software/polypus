@@ -2743,8 +2743,10 @@ is also a `ValueError` (#418), as `train`'s do:
 
 - **Data.** `x` is rows of features or a `polypus.qml.Dataset`; with a
   `Dataset`, `y` is an error (it carries its own labels, or none).
-  Labels from `y` follow C-8's checks; the rows must be non-empty, of equal
-  width and finite.
+  Labels from `y` follow C-8's checks; the rows must be non-empty, each with
+  at least one feature (a zero-width row would encode nothing and predict a
+  constant, #513), of equal width and finite. Fewer features than qubits
+  stays accepted.
 - **Labels and loss.** With labels, `loss` is required and is a supervised
   loss; `"expectation"` (which ignores labels) is an error. Without
   labels (`y=None`, or a `Dataset` built without them), `loss=None` means
@@ -2967,11 +2969,11 @@ seed=None, exact=False)` exposes (h) to Python:
 - **Checks.** The `TypeError` for `encoder` comes first. Then each of these is
   a `polypus.ConfigurationError` raised before a backend exists, in order:
   `shots` and `n_qpus`, the CUNQA allocation and `exact`; the rows of `x1`
-  (empty, ragged, non-finite), an `Encoder` with no layers, the feature count
-  against the encoder and every sample the encoders reject (a zero sample for
-  amplitude encoding, a non-binary one for basis encoding); the same for `x2`,
-  whose rows must be as wide as `x1`'s; a matrix too large; a `seed` on
-  `qmio`. The messages name `x1` or `x2`.
+  (empty, zero-width, ragged, non-finite), an `Encoder` with no layers, the
+  feature count against the encoder and every sample the encoders reject (a
+  zero sample for amplitude encoding, a non-binary one for basis encoding);
+  the same for `x2`, whose rows must be as wide as `x1`'s; a matrix too large;
+  a `seed` on `qmio`. The messages name `x1` or `x2`.
 
 **The PyTorch layer (`polypus.torch`).** `polypus.torch.QuantumLayer(model, *,
 initial_params=None, <qml.expval's execution arguments>)` is a
