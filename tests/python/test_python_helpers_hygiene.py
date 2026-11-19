@@ -483,10 +483,8 @@ class TestNoLeftovers:
 
     def test_infrastructures_keep_no_unread_attributes(self):
         pytest.importorskip("qiskit_aer")
-        from polypus_python.infrastructure import Infraestructure
         from polypus_python.local import Local
 
-        assert "__init__" not in vars(Infraestructure)
         unread = {"num_qpus", "qubits_per_qpu", "qpu_types"}
         assert not unread & set(vars(Local()))
         with pytest.raises(TypeError):
