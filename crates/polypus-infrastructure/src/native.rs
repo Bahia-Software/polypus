@@ -1466,6 +1466,15 @@ mod tests {
         }
     }
 
+    /// Whether the system refuses an allocation far beyond RAM + swap up
+    /// front: Linux's overcommit modes 0 (heuristic) and 2 (strict) do; mode 1
+    /// grants it, and writing it would get the process killed. `false` where
+    /// the mode cannot be read (not Linux), as in `test_memory_budget.py`.
+    fn overcommit_refuses_impossible_allocations() -> bool {
+        std::fs::read_to_string("/proc/sys/vm/overcommit_memory")
+            .is_ok_and(|mode| matches!(mode.trim(), "0" | "2"))
+    }
+
     /// A transpiler that moves the circuit onto a register of `width` qubits
     /// (a layout pass onto a larger device would): the gates are kept.
     struct WideningTranspiler {
@@ -1486,8 +1495,18 @@ mod tests {
     /// simulator's own ceiling (40) no longer backs it up at 30. 40 qubits
     /// (16 TiB) fits no detected budget and exceeds the fallback's 30-qubit
     /// ceiling, so either way the run is refused before anything is allocated.
+    ///
+    /// Skipped unless Linux overcommit is in mode 0 or 2, as its Python
+    /// counterpart in `tests/python/test_memory_budget.py` is: if the width
+    /// check ever regressed, those modes refuse the 16 TiB allocation and the
+    /// test fails cleanly, while mode 1 (or a system without that refusal)
+    /// would grant it and the run would try to write it.
     #[test]
     fn a_transpiler_that_widens_the_circuit_is_checked_at_the_new_width() {
+        if !overcommit_refuses_impossible_allocations() {
+            eprintln!("skipped: needs Linux overcommit mode 0 or 2 to refuse a 16 TiB allocation");
+            return;
+        }
         let backend = NativeStatevectorBackend::with_transpiler(
             0,
             Box::new(WideningTranspiler {

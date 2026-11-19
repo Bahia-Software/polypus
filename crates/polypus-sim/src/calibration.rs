@@ -201,8 +201,9 @@ pub struct CalibrationResult {
     /// or `31` for *never* (parallelism paid at no probed size). `31` was one
     /// past the old 30-qubit ceiling and stays the stored value so caches keep
     /// their meaning (issue #428); circuits of 31 to 40 qubits now exist, so a
-    /// caller that sets a simulator's `parallel_threshold` from this value must
-    /// read `31` as [`usize::MAX`], as the process-wide resolution does.
+    /// caller that sets a simulator's `parallel_threshold` should use
+    /// [`parallel_threshold`](Self::parallel_threshold), which reads `31` as
+    /// [`usize::MAX`] as the process-wide resolution does.
     pub threshold: usize,
     /// `rayon::current_num_threads()` observed during calibration — one half of
     /// the cache key, alongside the CPU fingerprint (see `cache_key`).
@@ -217,7 +218,9 @@ pub struct CalibrationResult {
 #[derive(Debug, Clone)]
 pub struct CalibrationOutcome {
     /// Qubit count at or above which the gate-parallel path should be used,
-    /// or `31` for *never*: see [`CalibrationResult::threshold`].
+    /// or `31` for *never*: see [`CalibrationResult::threshold`]. To set a
+    /// simulator's `parallel_threshold`, use
+    /// [`parallel_threshold`](Self::parallel_threshold).
     pub threshold: usize,
     /// Rayon threads detected — one half of the cache key, alongside the CPU
     /// fingerprint (see `cache_key`).
@@ -231,6 +234,24 @@ pub struct CalibrationOutcome {
     pub cache_path: Option<String>,
     /// True when this call persisted a freshly measured result to disk.
     pub cache_written: bool,
+}
+
+impl CalibrationResult {
+    /// The threshold to give a simulator's `parallel_threshold`:
+    /// [`threshold`](Self::threshold), with its *never* value (`31`) as
+    /// [`usize::MAX`], which no circuit reaches whatever
+    /// [`MAX_QUBITS`](crate::MAX_QUBITS) is (issue #428).
+    pub fn parallel_threshold(&self) -> usize {
+        effective_threshold(self.threshold)
+    }
+}
+
+impl CalibrationOutcome {
+    /// The threshold to give a simulator's `parallel_threshold`; see
+    /// [`CalibrationResult::parallel_threshold`].
+    pub fn parallel_threshold(&self) -> usize {
+        effective_threshold(self.threshold)
+    }
 }
 
 /// On-disk cache payload. Small and forward-guarded by `schema`.
@@ -1527,6 +1548,40 @@ core id\t\t: 0
         // A real crossover is used as calibrated.
         assert_eq!(effective_threshold(16), 16);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #428 review: the public results still report `31` for *never*,
+    /// and fed straight into a simulator's `parallel_threshold` that would turn
+    /// the parallel path on from 31 qubits. `parallel_threshold()` is the value
+    /// to feed it instead.
+    #[test]
+    fn the_public_results_give_a_sentinel_free_threshold() {
+        let result = |threshold| CalibrationResult {
+            threshold,
+            num_threads: 8,
+            duration: Duration::ZERO,
+        };
+        let outcome = |threshold| CalibrationOutcome {
+            threshold,
+            num_threads: 8,
+            duration: Duration::ZERO,
+            reused_cache: false,
+            cache_path: None,
+            cache_written: false,
+        };
+        assert_eq!(
+            result(PARALLELISM_DISABLED).parallel_threshold(),
+            usize::MAX
+        );
+        assert_eq!(
+            outcome(PARALLELISM_DISABLED).parallel_threshold(),
+            usize::MAX
+        );
+        // A 31- to 40-qubit circuit stays on the sequential path.
+        assert!(result(PARALLELISM_DISABLED).parallel_threshold() > crate::MAX_QUBITS);
+        // A real crossover is passed through unchanged.
+        assert_eq!(result(16).parallel_threshold(), 16);
+        assert_eq!(outcome(16).parallel_threshold(), 16);
     }
 
     #[test]
