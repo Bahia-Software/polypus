@@ -380,22 +380,8 @@ fn write_gate(
     angles: Angles<'_>,
     stack: &mut Vec<f64>,
 ) -> Result<(), CircuitError> {
-    let values = gate
-        .params()
-        .map(|p| Ok(fmt_number(angles.resolve(p, stack)?)))
-        .collect::<Result<Vec<String>, CircuitError>>()?;
-    let operands: Vec<String> = gate
-        .acts_on()
-        .qubits()
-        .iter()
-        .map(|q| format!("q[{q}]"))
-        .collect();
-    if values.is_empty() {
-        let _ = writeln!(out, "{name} {};", operands.join(","));
-    } else {
-        let _ = writeln!(out, "{name}({}) {};", values.join(","), operands.join(","));
-    }
-    Ok(())
+    let values = gate.params().map(|p| angles.resolve(p, stack));
+    write_statement(out, name, values, gate.acts_on().qubits())
 }
 
 /// A call of a declared gate, under the name the export declares it by.
@@ -406,7 +392,6 @@ fn write_call(
     angles: Angles<'_>,
     stack: &mut Vec<f64>,
 ) -> Result<(), CircuitError> {
-    let operands: Vec<String> = call.qubits().iter().map(|q| format!("q[{q}]")).collect();
     let values = call
         .params()
         .iter()
@@ -418,13 +403,42 @@ fn write_call(
         call.check_body(&values)?;
     }
     let name = declarations.names.gate(call.definition());
-    if values.is_empty() {
-        let _ = writeln!(out, "{name} {};", operands.join(","));
-    } else {
-        let angles: Vec<String> = values.iter().map(|&v| fmt_number(v)).collect();
-        let _ = writeln!(out, "{name}({}) {};", angles.join(","), operands.join(","));
+    write_statement(out, name, values.iter().map(|&v| Ok(v)), call.qubits())
+}
+
+/// `name(values) q[i],q[j],…;`, without parentheses when there are no
+/// values: the one statement form built-in gates and calls of declared gates
+/// share, so the two cannot drift apart. It runs once per gate of every
+/// export, so it writes straight into `out`, without intermediate strings.
+/// The values are taken in order and the first error is returned;
+/// `write_qasm2` then discards `out`, so the statement left half-written
+/// does not matter.
+fn write_statement(
+    out: &mut String,
+    name: &str,
+    values: impl IntoIterator<Item = Result<f64, CircuitError>>,
+    qubits: &[usize],
+) -> Result<(), CircuitError> {
+    out.push_str(name);
+    let mut has_values = false;
+    for value in values {
+        out.push(if has_values { ',' } else { '(' });
+        has_values = true;
+        out.push_str(&fmt_number(value?));
     }
+    if has_values {
+        out.push(')');
+    }
+    write_operands(out, qubits);
+    out.push_str(";\n");
     Ok(())
+}
+
+/// ` q[i],q[j],…`, with its leading space.
+fn write_operands(out: &mut String, qubits: &[usize]) {
+    for (i, q) in qubits.iter().enumerate() {
+        let _ = write!(out, "{}q[{q}]", if i == 0 { ' ' } else { ',' });
+    }
 }
 
 /// `barrier q;` for every qubit (an empty list), else the qubits listed.
@@ -432,8 +446,9 @@ fn write_barrier(out: &mut String, qubits: &[usize]) {
     if qubits.is_empty() {
         out.push_str("barrier q;\n");
     } else {
-        let args: Vec<String> = qubits.iter().map(|q| format!("q[{q}]")).collect();
-        let _ = writeln!(out, "barrier {};", args.join(","));
+        out.push_str("barrier");
+        write_operands(out, qubits);
+        out.push_str(";\n");
     }
 }
 
