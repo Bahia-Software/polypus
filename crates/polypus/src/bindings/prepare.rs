@@ -90,7 +90,22 @@ impl Entry {
     /// Whether it trains: `nodes`, `cores_per_qpu` and `id` are then required
     /// on the string path, and `id` is the caller's.
     fn trains(self) -> bool {
-        matches!(self, Entry::Train | Entry::QmlTrain)
+        match self {
+            Entry::Train | Entry::QmlTrain => true,
+            Entry::Run | Entry::QmlPredict => false,
+        }
+    }
+
+    /// The label its generated run id starts with, or `None` when the
+    /// caller's `id` is the run id. The id names the SLURM job family, the
+    /// temporary files and the log stream, so a new entry point has to choose
+    /// it here rather than inherit one.
+    fn id_label(self) -> Option<&'static str> {
+        match self {
+            Entry::Run => Some("run"),
+            Entry::QmlPredict => Some("predict"),
+            Entry::Train | Entry::QmlTrain => None,
+        }
     }
 
     /// Why a Qiskit circuit cannot run on the native backend here.
@@ -168,23 +183,20 @@ pub(super) fn check_arguments(
     n_qpus: u32,
     id: Option<String>,
 ) -> PyResult<String> {
-    let caller_id = if entry.trains() {
-        Some(targets::require_arg(entry.name(), "id", id)?)
-    } else {
-        None
-    };
-    validate_shots_and_qpus(shots, n_qpus)?;
-    selection.validate_allocation()?;
-    let Some(id) = caller_id else {
-        let label = if entry == Entry::Run {
-            "run"
-        } else {
-            "predict"
-        };
-        return Ok(format!("{label}_{n_qpus}_{}", selection.infrastructure));
-    };
-    validate_id(&id)?;
-    Ok(id)
+    match entry.id_label() {
+        Some(label) => {
+            validate_shots_and_qpus(shots, n_qpus)?;
+            selection.validate_allocation()?;
+            Ok(format!("{label}_{n_qpus}_{}", selection.infrastructure))
+        }
+        None => {
+            let id = targets::require_arg(entry.name(), "id", id)?;
+            validate_shots_and_qpus(shots, n_qpus)?;
+            selection.validate_allocation()?;
+            validate_id(&id)?;
+            Ok(id)
+        }
+    }
 }
 
 /// The one rule on where a circuit can run: a Qiskit circuit (`foreign`) runs
@@ -376,6 +388,16 @@ mod tests {
                 }
             }
         });
+    }
+
+    /// The two per-entry choices about the run id agree: an entry point that
+    /// trains takes the caller's `id`, and every other one generates its id
+    /// from its own label.
+    #[test]
+    fn an_entry_point_generates_its_id_exactly_when_it_does_not_train() {
+        for entry in [Entry::Run, Entry::Train, Entry::QmlTrain, Entry::QmlPredict] {
+            assert_eq!(entry.id_label().is_none(), entry.trains(), "{entry:?}");
+        }
     }
 
     /// The run id's prefix: the caller's `id` when training, checked after
