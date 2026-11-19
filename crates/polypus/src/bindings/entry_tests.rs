@@ -9,7 +9,7 @@
 //! CUNQA or a QPU.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use pyo3::types::PyString;
 
@@ -299,10 +299,11 @@ fn run_quantum_circuit_refuses_a_qiskit_circuit_on_native_and_qmio() {
             );
         }
 
-        // Any other backend: every circuit reaches it.
+        // Any other backend: every circuit reaches it, once.
         for qc in [qiskit_circuit(py), bound_native_circuit(py), qasm] {
             assert_reached_backend(py, run_case(qc, 8, "sentinel-rule-run", "aer", Some(1)));
         }
+        assert_eq!(BUILDS.load(Ordering::SeqCst), 3);
     });
 }
 
@@ -390,6 +391,7 @@ fn train_refuses_a_qiskit_circuit_on_native_and_qmio() {
                 train_case(py, qc, de(py, 4), 16, "sentinel-rule-train", "aer", None),
             );
         }
+        assert_eq!(BUILDS.load(Ordering::SeqCst), 2);
     });
 }
 
@@ -482,6 +484,7 @@ fn qml_entry_points_refuse_native_and_qmio() {
             py,
             qml_train_case(py, de(py, 4), 16, 1, "sentinel-rule-qml", "aer"),
         );
+        assert_eq!(BUILDS.load(Ordering::SeqCst), 1);
 
         assert_rejected(
             py,
@@ -497,6 +500,7 @@ fn qml_entry_points_refuse_native_and_qmio() {
             py,
             qml_predict_case(py, vec![0.5], 16, "sentinel-rule-qml", "aer"),
         );
+        assert_eq!(BUILDS.load(Ordering::SeqCst), 2);
     });
 }
 
