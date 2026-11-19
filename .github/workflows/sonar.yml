@@ -178,13 +178,14 @@ jobs:
     env:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
     steps:
-      # Full history: blame data for new-code detection.
+      # Full history: blame data for new-code detection. This job keeps a full
+      # clone, reference-data/ included: with `sparse-checkout` set,
+      # actions/checkout also passes `--filter=blob:none`, so only HEAD's blobs
+      # are local. On pushes to main Sonar blames each changed file against its
+      # previous version with JGit, which cannot lazy-fetch a missing blob
+      # from the promisor remote, and the scan dies with MissingObjectException.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          sparse-checkout: |
-            /*
-            !/reference-data/
-          sparse-checkout-cone-mode: false
           fetch-depth: 0
       # The Rust analyzer needs cargo on PATH.
       - name: Install Rust (rust-toolchain.toml)
