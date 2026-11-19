@@ -2957,11 +2957,11 @@ seed=None, exact=False)` exposes (h) to Python:
 - **Checks.** The `TypeError` for `encoder` comes first. Then each of these is
   a `polypus.ConfigurationError` raised before a backend exists, in order:
   `shots` and `n_qpus`, the CUNQA allocation and `exact`; the rows of `x1`
-  (empty, zero-width, ragged, non-finite), an `Encoder` with no layers, the feature count
-  against the encoder and every sample the encoders reject (a zero sample for
-  amplitude encoding, a non-binary one for basis encoding); the same for `x2`,
-  whose rows must be as wide as `x1`'s; a matrix too large; a `seed` on
-  `qmio`. The messages name `x1` or `x2`.
+  (empty, zero-width, ragged, non-finite), an `Encoder` with no layers, the
+  feature count against the encoder and every sample the encoders reject (a
+  zero sample for amplitude encoding, a non-binary one for basis encoding);
+  the same for `x2`, whose rows must be as wide as `x1`'s; a matrix too large;
+  a `seed` on `qmio`. The messages name `x1` or `x2`.
 
 **The PyTorch layer (`polypus.torch`).** `polypus.torch.QuantumLayer(model, *,
 initial_params=None, <qml.expval's execution arguments>)` is a

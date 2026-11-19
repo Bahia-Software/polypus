@@ -374,6 +374,16 @@ class TestZeroWidthSamples:
         with pytest.raises(ValueError, match=self._MESSAGE):
             Dataset(x)
 
+    def test_a_numpy_selection_of_no_columns(self):
+        # The case of #513: selecting no feature columns leaves shape (n, 0).
+        import numpy as np
+        from polypus.qml import Dataset
+
+        x = np.arange(8.0).reshape(4, 2)[:, []]
+        assert x.shape == (4, 0)
+        with pytest.raises(ValueError, match=self._MESSAGE):
+            Dataset(x, [1, 1, -1, -1])
+
     def test_fit(self):
         import polypus
 
@@ -408,6 +418,10 @@ class TestZeroWidthSamples:
         model = make_model(num_qubits=2)
         with pytest.raises(polypus.ConfigurationError, match=self._MESSAGE):
             qml.expval(model, [[]], [0.1, -0.2, 0.3, -0.4], exact=True)
+        with pytest.raises(polypus.ConfigurationError, match=self._MESSAGE):
+            qml.jacobian(model, [[]], [0.1, -0.2, 0.3, -0.4], exact=True)
+        with pytest.raises(polypus.ConfigurationError, match=self._MESSAGE):
+            qml.vjp(model, [[]], [0.1, -0.2, 0.3, -0.4], [[1.0]], exact=True)
         encoder = qml.Encoder(2).angle_encoder("ry")
         with pytest.raises(polypus.ConfigurationError, match=self._MESSAGE):
             qml.kernel_matrix(encoder, [[]], exact=True)

@@ -338,7 +338,7 @@ accuracy = svm.score(k_test, y_test)
 
 ### Data
 
-`qml.Dataset(x, y=None)` checks the rows once (non-empty, equal width, finite) and keeps the labels with them. It splits reproducibly and scales features:
+`qml.Dataset(x, y=None)` checks the rows once (non-empty, at least one feature, equal width, finite) and keeps the labels with them. It splits reproducibly and scales features:
 
 ```python
 data = qml.Dataset(X, y)
