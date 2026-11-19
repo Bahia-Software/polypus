@@ -71,16 +71,18 @@
 
 use std::collections::HashMap;
 
+mod bound;
 mod error;
 mod ising;
 mod pauli;
 mod qubo;
 
+pub use bound::MAX_WEIGHT_BOUND;
 pub use error::ObservableError;
 pub use ising::IsingObservable;
 pub use pauli::{
     group_qubit_wise, BasisRotation, Grouping, MeasurementGroup, ParityObservable, Pauli,
-    PauliMask, MAX_QUBITS, MAX_WEIGHT_BOUND,
+    PauliMask, MAX_QUBITS,
 };
 pub use qubo::QuboObservable;
 

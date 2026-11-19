@@ -24,12 +24,13 @@ pub enum ObservableError {
     /// A counts key contained a character other than `'0'` or `'1'`.
     InvalidBitstring(String),
     /// An invalid input: a construction-time invariant was violated (index out
-    /// of range, `i == j` coupling, non-finite coefficient, a Pauli string
-    /// naming a qubit twice), or data passed for evaluation cannot be evaluated
-    /// (a probability outside `[0, 1]`, counts whose total overflows `u64`).
-    /// Produced by the constructors of every observable here, by
-    /// `group_qubit_wise`, and by `ParityObservable`'s evaluation; surfaced as
-    /// a `ValueError` at the Python boundary.
+    /// of range, `i == j` coupling, non-finite coefficient, coefficients whose
+    /// `Σ|c|·|scale|` exceeds `MAX_WEIGHT_BOUND`, a Pauli string naming a qubit twice), or
+    /// data passed for evaluation cannot be evaluated (a probability outside
+    /// `[0, 1]`, counts whose total overflows `u64`). Produced by the
+    /// constructors of every observable here, by `group_qubit_wise`, and by the
+    /// evaluation of the native reducers; surfaced as a `ValueError` at the
+    /// Python boundary.
     Invalid(String),
     /// A foreign error from a non-native implementation, type-erased so this
     /// pure crate needn't depend on PyO3. The FFI crate downcasts it to

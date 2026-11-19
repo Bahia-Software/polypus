@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use rayon::prelude::*;
 
+use crate::bound::check_weight_bound;
 use crate::{CostObservable, ObservableError};
 
 /// A QUBO cost `f(x) = Σ_i linear[i]·x_i + Σ_(i,j) w·x_i·x_j + constant`,
@@ -45,8 +46,14 @@ impl QuboObservable {
     /// `linear` is a list of `(index, coefficient)`; `quadratic` a list of
     /// `(i, j, weight)`. Repeated entries accumulate. Validation (returned as
     /// [`ObservableError::Invalid`]) rejects: `num_vars == 0`, any index
-    /// `>= num_vars`, a quadratic term with `i == j`, or any non-finite
-    /// coefficient / `constant` / `scale`.
+    /// `>= num_vars`, a quadratic term with `i == j`, any non-finite
+    /// coefficient / `constant` / `scale`, or a
+    /// `(|constant| + Σ|linear| + Σ|quadratic|)·|scale|` above
+    /// [`MAX_WEIGHT_BOUND`](crate::MAX_WEIGHT_BOUND).
+    ///
+    /// That sum bounds `|scale·f(x)|` for every `x ∈ {0, 1}ⁿ`, so no value
+    /// or count-weighted mean can overflow (the argument is in the constant's
+    /// docs).
     pub fn new(
         num_vars: usize,
         linear: Vec<(usize, f64)>,
@@ -69,7 +76,7 @@ impl QuboObservable {
         }
 
         let mut linear_dense = vec![0.0f64; num_vars];
-        for (i, c) in linear {
+        for &(i, c) in &linear {
             if i >= num_vars {
                 return Err(ObservableError::Invalid(format!(
                     "linear index {i} out of range for {num_vars} variables"
@@ -84,7 +91,7 @@ impl QuboObservable {
         }
 
         let mut quad = Vec::with_capacity(quadratic.len());
-        for (i, j, w) in quadratic {
+        for &(i, j, w) in &quadratic {
             if i >= num_vars || j >= num_vars {
                 return Err(ObservableError::Invalid(format!(
                     "quadratic index ({i},{j}) out of range for {num_vars} variables"
@@ -104,6 +111,13 @@ impl QuboObservable {
             let (lo, hi) = if i < j { (i, j) } else { (j, i) };
             quad.push((lo as u32, hi as u32, w));
         }
+        // After the per-coefficient checks, so a NaN keeps its own message.
+        check_weight_bound(
+            std::iter::once(constant)
+                .chain(linear.iter().map(|&(_, c)| c))
+                .chain(quadratic.iter().map(|&(_, _, w)| w)),
+            scale,
+        )?;
 
         Ok(Self {
             num_vars,
@@ -192,7 +206,8 @@ impl QuboObservable {
     }
 
     /// Count-weighted mean of `f` over one candidate's counts. Empty counts (or
-    /// counts summing to zero) yield `0.0`.
+    /// counts summing to zero) yield `0.0`, and counts whose total exceeds
+    /// `u64::MAX` are an [`ObservableError::Invalid`].
     ///
     /// Summed in ascending bitstring order so the result does not depend on
     /// `HashMap` iteration order.
@@ -204,7 +219,12 @@ impl QuboObservable {
         let mut den = 0u64;
         for (key, n) in outcomes {
             num += self.eval_bits(key)? * n as f64;
-            den += n;
+            // A total above u64::MAX would trap (overflow checks are on in
+            // release too) inside a rayon worker instead of returning an
+            // error, and would break the bound of `MAX_WEIGHT_BOUND`.
+            den = den.checked_add(n).ok_or_else(|| {
+                ObservableError::Invalid("the total of the counts overflows u64".to_string())
+            })?;
         }
         Ok(if den == 0 { 0.0 } else { num / den as f64 })
     }
@@ -225,6 +245,7 @@ impl CostObservable for QuboObservable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MAX_WEIGHT_BOUND;
 
     fn counts(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
         pairs.iter().map(|(k, n)| (k.to_string(), *n)).collect()
@@ -248,6 +269,131 @@ mod tests {
         assert!(QuboObservable::new(2, vec![(0, f64::NAN)], vec![], 0.0, 1.0).is_err());
         assert!(QuboObservable::new(2, vec![], vec![], f64::INFINITY, 1.0).is_err());
         assert!(QuboObservable::new(2, vec![], vec![], 0.0, f64::NAN).is_err());
+    }
+
+    #[test]
+    fn coefficient_sums_that_could_overflow_are_rejected() {
+        let exceeds = |r: Result<QuboObservable, ObservableError>| matches!(&r, Err(ObservableError::Invalid(m)) if m.contains("exceeds"));
+        // The example of #625, which used to evaluate to Ok(inf) on "11"
+        // (here each coefficient is above the bound on its own, too).
+        assert!(exceeds(QuboObservable::new(
+            2,
+            vec![(0, 1e308), (1, 1e308)],
+            vec![],
+            0.0,
+            1.0
+        )));
+        // Below: every coefficient is within the bound (about 4.9e288) on its
+        // own, and only the sum exceeds it, so each case fails if its part is
+        // left out of the check.
+        // Two linear terms, and repeated entries of one variable.
+        assert!(exceeds(QuboObservable::new(
+            2,
+            vec![(0, 3e288), (1, 3e288)],
+            vec![],
+            0.0,
+            1.0
+        )));
+        assert!(exceeds(QuboObservable::new(
+            1,
+            vec![(0, 3e288), (0, 3e288)],
+            vec![],
+            0.0,
+            1.0
+        )));
+        // The constant, and the quadratic part.
+        assert!(exceeds(QuboObservable::new(
+            1,
+            vec![(0, 4e288)],
+            vec![],
+            1e288,
+            1.0
+        )));
+        assert!(exceeds(QuboObservable::new(
+            2,
+            vec![(0, 4e288)],
+            vec![(0, 1, 1e288)],
+            0.0,
+            1.0
+        )));
+        // The scale.
+        assert!(exceeds(QuboObservable::new(
+            1,
+            vec![(0, 1e200)],
+            vec![],
+            0.0,
+            1e100
+        )));
+        assert!(QuboObservable::new(1, vec![(0, 1e200)], vec![], 0.0, 1.0).is_ok());
+        // A matrix whose diagonal entries add up past the bound.
+        assert!(exceeds(QuboObservable::from_matrix(
+            &[vec![3e288, 0.0], vec![0.0, 3e288]],
+            1.0
+        )));
+        // A NaN keeps its own message.
+        let nan = QuboObservable::new(1, vec![(0, f64::NAN)], vec![], 0.0, 1.0);
+        assert!(
+            matches!(&nan, Err(ObservableError::Invalid(m)) if m.contains("not finite")),
+            "{nan:?}"
+        );
+    }
+
+    #[test]
+    fn the_weight_bound_is_inclusive_and_split_across_every_part() {
+        let b = MAX_WEIGHT_BOUND;
+        let above = f64::from_bits(b.to_bits() + 1);
+        // Exactly at the bound is accepted, the next float above it is not.
+        assert!(QuboObservable::new(1, vec![(0, b)], vec![], 0.0, 1.0).is_ok());
+        assert!(QuboObservable::new(1, vec![(0, above)], vec![], 0.0, 1.0).is_err());
+        assert!(QuboObservable::new(1, vec![], vec![], -b, 1.0).is_ok());
+        assert!(QuboObservable::new(1, vec![], vec![], -above, 1.0).is_err());
+        // Split across the constant, the linear and the quadratic part, with
+        // the sign of the scale not mattering. Exact: b/4 + b/4 = b/2 and
+        // b/2 + b/2 = b, in the order the check adds them.
+        let parts = |scale| {
+            QuboObservable::new(
+                2,
+                vec![(0, -b / 4.0)],
+                vec![(0, 1, b / 2.0)],
+                b / 4.0,
+                scale,
+            )
+        };
+        assert!(parts(1.0).is_ok());
+        assert!(parts(-1.0).is_ok());
+        assert!(parts(2.0).is_err());
+    }
+
+    #[test]
+    fn the_weight_bound_keeps_every_result_finite() {
+        let b = MAX_WEIGHT_BOUND;
+        // f = b/2 + (b/2)·x0, so "01" and "11" both evaluate to b. Exact:
+        // b/2 + b/2.
+        let obs = QuboObservable::new(2, vec![(0, b / 2.0)], vec![], b / 2.0, 1.0).unwrap();
+        // Exact: one value times a count, divided by the same count (both
+        // round to 2⁶⁴, a power of two).
+        let ev = obs
+            .expectation_batch(&[counts(&[("01", u64::MAX)])])
+            .unwrap();
+        assert_eq!(ev, vec![b]);
+        // The worst case for the sum, as in the parity reducer's test: two
+        // keys of the same value whose counts total exactly u64::MAX and both
+        // round up when converted to f64, so the rounded counts add up to more
+        // than 2⁶⁴: the case the factor 2 of the bound is for.
+        let x: u64 = (1 << 63) + 1025;
+        let y: u64 = u64::MAX - x;
+        assert!((x as f64) as u128 > x as u128 && (y as f64) as u128 > y as u128);
+        // Exactly (in u128, as f64 addition would round it back): 2⁶⁴ + 1024.
+        assert_eq!(
+            (x as f64) as u128 + (y as f64) as u128,
+            (1u128 << 64) + 1024
+        );
+        let mean = obs
+            .expectation_batch(&[counts(&[("01", x), ("11", y)])])
+            .unwrap()[0];
+        // Exact: here b times each rounded count rounds down, and their sum
+        // rounds back to b · 2⁶⁴, which the total (2⁶⁴ as f64) divides.
+        assert_eq!(mean, b);
     }
 
     #[test]
@@ -314,6 +460,24 @@ mod tests {
             vec![0.0]
         );
         assert_eq!(obs.expectation_batch(&[]).unwrap(), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn a_count_total_above_u64_is_an_error_not_a_panic() {
+        // f = x0. Each count fits in a u64, but the total does not.
+        let obs = QuboObservable::new(2, vec![(0, 1.0)], vec![], 0.0, 1.0).unwrap();
+        let result = obs.expectation_batch(&[counts(&[("00", u64::MAX), ("01", 1)])]);
+        assert!(
+            matches!(&result, Err(ObservableError::Invalid(m)) if m.contains("overflows u64")),
+            "{result:?}"
+        );
+        // Exactly u64::MAX in total is still evaluated. Exact: the numerator is
+        // 1 (one shot of value 1) and u64::MAX converts to 2⁶⁴, so the mean is
+        // 2⁻⁶⁴.
+        let ev = obs
+            .expectation_batch(&[counts(&[("00", u64::MAX - 1), ("01", 1)])])
+            .unwrap();
+        assert_eq!(ev, vec![2f64.powi(-64)]);
     }
 
     #[test]

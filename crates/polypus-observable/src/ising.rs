@@ -26,7 +26,11 @@ impl IsingObservable {
     /// - `J·z_i·z_i = J` (a self-coupling folds entirely into the constant,
     ///   since `z_i² = 1`).
     ///
-    /// Validation mirrors [`QuboObservable::new`] (index range, finiteness).
+    /// Validation mirrors [`QuboObservable::new`] (index range, finiteness),
+    /// and its bound on the sum of coefficients
+    /// ([`MAX_WEIGHT_BOUND`](crate::MAX_WEIGHT_BOUND)) applies to the expanded
+    /// QUBO, whose coefficients add up to as much as 9 times the Ising ones
+    /// (a coupling `J` becomes `J`, `-2J`, `-2J` and `4J`).
     pub fn new(
         num_vars: usize,
         fields: Vec<(usize, f64)>,
@@ -110,6 +114,7 @@ impl CostObservable for IsingObservable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MAX_WEIGHT_BOUND;
 
     fn counts(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
         pairs.iter().map(|(k, n)| (k.to_string(), *n)).collect()
@@ -196,6 +201,67 @@ mod tests {
             let obs = IsingObservable::new(n, vec![], vec![], 0.0, 1.0).unwrap();
             assert_eq!(obs.num_vars(), n);
         }
+    }
+
+    #[test]
+    fn a_count_total_above_u64_is_an_error_not_a_panic() {
+        // f = z_0: "00" -> +1, "01" -> -1. Each count fits in a u64, but the
+        // total does not.
+        let obs = IsingObservable::new(2, vec![(0, 1.0)], vec![], 0.0, 1.0).unwrap();
+        let result = obs.expectation_batch(&[counts(&[("00", u64::MAX), ("01", 1)])]);
+        assert!(
+            matches!(&result, Err(ObservableError::Invalid(m)) if m.contains("overflows u64")),
+            "{result:?}"
+        );
+        // Exactly u64::MAX in total is still evaluated. Exact: u64::MAX - 1
+        // converts to 2⁶⁴, the numerator 2⁶⁴ - 1 rounds to 2⁶⁴, and so does the
+        // total, so the mean is 1.
+        let ev = obs
+            .expectation_batch(&[counts(&[("00", u64::MAX - 1), ("01", 1)])])
+            .unwrap();
+        assert_eq!(ev, vec![1.0]);
+    }
+
+    #[test]
+    fn the_weight_bound_applies_to_the_expanded_qubo() {
+        // h·z_0 expands to h - 2h·x_0, whose coefficients add up to 3|h|: about
+        // 3e288 is within MAX_WEIGHT_BOUND (about 4.9e288), 6e288 is not.
+        assert!(IsingObservable::new(1, vec![(0, 1e288)], vec![], 0.0, 1.0).is_ok());
+        let result = IsingObservable::new(1, vec![(0, 2e288)], vec![], 0.0, 1.0);
+        assert!(
+            matches!(&result, Err(ObservableError::Invalid(m)) if m.contains("exceeds")),
+            "{result:?}"
+        );
+        // Accepted before #625, and then evaluated to NaN or -inf: a field and
+        // a coupling on variable 0 expand to two finite linear entries,
+        // -1.6e308 and -8e307, whose sum is not.
+        let result = IsingObservable::new(2, vec![(0, 8e307)], vec![(0, 1, 4e307)], 0.0, 1.0);
+        assert!(
+            matches!(&result, Err(ObservableError::Invalid(m)) if m.contains("exceeds")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn the_weight_bound_is_inclusive_on_the_expanded_qubo() {
+        let b = MAX_WEIGHT_BOUND;
+        // f = -b/2 + (b/2)·z_0 expands to the QUBO 0 - b·x_0 (exactly: the
+        // constant is -b/2 + b/2), whose coefficients add up to exactly b.
+        let obs = IsingObservable::new(1, vec![(0, b / 2.0)], vec![], -b / 2.0, 1.0).unwrap();
+        // And it stays finite at the bound. Exact: -b times a count that
+        // rounds to 2⁶⁴, divided by the same count.
+        assert_eq!(
+            obs.expectation_batch(&[counts(&[("1", u64::MAX)])])
+                .unwrap(),
+            vec![-b]
+        );
+        // The next field above b/2 exceeds it.
+        let above = f64::from_bits((b / 2.0).to_bits() + 1);
+        let result = IsingObservable::new(1, vec![(0, above)], vec![], -b / 2.0, 1.0);
+        assert!(
+            matches!(&result, Err(ObservableError::Invalid(m)) if m.contains("exceeds")),
+            "{result:?}"
+        );
     }
 
     #[test]
