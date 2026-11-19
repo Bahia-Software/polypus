@@ -84,7 +84,7 @@ workflows run their own commands. Install
 (`JUST_VERSION`):
 
 ```bash
-cargo install --locked just@1.57.0
+cargo install --locked just --version 1.57.0
 ```
 
 Then, from the repository root:

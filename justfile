@@ -93,10 +93,16 @@ clippy-qmio:
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
 
+# Built as docs.yml publishes it, rustdoc under /rust/ included, then scanned
+# for what must never reach the public site (the public rules; the private
+# patterns run in CI only).
 # The documentation site and its hooks (needs requirements-docs.txt).
-docs-site:
+docs-site: doc
     pytest tests/docs
     mkdocs build --strict -d target/site
+    cp -r target/doc target/site/rust
+    python scripts/docs/write_legacy_redirects.py target/site
+    python scripts/docs/scan_published_site.py target/site
 
 # Repository hygiene of the commits since `base` (commit first).
 hygiene base="origin/main":
