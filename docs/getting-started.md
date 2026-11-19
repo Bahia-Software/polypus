@@ -79,4 +79,4 @@ result.best_params, result.best_fitness
 - [Variational training](guide/training.md): choosing an optimizer, callbacks, starting points
 - [Quantum machine learning](guide/qml.md)
 - [Tutorials](https://github.com/Bahia-Software/polypus-tutorials), from a first circuit to a native classifier
-- [Rust API reference](https://bahia-software.github.io/polypus/rust/polypus/)
+- [Rust API reference](https://docs.rs/polypus) on docs.rs, one per release (the API of `main`, not yet released, is [on this site](https://bahia-software.github.io/polypus/rust/polypus/))

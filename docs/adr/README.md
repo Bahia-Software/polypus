@@ -7,7 +7,7 @@
 | 0003 | Not used: the number was skipped and no ADR was ever written under it | — |
 | [0004](0004-openqasm3-profile-and-angle-expressions.md) | OpenQASM 3 profile with Qiskit phase conventions, and angle expressions | Accepted (2026-10) |
 | [0005](0005-registry-option-values.md) | Typed values in registry `options`: `str` or `list[str]` | Accepted (2026-10) |
-| [0006](0006-declared-classical-registers.md) | The circuit carries its declared classical width | Proposed (2026-10) |
+| [0006](0006-declared-classical-registers.md) | The circuit carries its declared classical width | Accepted (2026-10) |
 | [0007](0007-native-qml.md) | Native QML, with its own API beside `qml.train` | Proposed (2026-10) |
 | [0008](0008-vector-jacobian-product.md) | `qml.vjp`: the vector-Jacobian product in one adjoint run per row | Proposed (2026-11) |
 

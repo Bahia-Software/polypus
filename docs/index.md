@@ -152,4 +152,4 @@ pip install polypus-quantum
 
 [Getting started](getting-started.md){ .md-button .md-button--primary }
 [Tutorials](https://github.com/Bahia-Software/polypus-tutorials){ .md-button }
-[Rust API](https://bahia-software.github.io/polypus/rust/polypus/){ .md-button }
+[Rust API](https://docs.rs/polypus){ .md-button }
