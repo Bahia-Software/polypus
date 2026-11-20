@@ -357,6 +357,25 @@ fn seed_or_entropy(
     }
 }
 
+/// Reject a resolved run seed the selected backend cannot take (contract C-7,
+/// #393): `2^63` or more on Aer or CUNQA, whose simulators take a signed 64-bit
+/// seed, raises `polypus.ConfigurationError` (a `ValueError`) instead of
+/// reaching Aer masked to 63 bits. A seed drawn from OS entropy is always
+/// below `2^63`, so only an explicit one can fail; `None` (no seed, `qmio`)
+/// passes. Called by every entry point right after it resolves its
+/// [`BackendConfig`], before any backend is built.
+pub(super) fn check_seed_for_backend(
+    seed: Option<u64>,
+    backend_config: &BackendConfig,
+) -> PyResult<()> {
+    match seed {
+        Some(seed) => backend_config
+            .check_seed(seed)
+            .map_err(|e| crate::exceptions::configuration_error(e.to_string())),
+        None => Ok(()),
+    }
+}
+
 /// Suffix `base` with a UUID v4 so concurrent calls never share an
 /// `ExecutionConfig::id` — which names SLURM families/allocations, temp files
 /// and log streams. Used by `run_quantum_circuit`'s auto-generated id,
@@ -1396,7 +1415,12 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// byte-for-byte, and omitting it draws a fresh OS-entropy seed so repeated
 /// runs give genuinely independent noise. Passing a `seed` with
 /// `infrastructure="qmio"` raises `ValueError` rather than silently ignoring
-/// it, since that infrastructure is real hardware and cannot be seeded.
+/// it, since that infrastructure is real hardware and cannot be seeded. Aer
+/// and CUNQA take a seed from `0` to `2**63 - 1` (Aer's `seed_simulator` is a
+/// signed 64-bit integer): a larger one raises `polypus.ConfigurationError` (a
+/// `ValueError`), while the native backend takes any 64-bit seed. A drawn
+/// seed is always below `2**63`, so with `n_qpus=1` the reported seed is the
+/// one Aer received and replays the run with Aer's own `seed_simulator`.
 ///
 /// `nodes` and `cores_per_qpu` size the SLURM allocation and are meaningful
 /// only for `infrastructure="cunqa"` (they become CUNQA's `qraise` parameters);
@@ -1541,6 +1565,7 @@ pub fn run_quantum_circuit<'py>(
     let id = unique_id(&format!("run_{}_{}", n_qpus, infrastructure))?;
     let target = selection.resolve(options.map(OptionsArg::into_inner))?;
     let backend_config = build_backend_config(target)?;
+    check_seed_for_backend(effective_seed, &backend_config)?;
     // Only the native statevector backend consults the gate-parallel threshold,
     // so calibrate it lazily (#351) and surface the one-time default-visible
     // warning only when this run actually resolves to it — never for
@@ -1677,7 +1702,9 @@ pub fn run_quantum_circuit<'py>(
 /// OS-entropy value. `External` has no `seed` field and its library owns its
 /// seed, so there the seed only fixes the shot sampling. On the native backend
 /// the same seed also drives shot sampling, so a native-backend run reproduces
-/// exactly. Returns a
+/// exactly. On Aer and CUNQA the resolved seed must be below `2**63`, the
+/// range of Aer's `seed_simulator`, or `polypus.ConfigurationError` is raised
+/// before anything runs (a drawn seed always is; C-7). Returns a
 /// [`TrainResult`] exposing `best_params`, `best_fitness`, `iterations_run`,
 /// `converged`, `fitness_history`, `final_params`, `final_fitness`, the
 /// effective `seed` and the effective `id`.
@@ -1894,6 +1921,7 @@ pub fn train<'py>(
     }
     let target = selection.resolve(options.map(OptionsArg::into_inner))?;
     let backend_config = build_backend_config(target)?;
+    check_seed_for_backend(Some(effective_seed), &backend_config)?;
     // As in `run_quantum_circuit`: the native backend's simulator resolves the
     // gate-parallel threshold, so calibrate it lazily before building it (#351).
     if matches!(backend_config, BackendConfig::LocalNative { .. }) {
@@ -2095,7 +2123,9 @@ fn bind_feature_rows<'py>(
 /// Qiskit/Aer path (the native backend and `infrastructure="qmio"` are
 /// rejected before anything runs), and Aer's shot sampling
 /// is now seeded too (contract C-7), so a `qml.train` run is fully
-/// reproducible end-to-end given the same seed.
+/// reproducible end-to-end given the same seed. Since it runs on Aer, the
+/// resolved seed must be below `2**63` (`polypus.ConfigurationError`
+/// otherwise; a drawn seed always is).
 ///
 /// As in [`train`], the `id` kwarg is a human-readable *prefix*: a UUID v4 is
 /// appended for uniqueness (mirroring [`run_quantum_circuit`]), so the returned
@@ -2317,6 +2347,7 @@ pub fn qml_train<'py>(
     // non-fusing backend" rejection for a value the caller never chose.
     let target = selection.resolve(options.map(OptionsArg::into_inner))?;
     let backend_config = build_backend_config(target)?;
+    check_seed_for_backend(Some(effective_seed), &backend_config)?;
     // Suffix the caller-supplied `id` with a UUID v4 (see `train` and #75) so
     // concurrent qml.train runs sharing the same `id` never collide on the
     // SLURM family/allocation, temp files or log streams named by
@@ -2511,6 +2542,7 @@ pub fn qml_predict<'py>(
     // predict has no `options=`; a `Registered` target brings its own.
     let target = selection.resolve(None)?;
     let backend_config = build_backend_config(target)?;
+    check_seed_for_backend(Some(effective_seed), &backend_config)?;
     let config = ExecutionConfig {
         id: id.clone(),
         shots,
@@ -3096,6 +3128,33 @@ mod tests {
                 result.is_err(),
                 "an explicit seed must be rejected for infrastructure=qmio"
             );
+        });
+    }
+
+    /// A seed of 2^63 or more is a `polypus.ConfigurationError` (a
+    /// `ValueError`) on Aer and CUNQA, never masked; below it, with no seed, or
+    /// on the native backend, it passes (C-7, #393).
+    #[test]
+    fn check_seed_for_backend_rejects_two_to_the_63_on_aer_393() {
+        use crate::infrastructure::execution_config::AER_SEED_LIMIT;
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let aer = BackendConfig::Local {
+                sim_method: "automatic".to_string(),
+                noise_model: None,
+            };
+            let err = check_seed_for_backend(Some(AER_SEED_LIMIT), &aer)
+                .expect_err("2^63 is rejected on Aer");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            let configuration_error = crate::exceptions::configuration_error_type(py).unwrap();
+            assert!(err.is_instance(py, configuration_error.as_any()));
+            let message = err.value(py).to_string();
+            assert!(message.contains("9223372036854775808"), "{message}");
+            assert!(message.contains("backend=\"aer\""), "{message}");
+            check_seed_for_backend(Some(AER_SEED_LIMIT - 1), &aer).unwrap();
+            check_seed_for_backend(None, &aer).unwrap();
+            let native = BackendConfig::LocalNative { fusion: true };
+            check_seed_for_backend(Some(u64::MAX), &native).unwrap();
         });
     }
 
