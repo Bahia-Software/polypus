@@ -137,7 +137,8 @@ def test_a_seed_of_two_to_the_63_or_more_is_rejected_before_any_qpu(monkeypatch,
     fake = FakeCunqa()
     with pytest.raises(
         polypus.ConfigurationError,
-        match=rf'seed {seed} is out of range for infrastructure="cunqa"',
+        match=rf"seed {seed} is out of range for CUNQA's simulated QPUs "
+        r'\(infrastructure="cunqa" or target=polypus\.Cunqa\(\.\.\.\)\)',
     ):
         _run(fake, monkeypatch, seed=seed)
     assert fake.calls == []

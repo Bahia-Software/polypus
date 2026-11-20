@@ -62,9 +62,21 @@ class TestRunQuantumCircuit:
                 _uniform3(), shots=64, infrastructure="local", backend="aer", seed=seed
             )
         message = str(raised.value)
-        assert 'backend="aer"' in message
+        assert 'Qiskit Aer (backend="aer" or target=polypus.Aer())' in message
         assert str(LIMIT - 1) in message
-        assert 'backend="polypus"' in message  # where a 64-bit seed is taken
+        # Where a 64-bit seed is taken, without suggesting a switch.
+        assert "only the native backend and registered backends" in message
+
+    def test_a_target_names_the_same_backend(self, monkeypatch):
+        # A caller who chose Aer with a target sees the target named too.
+        import polypus
+
+        _forbid_the_seam(monkeypatch)
+        with _rejects(LIMIT) as raised:
+            polypus.run_quantum_circuit(
+                _uniform3(), shots=64, target=polypus.Aer(), seed=LIMIT
+            )
+        assert "target=polypus.Aer()" in str(raised.value)
 
     def test_aer_takes_the_largest_63_bit_seed(self):
         import polypus

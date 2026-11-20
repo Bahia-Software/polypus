@@ -1842,8 +1842,11 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     a seed would give false confidence in reproducibility. `seed=None`
     behaves exactly as before.
 - **`train(..., seed=None)` / `qml.train(..., seed=None)`** seed the optimizer's
-  RNG and are **always accepted**, for every backend, because the seed's primary
-  job (making population init / mutation deterministic, inside the pure-Rust
+  RNG and are **always accepted**, for every backend, within that backend's
+  seed range (see **Seed range** above: on Aer and CUNQA a seed of `2**63` or
+  more, from the kwarg or from the optimizer's `seed` field, is a
+  `polypus.ConfigurationError`), because the seed's primary job (making
+  population init / mutation deterministic, inside the pure-Rust
   `polypus-optimizers`) is independent of which backend evaluates the oracle.
   Precedence: the explicit `seed` kwarg wins; otherwise the `seed` field pinned
   on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA`/`Rotosolve` instance; otherwise a fresh OS-entropy

@@ -228,8 +228,11 @@ impl BackendConfig {
     /// [`SeedOutOfRange`] for a seed of `2^63` or more on Aer or CUNQA.
     pub fn check_seed(&self, seed: u64) -> Result<(), SeedOutOfRange> {
         let backend = match self {
-            BackendConfig::Local { .. } => "backend=\"aer\"",
-            BackendConfig::Cunqa { .. } => "infrastructure=\"cunqa\"",
+            BackendConfig::Local { .. } => "Qiskit Aer (backend=\"aer\" or target=polypus.Aer())",
+            BackendConfig::Cunqa { .. } => {
+                "CUNQA's simulated QPUs (infrastructure=\"cunqa\" or \
+                 target=polypus.Cunqa(...)), which run on Qiskit Aer"
+            }
             BackendConfig::LocalNative { .. } | BackendConfig::Registered { .. } => return Ok(()),
         };
         if seed < AER_SEED_LIMIT {
@@ -430,8 +433,15 @@ mod tests {
     #[test]
     fn aer_and_cunqa_reject_a_seed_of_two_to_the_63_or_more_393() {
         for (config, label) in [
-            (local_aer(), "backend=\"aer\""),
-            (cunqa(), "infrastructure=\"cunqa\""),
+            (
+                local_aer(),
+                "for Qiskit Aer (backend=\"aer\" or target=polypus.Aer()):",
+            ),
+            (
+                cunqa(),
+                "for CUNQA's simulated QPUs (infrastructure=\"cunqa\" or \
+                 target=polypus.Cunqa(...)), which run on Qiskit Aer:",
+            ),
         ] {
             assert!(config.check_seed(0).is_ok());
             assert!(config.check_seed(AER_SEED_LIMIT - 1).is_ok());

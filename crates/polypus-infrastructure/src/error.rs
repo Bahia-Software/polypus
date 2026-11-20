@@ -91,8 +91,9 @@ impl Error for EntropyError {
 pub struct SeedOutOfRange {
     /// The rejected seed.
     pub seed: u64,
-    /// How the caller selected the backend, as a Python keyword argument
-    /// (`backend="aer"`, `infrastructure="cunqa"`).
+    /// The backend that rejects it, with the Python ways to select it
+    /// (`Qiskit Aer (backend="aer" or target=polypus.Aer())`, or CUNQA's
+    /// simulated QPUs).
     pub backend: &'static str,
 }
 
@@ -100,9 +101,9 @@ impl fmt::Display for SeedOutOfRange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "seed {} is out of range for {}: Qiskit Aer takes a seed from 0 to {} \
-             (below 2**63); the native backend (infrastructure=\"local\", \
-             backend=\"polypus\") takes any 64-bit seed",
+            "seed {} is out of range for {}: Aer takes a seed from 0 to {} \
+             (below 2**63); only the native backend and registered backends \
+             take any 64-bit seed",
             self.seed,
             self.backend,
             crate::execution_config::AER_SEED_LIMIT - 1
