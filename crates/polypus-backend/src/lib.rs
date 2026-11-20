@@ -60,6 +60,28 @@ pub use registry::{
 pub use seed::{stream_seed, CallSeeds};
 pub use transpiler::{IdentityTranspiler, OptLevel, TranspileOptions, Transpiler};
 
+/// Groups consecutive replicas of `shot_batches` that request the same shot
+/// count, as `(first replica index, shots, replica count)`, in order. A
+/// backend that submits one batch per group, such as the default
+/// [`run_shots_distributed`](QuantumBackend::run_shots_distributed), makes one
+/// call per group; the first index is the group's offset within the replicas,
+/// which CUNQA uses as its QPU and seed offset (contract C-7). A group of zero
+/// shots is listed like any other: whether to submit it is the caller's call.
+pub fn shot_groups(shot_batches: &[u32]) -> Vec<(usize, u32, usize)> {
+    let mut groups = Vec::new();
+    let mut i = 0;
+    while i < shot_batches.len() {
+        let shots = shot_batches[i];
+        let mut j = i + 1;
+        while j < shot_batches.len() && shot_batches[j] == shots {
+            j += 1;
+        }
+        groups.push((i, shots, j - i));
+        i = j;
+    }
+    groups
+}
+
 /// Wave size a memory-budgeted backend (native/local) should report from
 /// [`capabilities_for`](QuantumBackend::capabilities_for) for a batch of
 /// `batch_len` circuits whose widest is `widest_qubits`, running on `cores`
@@ -160,22 +182,15 @@ pub trait QuantumBackend: Send + Sync {
         params: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
         let mut out: Vec<HashMap<String, u64>> = Vec::with_capacity(shot_batches.len());
-        let mut i = 0;
-        while i < shot_batches.len() {
-            let shots = shot_batches[i];
-            let mut j = i + 1;
-            while j < shot_batches.len() && shot_batches[j] == shots {
-                j += 1;
-            }
+        for (_, shots, len) in shot_groups(shot_batches) {
             if shots > 0 {
-                let qcs: Vec<BoundCircuit> = (i..j).map(|_| qc.duplicate()).collect();
+                let qcs: Vec<BoundCircuit> = (0..len).map(|_| qc.duplicate()).collect();
                 let mut cfg = params.clone();
                 cfg.shots = shots;
                 out.extend(self.run_circuits(&qcs, &cfg)?);
             } else {
-                out.extend((i..j).map(|_| HashMap::new()));
+                out.extend((0..len).map(|_| HashMap::new()));
             }
-            i = j;
         }
         Ok(out)
     }
@@ -506,6 +521,21 @@ mod default_method_tests {
         assert!(idle.calls.lock().unwrap().is_empty());
     }
 
+    /// Zeros between equal shot counts split them into groups of their own:
+    /// each zero group submits nothing and yields empty maps in its place.
+    #[test]
+    fn run_shots_distributed_keeps_interleaved_zeros_in_place() {
+        let backend = MinimalBackend::default();
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let out = backend
+            .run_shots_distributed(&circuit, &[0, 2, 0, 2, 2, 0], &params())
+            .unwrap();
+        assert_eq!(*backend.calls.lock().unwrap(), vec![(1, 2), (2, 2)]);
+        let sums: Vec<u64> = out.iter().map(|c| c.values().sum()).collect();
+        assert_eq!(sums, vec![0, 2, 0, 2, 2, 0]);
+        assert!(out[0].is_empty() && out[2].is_empty() && out[5].is_empty());
+    }
+
     #[test]
     fn the_optional_hooks_default_to_off() {
         let backend = MinimalBackend::default();
@@ -515,5 +545,27 @@ mod default_method_tests {
         let caps = backend.capabilities();
         assert_eq!(caps.max_concurrency, usize::MAX);
         assert!(caps.supports_shot_distribution);
+    }
+}
+
+#[cfg(test)]
+mod shot_groups_tests {
+    use super::shot_groups;
+
+    #[test]
+    fn shot_groups_give_each_batch_size_its_first_replica_index() {
+        assert_eq!(shot_groups(&[4, 3, 3]), vec![(0, 4, 1), (1, 3, 2)]);
+        assert_eq!(shot_groups(&[1, 1, 0]), vec![(0, 1, 2), (2, 0, 1)]);
+        assert_eq!(shot_groups(&[5, 5]), vec![(0, 5, 2)]);
+        assert!(shot_groups(&[]).is_empty());
+    }
+
+    /// A shot count that comes back after another starts a group of its own.
+    #[test]
+    fn shot_groups_split_a_repeated_count_by_what_lies_between() {
+        assert_eq!(
+            shot_groups(&[0, 2, 0, 2, 2, 0]),
+            vec![(0, 0, 1), (1, 2, 1), (2, 0, 1), (3, 2, 2), (5, 0, 1)]
+        );
     }
 }

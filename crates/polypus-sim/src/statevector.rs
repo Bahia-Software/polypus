@@ -30,6 +30,14 @@ pub(crate) fn angle(p: &GateParam) -> Result<f64, SimError> {
     }
 }
 
+/// The error for an instruction [`Statevector::apply`] does not know, the
+/// vocabulary being `#[non_exhaustive]`.
+fn unsupported(gate: &GateInstruction) -> SimError {
+    SimError::UnsupportedInstruction {
+        instruction: format!("{gate:?}"),
+    }
+}
+
 /// The diagonal descriptor for `gate`, or `None` if `gate` is not one of the
 /// nine diagonal instructions a fused run is built from (`Z, S, T, Sdg, Tdg, Rz`
 /// and `Cz, Rzz, Cp`).
@@ -452,132 +460,252 @@ impl Statevector {
     /// angle is still a free parameter or an expression of them, or
     /// [`SimError::NonFiniteAmplitude`] if an angle is `NaN`/infinity.
     pub fn apply(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
+        use GateInstruction as G;
         self.check_operands(gate)?;
+        match gate {
+            G::H(_)
+            | G::X(_)
+            | G::Y(_)
+            | G::Z(_)
+            | G::S(_)
+            | G::T(_)
+            | G::Sdg(_)
+            | G::Tdg(_)
+            | G::Sx(_)
+            | G::Sxdg(_) => self.apply_fixed_1q(gate),
+            G::Rx { .. }
+            | G::Ry { .. }
+            | G::Rz { .. }
+            | G::U { .. }
+            | G::U0 { .. }
+            | G::P { .. }
+            | G::U1 { .. }
+            | G::U2 { .. }
+            | G::UGate { .. } => self.apply_rotation_1q(gate),
+            G::Cx(..) | G::Cz(..) | G::Swap(..) | G::Rzz { .. } | G::Rxx { .. } | G::Cp { .. } => {
+                self.apply_2q(gate)
+            }
+            G::Cy(..)
+            | G::Ch(..)
+            | G::Csx(..)
+            | G::Crx { .. }
+            | G::Cry { .. }
+            | G::Crz { .. }
+            | G::Cu1 { .. }
+            | G::Cu3 { .. }
+            | G::Cu { .. } => self.apply_controlled(gate),
+            // No dedicated kernel for the composite qelib1.inc gates: each is
+            // lowered here — the simulator's lowering boundary — to its exact
+            // qelib1.inc definition (`GateInstruction::lowering`, exact
+            // including the global phase), every part applied in turn. The
+            // circuit itself, and its OpenQASM export, keep the gate.
+            G::Ccx(..)
+            | G::Cswap(..)
+            | G::Rccx(..)
+            | G::Rc3x(..)
+            | G::C3x(..)
+            | G::C3sqrtx(..)
+            | G::C4x(..) => {
+                for part in gate.lowering().into_iter().flatten() {
+                    self.apply(&part)?;
+                }
+                Ok(())
+            }
+            // A call of a gate declared in the source program: expanded here —
+            // the simulator's lowering boundary — into built-in instructions,
+            // each applied like any other. The call's own angles are resolved
+            // first, so an unbound or non-finite one fails exactly as it would
+            // on a built-in gate.
+            G::Custom(call) => {
+                for p in call.params() {
+                    angle(p)?;
+                }
+                let expanded = call.expand(&[]).map_err(|_| SimError::NonFiniteAmplitude)?;
+                for g in &expanded {
+                    self.apply(g)?;
+                }
+                Ok(())
+            }
+            // The identity leaves the state unchanged (the qubit index was
+            // still range-checked above, like every operand).
+            G::Id(_) => Ok(()),
+            G::Barrier(_) | G::Measure { .. } | G::MeasureAll => Ok(()),
+            // `GateInstruction` is `#[non_exhaustive]`; `every_instruction_is_
+            // supported` in `tests/gate_matrices.rs` flags a gate missing here.
+            other => Err(unsupported(other)),
+        }
+    }
+
+    /// [`apply`](Self::apply) for the single-qubit gates without an angle:
+    /// the dense ones on the 2×2 kernel, the phase ones on the diagonal one.
+    /// Only ever called by [`apply`](Self::apply) on a gate of this family;
+    /// any other is a dispatch bug in `apply`, not a runtime error.
+    fn apply_fixed_1q(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
+        use GateInstruction as G;
         let par = self.use_parallel();
         let n = self.n;
         match gate {
-            GateInstruction::H(q) => kernels::apply_1q(&mut self.data, n, *q, &gates::h(), par),
-            GateInstruction::X(q) => kernels::apply_1q(&mut self.data, n, *q, &gates::x(), par),
-            GateInstruction::Y(q) => kernels::apply_1q(&mut self.data, n, *q, &gates::y(), par),
-            GateInstruction::Z(q) => {
+            G::H(q) => kernels::apply_1q(&mut self.data, n, *q, &gates::h(), par),
+            G::X(q) => kernels::apply_1q(&mut self.data, n, *q, &gates::x(), par),
+            G::Y(q) => kernels::apply_1q(&mut self.data, n, *q, &gates::y(), par),
+            G::Sx(q) => kernels::apply_1q(&mut self.data, n, *q, &gates::sx(), par),
+            G::Sxdg(q) => kernels::apply_1q(&mut self.data, n, *q, &gates::sxdg(), par),
+            G::Z(q) => {
                 let (d0, d1) = gates::z();
                 kernels::apply_diagonal_1q(&mut self.data, *q, d0, d1, par);
             }
-            GateInstruction::S(q) => {
+            G::S(q) => {
                 let (d0, d1) = gates::s();
                 kernels::apply_diagonal_1q(&mut self.data, *q, d0, d1, par);
             }
-            GateInstruction::T(q) => {
+            G::T(q) => {
                 let (d0, d1) = gates::t();
                 kernels::apply_diagonal_1q(&mut self.data, *q, d0, d1, par);
             }
-            GateInstruction::Sdg(q) => {
+            G::Sdg(q) => {
                 let (d0, d1) = gates::sdg();
                 kernels::apply_diagonal_1q(&mut self.data, *q, d0, d1, par);
             }
-            GateInstruction::Tdg(q) => {
+            G::Tdg(q) => {
                 let (d0, d1) = gates::tdg();
                 kernels::apply_diagonal_1q(&mut self.data, *q, d0, d1, par);
             }
-            GateInstruction::Rx { qubit, theta } => {
-                let m = gates::rx(angle(theta)?);
-                kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
-            }
-            GateInstruction::Ry { qubit, theta } => {
-                let m = gates::ry(angle(theta)?);
-                kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
-            }
-            GateInstruction::Rz { qubit, theta } => {
+            other => unreachable!("{other:?} is not a gate apply_fixed_1q handles"),
+        }
+        Ok(())
+    }
+
+    /// [`apply`](Self::apply) for the single-qubit gates with angles: `rz` on
+    /// the diagonal kernel, every other on the 2×2 one with its exact matrix.
+    /// `p`/`u1` take the dense path (not the diagonal one) so the diagonal
+    /// arms stay exactly what `diagonal_op` classifies for run fusion.
+    /// Only ever called by [`apply`](Self::apply) on a gate of this family;
+    /// any other is a dispatch bug in `apply`, not a runtime error.
+    fn apply_rotation_1q(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
+        use GateInstruction as G;
+        let par = self.use_parallel();
+        let n = self.n;
+        let (qubit, m) = match gate {
+            G::Rx { qubit, theta } => (qubit, gates::rx(angle(theta)?)),
+            G::Ry { qubit, theta } => (qubit, gates::ry(angle(theta)?)),
+            G::Rz { qubit, theta } => {
                 let (d0, d1) = gates::rz(angle(theta)?);
                 kernels::apply_diagonal_1q(&mut self.data, *qubit, d0, d1, par);
+                return Ok(());
             }
-            GateInstruction::Cx(c, t) => {
-                kernels::apply_controlled_1q(&mut self.data, n, *c, *t, &gates::x(), par);
-            }
-            GateInstruction::Cz(c, t) => {
-                kernels::apply_diagonal_2q(&mut self.data, *c, *t, gates::cz_diag(), par);
-            }
-            GateInstruction::Swap(q0, q1) => {
-                kernels::apply_2q(&mut self.data, n, *q0, *q1, &gates::swap(), par);
-            }
-            GateInstruction::Rzz { q0, q1, theta } => {
-                let diag = gates::rzz_diag(angle(theta)?);
-                kernels::apply_diagonal_2q(&mut self.data, *q0, *q1, diag, par);
-            }
-            GateInstruction::Rxx { q0, q1, theta } => {
-                let m = gates::rxx(angle(theta)?);
-                kernels::apply_2q(&mut self.data, n, *q0, *q1, &m, par);
-            }
-            GateInstruction::Cp { q0, q1, theta } => {
-                let diag = gates::cp_diag(angle(theta)?);
-                kernels::apply_diagonal_2q(&mut self.data, *q0, *q1, diag, par);
-            }
-            GateInstruction::U {
+            G::U {
                 qubit,
                 theta,
                 phi,
                 lam,
-            } => {
-                let m = gates::u(angle(theta)?, angle(phi)?, angle(lam)?);
-                kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
             }
-            GateInstruction::Sx(q) => kernels::apply_1q(&mut self.data, n, *q, &gates::sx(), par),
-            GateInstruction::Sxdg(q) => {
-                kernels::apply_1q(&mut self.data, n, *q, &gates::sxdg(), par)
+            | G::UGate {
+                qubit,
+                theta,
+                phi,
+                lam,
+            } => (qubit, gates::u(angle(theta)?, angle(phi)?, angle(lam)?)),
+            // `u0(γ)` is the identity; its argument is still validated.
+            G::U0 { gamma, .. } => {
+                angle(gamma)?;
+                return Ok(());
             }
-            // Controlled single-qubit gates: the target's exact 2×2 on the
-            // controlled kernel (for `cu`, including its phase γ).
-            GateInstruction::Cy(c, t) => {
-                kernels::apply_controlled_1q(&mut self.data, n, *c, *t, &gates::y(), par);
+            G::P { qubit, lam } | G::U1 { qubit, lam } => {
+                (qubit, gates::diag_matrix(gates::phase(angle(lam)?)))
             }
-            GateInstruction::Ch(c, t) => {
-                kernels::apply_controlled_1q(&mut self.data, n, *c, *t, &gates::h(), par);
+            G::U2 { qubit, phi, lam } => (
+                qubit,
+                gates::u(std::f64::consts::FRAC_PI_2, angle(phi)?, angle(lam)?),
+            ),
+            other => unreachable!("{other:?} is not a gate apply_rotation_1q handles"),
+        };
+        kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
+        Ok(())
+    }
+
+    /// [`apply`](Self::apply) for `cx`, `swap`, `rxx` (dense) and `cz`,
+    /// `rzz`, `cp` (diagonal).
+    /// Only ever called by [`apply`](Self::apply) on a gate of this family;
+    /// any other is a dispatch bug in `apply`, not a runtime error.
+    fn apply_2q(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
+        use GateInstruction as G;
+        let par = self.use_parallel();
+        let n = self.n;
+        match gate {
+            G::Cx(c, t) => {
+                kernels::apply_controlled_1q(&mut self.data, n, *c, *t, &gates::x(), par);
             }
-            GateInstruction::Csx(c, t) => {
-                kernels::apply_controlled_1q(&mut self.data, n, *c, *t, &gates::sx(), par);
+            G::Cz(c, t) => {
+                kernels::apply_diagonal_2q(&mut self.data, *c, *t, gates::cz_diag(), par);
             }
-            GateInstruction::Crx {
+            G::Swap(q0, q1) => {
+                kernels::apply_2q(&mut self.data, n, *q0, *q1, &gates::swap(), par);
+            }
+            G::Rzz { q0, q1, theta } => {
+                let diag = gates::rzz_diag(angle(theta)?);
+                kernels::apply_diagonal_2q(&mut self.data, *q0, *q1, diag, par);
+            }
+            G::Rxx { q0, q1, theta } => {
+                let m = gates::rxx(angle(theta)?);
+                kernels::apply_2q(&mut self.data, n, *q0, *q1, &m, par);
+            }
+            G::Cp { q0, q1, theta } => {
+                let diag = gates::cp_diag(angle(theta)?);
+                kernels::apply_diagonal_2q(&mut self.data, *q0, *q1, diag, par);
+            }
+            other => unreachable!("{other:?} is not a gate apply_2q handles"),
+        }
+        Ok(())
+    }
+
+    /// [`apply`](Self::apply) for the controlled single-qubit gates: the
+    /// target's exact 2×2 on the controlled kernel (for `cu`, including its
+    /// phase γ).
+    /// Only ever called by [`apply`](Self::apply) on a gate of this family;
+    /// any other is a dispatch bug in `apply`, not a runtime error.
+    fn apply_controlled(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
+        use GateInstruction as G;
+        let par = self.use_parallel();
+        let n = self.n;
+        let (control, target, m) = match gate {
+            G::Cy(c, t) => (c, t, gates::y()),
+            G::Ch(c, t) => (c, t, gates::h()),
+            G::Csx(c, t) => (c, t, gates::sx()),
+            G::Crx {
                 control,
                 target,
                 theta,
-            } => {
-                let m = gates::rx(angle(theta)?);
-                kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
-            }
-            GateInstruction::Cry {
+            } => (control, target, gates::rx(angle(theta)?)),
+            G::Cry {
                 control,
                 target,
                 theta,
-            } => {
-                let m = gates::ry(angle(theta)?);
-                kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
-            }
-            GateInstruction::Crz {
+            } => (control, target, gates::ry(angle(theta)?)),
+            G::Crz {
                 control,
                 target,
                 theta,
-            } => {
-                let m = gates::diag_matrix(gates::rz(angle(theta)?));
-                kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
-            }
+            } => (
+                control,
+                target,
+                gates::diag_matrix(gates::rz(angle(theta)?)),
+            ),
             // The same operator as `Cp`. It takes the controlled path rather
-            // than `Cp`'s diagonal one so that the diagonal arms here stay
-            // exactly the ones `diagonal_op` classifies for run fusion.
-            GateInstruction::Cu1 { q0, q1, theta } => {
-                let m = gates::diag_matrix(gates::phase(angle(theta)?));
-                kernels::apply_controlled_1q(&mut self.data, n, *q0, *q1, &m, par);
-            }
-            GateInstruction::Cu3 {
+            // than `Cp`'s diagonal one so that the diagonal arms stay exactly
+            // the ones `diagonal_op` classifies for run fusion.
+            G::Cu1 { q0, q1, theta } => (q0, q1, gates::diag_matrix(gates::phase(angle(theta)?))),
+            G::Cu3 {
                 control,
                 target,
                 theta,
                 phi,
                 lam,
-            } => {
-                let m = gates::u(angle(theta)?, angle(phi)?, angle(lam)?);
-                kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
-            }
-            GateInstruction::Cu {
+            } => (
+                control,
+                target,
+                gates::u(angle(theta)?, angle(phi)?, angle(lam)?),
+            ),
+            G::Cu {
                 control,
                 target,
                 theta,
@@ -587,78 +715,11 @@ impl Statevector {
             } => {
                 let u = gates::u(angle(theta)?, angle(phi)?, angle(lam)?);
                 let phase = C64::from_polar(1.0, angle(gamma)?);
-                let m = u.map(|row| row.map(|entry| entry * phase));
-                kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
+                (control, target, u.map(|row| row.map(|entry| entry * phase)))
             }
-            // No dedicated kernel for the composite qelib1.inc gates: each is
-            // lowered here — the simulator's lowering boundary — to its exact
-            // qelib1.inc definition (`GateInstruction::lowering`, exact
-            // including the global phase), every part applied in turn. The
-            // circuit itself, and its OpenQASM export, keep the gate.
-            GateInstruction::Ccx(..)
-            | GateInstruction::Cswap(..)
-            | GateInstruction::Rccx(..)
-            | GateInstruction::Rc3x(..)
-            | GateInstruction::C3x(..)
-            | GateInstruction::C3sqrtx(..)
-            | GateInstruction::C4x(..) => {
-                for part in gate.lowering().into_iter().flatten() {
-                    self.apply(&part)?;
-                }
-            }
-            // `u0(γ)` is the identity; its argument is still validated.
-            GateInstruction::U0 { gamma, .. } => {
-                angle(gamma)?;
-            }
-            // The other spellings of the generic single-qubit gate, each with
-            // its exact matrix. `p`/`u1` take the dense path (not the diagonal
-            // one) so the diagonal arms here stay exactly what `diagonal_op`
-            // classifies for run fusion.
-            GateInstruction::P { qubit, lam } | GateInstruction::U1 { qubit, lam } => {
-                let m = gates::diag_matrix(gates::phase(angle(lam)?));
-                kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
-            }
-            GateInstruction::U2 { qubit, phi, lam } => {
-                let m = gates::u(std::f64::consts::FRAC_PI_2, angle(phi)?, angle(lam)?);
-                kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
-            }
-            GateInstruction::UGate {
-                qubit,
-                theta,
-                phi,
-                lam,
-            } => {
-                let m = gates::u(angle(theta)?, angle(phi)?, angle(lam)?);
-                kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
-            }
-            // A call of a gate declared in the source program: expanded here —
-            // the simulator's lowering boundary — into built-in instructions,
-            // each applied like any other. The call's own angles are resolved
-            // first, so an unbound or non-finite one fails exactly as it would
-            // on a built-in gate.
-            GateInstruction::Custom(call) => {
-                for p in call.params() {
-                    angle(p)?;
-                }
-                let expanded = call.expand(&[]).map_err(|_| SimError::NonFiniteAmplitude)?;
-                for g in &expanded {
-                    self.apply(g)?;
-                }
-            }
-            // The identity leaves the state unchanged (the qubit index was
-            // still range-checked above, like every operand).
-            GateInstruction::Id(_) => {}
-            GateInstruction::Barrier(_)
-            | GateInstruction::Measure { .. }
-            | GateInstruction::MeasureAll => {}
-            // `GateInstruction` is `#[non_exhaustive]`; `every_instruction_is_
-            // supported` in `tests/gate_matrices.rs` flags a gate missing here.
-            other => {
-                return Err(SimError::UnsupportedInstruction {
-                    instruction: format!("{other:?}"),
-                })
-            }
-        }
+            other => unreachable!("{other:?} is not a gate apply_controlled handles"),
+        };
+        kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
         Ok(())
     }
 
@@ -986,6 +1047,38 @@ mod tests {
             missing.is_empty(),
             "instruction kinds not exercised: {missing:?}"
         );
+    }
+
+    /// A gate sent to the wrong per-family function is a dispatch bug in
+    /// `apply`, so it panics naming the function instead of returning an
+    /// error that would read as an input problem.
+    #[test]
+    fn a_gate_routed_to_the_wrong_family_panics() {
+        type Family = fn(&mut Statevector, &GateInstruction) -> Result<(), SimError>;
+        let families: [(&str, Family); 4] = [
+            ("apply_fixed_1q", Statevector::apply_fixed_1q),
+            ("apply_rotation_1q", Statevector::apply_rotation_1q),
+            ("apply_2q", Statevector::apply_2q),
+            ("apply_controlled", Statevector::apply_controlled),
+        ];
+        // `Id` is handled in `apply` itself, by none of the four.
+        let foreign = GateInstruction::Id(0);
+        for (name, family) in families {
+            let mut sv = Statevector::new(2).expect("2 qubits is well below MAX_QUBITS");
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                family(&mut sv, &foreign)
+            }))
+            .expect_err(name);
+            let message = panic
+                .downcast_ref::<String>()
+                .expect("unreachable! formats its message");
+            assert_eq!(
+                message,
+                &format!(
+                    "internal error: entered unreachable code: Id(0) is not a gate {name} handles"
+                )
+            );
+        }
     }
 
     /// The inverse of a gate with an unresolved angle fails exactly as the gate

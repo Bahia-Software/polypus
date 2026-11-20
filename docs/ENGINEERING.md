@@ -136,7 +136,7 @@ boundary stays out-of-process and explicit; see
     `Interrupt` trait, carried (optionally) on the `CancelToken`
     (`CancelToken::poll_interrupt`). The one implementation that actually calls
     `py.check_signals()` is `SignalInterrupt` in
-    `crates/polypus/src/bindings/mod.rs` (the edge). It runs while the thread is
+    `crates/polypus/src/bindings/interrupt.rs` (the edge). It runs while the thread is
     detached, so it attaches through `attach_or` rather than `Python::attach`
     and aborts the run with `InterpreterUnavailable` (raised as
     `KeyboardInterrupt`, like every other site reached while detached) when the

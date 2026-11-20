@@ -36,15 +36,19 @@ use polypus_qml::{
     SimplifiedTwoDesignAnsatz, StronglyEntanglingAnsatz, ValidationError,
 };
 
+use super::backend_config::{
+    config_from_strings, validate_cunqa_allocation, validate_id, validate_shots_and_qpus,
+};
 use super::callback::validate_callback;
 use super::circuit::Circuit;
-use super::{
-    config_from_strings, counts_to_pylist, extract_labels, finish_optimization,
-    interruptible_token, is_rotosolve, log_training_start, method_from_pyclass, method_seed,
-    resolve_optimizer_seed, seed_or_entropy, training_observer, unique_id,
-    validate_cunqa_allocation, validate_final_shots, validate_id, validate_method,
-    validate_shots_and_qpus, OptionsArg, RunResult,
+use super::extract::extract_labels;
+use super::interrupt::interruptible_token;
+use super::optimizer::{
+    is_rotosolve, method_from_pyclass, training_observer, validate_final_shots, validate_method,
 };
+use super::options::OptionsArg;
+use super::results::{counts_to_pylist, finish_optimization, log_training_start, RunResult};
+use super::seeds::{method_seed, resolve_optimizer_seed, seed_or_entropy, unique_id};
 use crate::evaluation::{
     candidate_window_size, Label, MinibatchConfig, OracleErrorSlot, QmlOracleFactory, QmlSource,
 };

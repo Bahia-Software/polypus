@@ -334,7 +334,7 @@ shutdown); `interpreter_unavailable_in_external_maps_to_keyboard_interrupt`,
 (`create_backend_with_a_noise_model_fails_typed_when_attaching_is_forbidden`
 among them); `signal_polling_cancels_when_the_interpreter_is_unavailable` and
 `statevector_cancellation_raises_keyboard_interrupt` in
-`crates/polypus/src/bindings/mod.rs`.
+`crates/polypus/src/bindings/interrupt.rs`.
 An external optimizer: `an_exception_is_recorded_with_its_class`,
 `a_failed_run_calls_neither_method` and
 `an_unavailable_interpreter_is_recorded_without_calling_python` in
@@ -1122,7 +1122,7 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `TypeError` for any other value; an exception recorded as itself; a
     failed run not calling Python; the `TypeError` for a non-callable) and
     `a_callback_is_checked_after_final_shots_and_before_the_backend` in
-    `bindings/mod.rs`, `tests/python/test_callback.py` (the `TypeError`
+    `bindings/entry_tests.rs`, `tests/python/test_callback.py` (the `TypeError`
     before the CUNQA seam in all three entry points and after `final_shots`;
     keyword-only; one call per iteration for every optimizer through `train`,
     `qml.train` and `Model.fit`, with `evaluations` equal to the circuits
@@ -2025,9 +2025,10 @@ counts and a mocked-backend `qml.train` on any platform, native `train`
 trajectories on the fixture's build only, opt-in with
 `POLYPUS_DETERMINISM_STRICT=1`, and the same trajectories replayed in a fresh
 process on every CI leg, #407), plus the Rust tests in
-`crates/polypus/src/bindings/mod.rs` (native seed round-trip through
-`run_quantum_circuit`, the `qmio` rejection path, the seed-resolution
-precedence / optimizer determinism, the default-seed entropy-failure path
+`crates/polypus/src/bindings/run.rs` (native seed round-trip through
+`run_quantum_circuit`, the `qmio` rejection path) and
+`crates/polypus/src/bindings/seeds.rs` (the seed-resolution precedence /
+optimizer determinism, the default-seed entropy-failure path
 (`seed_or_entropy`, `resolve_optimizer_seed`), and the run-id entropy-failure
 path and id format (`unique_id_from`)), `crates/polypus/src/exceptions.rs`
 (the entropy-failure `polypus.BackendError` mapping),
