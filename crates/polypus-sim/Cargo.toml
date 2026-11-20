@@ -24,7 +24,8 @@ log             = { workspace = true }
 # there is nothing to calibrate without the rayon kernels — so the default build
 # gains no serde dependency. `serde`/`serde_json` come from the workspace table;
 # `dirs`/`directories` is intentionally *not* added
-# (the cache directory is resolved by hand from XDG_CACHE_HOME/HOME).
+# (the cache directory is resolved by hand from XDG_CACHE_HOME, LOCALAPPDATA on
+# Windows, or HOME).
 serde           = { workspace = true, optional = true }
 serde_json      = { workspace = true, optional = true }
 # Advisory lock around the calibration cache's read-merge-write, so concurrent

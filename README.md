@@ -281,7 +281,7 @@ Design notes: [contracts](https://github.com/Bahia-Software/polypus/blob/main/do
 ## Engineering
 
 - **Released and versioned.** Every release ships to PyPI, crates.io and Zenodo; public Rust APIs are checked with `cargo-semver-checks`, and breaking changes come with upgrade notes in the [CHANGELOG](https://github.com/Bahia-Software/polypus/blob/main/CHANGELOG.md).
-- **Tested beyond unit tests.** CI runs clippy with warnings as errors, the MSRV build, Miri on the simulator kernels, fuzzing of the OpenQASM 2 and 3 importers, a `cargo-deny` licence and advisory audit, and wheel builds on Linux, macOS and Windows; mutation testing runs weekly.
+- **Tested beyond unit tests.** CI runs clippy with warnings as errors, the MSRV build, Miri on the simulator kernels, fuzzing of the OpenQASM 2 and 3 importers, a `cargo-deny` licence and advisory audit, wheel builds that are installed and tested on Linux, macOS and Windows, and the Rust tests of the simulator and the circuit IR on macOS and Windows; mutation testing runs weekly.
 - **Specified.** Cross-layer behaviour is written down as [contracts](https://github.com/Bahia-Software/polypus/blob/main/docs/CONTRACTS.md), each backed by tests, and design choices as [architecture decisions](https://github.com/Bahia-Software/polypus/tree/main/docs/adr). New backends are checked by the `polypus-backend-conformance` suite.
 
 ## Citing Polypus
