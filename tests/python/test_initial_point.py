@@ -321,7 +321,11 @@ class TestStartingPoint:
         run, candidate = ENTRY_POINTS[entry]
         batches = _record_batches(monkeypatch)
         result = run(_method(name), initial_point=POINT)
-        first = [candidate(qc) for qc in batches[0]]
+        # The QML oracle hands a batch to the seam in windows of
+        # available_parallelism() × 2 candidates, so with two CPUs or fewer the
+        # first batch spans several calls (#475): read the circuits in order
+        # across every call and take the first batch's worth.
+        sent = [candidate(qc) for batch in batches for qc in batch]
         if name in ("qng", "adam"):
             # The finite-difference stencil around θ₀ = POINT; Adam measures
             # θ₀ itself first, in the same batch.
@@ -335,15 +339,14 @@ class TestStartingPoint:
             ]
             if name == "adam":
                 stencil.insert(0, POINT)
+            first = sent[: len(stencil)]
             assert len(first) == len(stencil)
             for got, want in zip(first, stencil):
                 assert got == pytest.approx(want, abs=1e-12)
         elif name == "spsa":
             # 25 pairs θ₀ ± c·Δ around θ₀ = POINT, Δ of ±1 components, then
             # the first iteration measures θ₀ first, with one pair, and the
-            # final θ is one circuit. (The QML oracle may split a batch into
-            # windows, so the circuits are read in order.)
-            sent = [candidate(qc) for batch in batches for qc in batch]
+            # final θ is one circuit.
             calibration = sent[:50]
             for plus, minus in zip(calibration[::2], calibration[1::2]):
                 assert [(a + b) / 2 for a, b in zip(plus, minus)] == pytest.approx(
@@ -356,11 +359,12 @@ class TestStartingPoint:
             assert len(sent) == 50 + 3 + 1
         elif name == "cmaes":
             # 4 + floor(3 ln 2) = 6 candidates, all on the first mean.
+            first = sent[:6]
             assert len(first) == 6
             for got in first:
                 assert got == pytest.approx(POINT, abs=1e-6)
         else:
-            assert first[0] == pytest.approx(POINT, abs=1e-12)
+            assert sent[0] == pytest.approx(POINT, abs=1e-12)
         assert len(result.best_params) == DIMENSIONS
         assert len(result.fitness_history) == result.iterations_run
         assert result.fitness_history[-1] == result.best_fitness

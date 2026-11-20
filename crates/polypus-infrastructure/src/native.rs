@@ -14,7 +14,7 @@ use crate::{
     max_statevector_concurrency, BackendCapabilities, BoundCircuit, BudgetSource, CircuitTask,
     InfrastructureError, InsufficientMemoryForResult, MemBudget, QuantumBackend, RunParams,
 };
-use polypus_backend::mem_budget::{active_budget, check_fits};
+use polypus_backend::mem_budget::{active_budget, check_fallback_ceiling, check_fits};
 use polypus_circuit::{CircuitError, ConcreteCircuit, GateInstruction, ParameterizedCircuit};
 use polypus_sim::{
     sample_projected, AngleRef, SimError, Simulator, Statevector, StatevectorSimulator, C64,
@@ -103,7 +103,8 @@ impl NativeStatevectorBackend {
 
     /// Check, without allocating anything, that this backend can hold
     /// `circuit`'s statevector, with the error a run fails with: a circuit wider
-    /// than the qubit ceiling ([`polypus_sim::MAX_QUBITS`], every backend's) is
+    /// than the qubit ceiling ([`polypus_sim::MAX_QUBITS`], every backend's, or
+    /// 30 qubits when no memory limit is known, issue #428) is
     /// [`BackendError::NativeCircuit`], one whose statevector does not fit in
     /// the memory budget (issue #215, read from `POLYPUS_MEM_BUDGET` or the host
     /// at each call) is [`BackendError::InsufficientMemory`]. A circuit
@@ -118,7 +119,11 @@ impl NativeStatevectorBackend {
                 max,
             }));
         }
-        check_fits(num_qubits, active_budget()).map_err(BackendError::from)
+        let budget = active_budget();
+        if let Some(err) = fallback_ceiling_error(num_qubits, max, budget) {
+            return Err(err);
+        }
+        check_fits(num_qubits, budget).map_err(BackendError::from)
     }
 
     /// Override the injected [`StatevectorSimulator::fusion`] flag (`true` by
@@ -165,8 +170,18 @@ impl NativeStatevectorBackend {
         if self.transpiler.is_identity() {
             Ok(source)
         } else {
+            let transpiled = self.transpiler.transpile(&source.circuit, opts);
+            // The batch was checked at its input width. A transpiler that adds
+            // qubits (none in this repository does) would skip that check, which
+            // the simulator's 30-qubit ceiling used to back up; now that it is
+            // 40 (issue #428), check the wider circuit here, before allocating.
+            // Only when it widened, so the common path reads no budget per circuit.
+            let width = transpiled.num_qubits();
+            if width > source.circuit.num_qubits() {
+                self.check_memory(width)?;
+            }
             Ok(NativeSource {
-                circuit: Cow::Owned(self.transpiler.transpile(&source.circuit, opts)),
+                circuit: Cow::Owned(transpiled),
                 declared_clbits: source.declared_clbits,
             })
         }
@@ -209,7 +224,10 @@ impl NativeStatevectorBackend {
     /// by the OOM-killer fails with [`BackendError::InsufficientMemory`] instead.
     ///
     /// A width above the simulator's qubit ceiling is left to the simulator, so
-    /// such a circuit keeps failing with the ceiling error it always did.
+    /// such a circuit keeps failing with the ceiling error it always did. Under
+    /// the blind fallback budget (no limit detected) the ceiling is 30 qubits
+    /// (issue #428): a wider circuit fails here with that same ceiling error,
+    /// naming `POLYPUS_MEM_BUDGET` as the way to lift it.
     fn check_memory(&self, num_qubits: usize) -> Result<(), BackendError> {
         self.check_memory_against(num_qubits, active_budget())
     }
@@ -223,6 +241,10 @@ impl NativeStatevectorBackend {
     ) -> Result<(), BackendError> {
         if num_qubits > self.simulator.max_qubits {
             return Ok(());
+        }
+        if let Some(err) = fallback_ceiling_error(num_qubits, self.simulator.max_qubits, budget) {
+            log::error!("native backend refused a circuit: {err}");
+            return Err(err);
         }
         check_fits(num_qubits, budget).map_err(|e| {
             log::error!("native backend refused a circuit: {e}");
@@ -448,8 +470,9 @@ impl NativeStatevectorBackend {
     /// with. So the adjoint never refuses a width the exact path runs.
     ///
     /// A width above the qubit ceiling is `Ok(true)`, left to the simulator's
-    /// ceiling error as `check_memory` leaves it; a budget with no known limit
-    /// never refuses, as there.
+    /// ceiling error as `check_memory` leaves it. A budget with no known limit
+    /// refuses nothing for lack of memory, as there, but keeps the 30-qubit
+    /// ceiling (issue #428): a wider circuit is that ceiling error.
     pub fn adjoint_fits(&self, num_qubits: usize) -> Result<bool, BackendError> {
         self.adjoint_fits_against(num_qubits, active_budget())
     }
@@ -517,8 +540,9 @@ impl NativeStatevectorBackend {
     ///   [`BackendError::InsufficientMemoryForResult`] naming both — compute
     ///   fewer rows at a time, each call's rows being those rows of the whole
     ///   matrix. Both are refused before anything is allocated or simulated, and
-    ///   only against a known budget (a blind fallback never refuses, as
-    ///   [`check_fits`] does not, and takes the inner products).
+    ///   only against a known budget (a blind fallback refuses nothing for lack
+    ///   of memory, as [`check_fits`] does not, and takes the inner products;
+    ///   it keeps the 30-qubit ceiling, issue #428).
     /// - **Bit for bit, whatever the tiling.** By inner products, each entry is
     ///   one inner product summed sequentially in basis-state order, `|⟨a|b⟩|²`
     ///   clamped to at most `1` (rounding can take it a few ulps past), so the
@@ -558,6 +582,10 @@ impl NativeStatevectorBackend {
         // A width above the qubit ceiling is left to the simulator's error, as
         // `check_memory` leaves it.
         let cap = if width <= self.simulator.max_qubits {
+            if let Some(err) = fallback_ceiling_error(width, self.simulator.max_qubits, budget) {
+                log::error!("native backend refused a fidelity matrix: {err}");
+                return Err(err);
+            }
             check_fits(width, budget).map_err(|e| {
                 log::error!("native backend refused a fidelity matrix: {e}");
                 BackendError::from(e)
@@ -799,7 +827,12 @@ impl NativeStatevectorBackend {
             .max()
             .unwrap_or(0);
         if widest <= self.simulator.max_qubits {
-            check_fits(adjoint_width(widest), active_budget()).map_err(|e| {
+            let budget = active_budget();
+            if let Some(err) = fallback_ceiling_error(widest, self.simulator.max_qubits, budget) {
+                log::error!("native backend refused an adjoint gradient: {err}");
+                return Err(err);
+            }
+            check_fits(adjoint_width(widest), budget).map_err(|e| {
                 log::error!("native backend refused an adjoint gradient: {e}");
                 BackendError::from(e)
             })?;
@@ -1101,6 +1134,29 @@ struct NativeSource<'a> {
 /// The error a simulation failure `e` reaches the caller as.
 fn simulation_failed(e: &SimError) -> BackendError {
     BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
+}
+
+/// The ceiling error for a `num_qubits`-qubit statevector that the simulator
+/// (ceiling `hard_max`) would allocate but [`check_fallback_ceiling`] refuses:
+/// under the blind fallback budget (no memory limit detected) statevectors stop
+/// at 30 qubits (issue #428). It is the simulator's
+/// [`SimError::TooManyQubits`] error, as before the ceiling was raised, plus
+/// the hint naming `POLYPUS_MEM_BUDGET`. `None` when the width is allowed, or
+/// above `hard_max` (the simulator's own error then).
+fn fallback_ceiling_error(
+    num_qubits: usize,
+    hard_max: usize,
+    budget: MemBudget,
+) -> Option<BackendError> {
+    let refused = check_fallback_ceiling(num_qubits, hard_max, budget).err()?;
+    let ceiling = SimError::TooManyQubits {
+        requested: refused.num_qubits,
+        max: refused.max,
+    };
+    Some(BackendError::NativeCircuit(format!(
+        "native statevector simulation failed: {ceiling}; {}",
+        refused.hint()
+    )))
 }
 
 /// The [`ConcreteCircuit`] a [`BoundCircuit`] stands for, obtained without
@@ -1410,6 +1466,84 @@ mod tests {
         }
     }
 
+    /// Whether the system refuses an allocation far beyond RAM + swap up
+    /// front: Linux's overcommit modes 0 (heuristic) and 2 (strict) do; mode 1
+    /// grants it, and writing it would get the process killed. `false` where
+    /// the mode cannot be read (not Linux), as in `test_memory_budget.py`.
+    fn overcommit_refuses_impossible_allocations() -> bool {
+        std::fs::read_to_string("/proc/sys/vm/overcommit_memory")
+            .is_ok_and(|mode| matches!(mode.trim(), "0" | "2"))
+    }
+
+    /// A transpiler that moves the circuit onto a register of `width` qubits
+    /// (a layout pass onto a larger device would): the gates are kept.
+    struct WideningTranspiler {
+        width: usize,
+    }
+    impl Transpiler for WideningTranspiler {
+        fn transpile(
+            &self,
+            circuit: &ConcreteCircuit,
+            _opts: &TranspileOptions,
+        ) -> ConcreteCircuit {
+            ConcreteCircuit::new(self.width, circuit.gates().to_vec())
+        }
+    }
+
+    /// Issue #428: the batch is checked at its input width, so a transpiler
+    /// that widens a circuit must not skip the memory gate now that the
+    /// simulator's own ceiling (40) no longer backs it up at 30. 40 qubits
+    /// (16 TiB) fits no detected budget and exceeds the fallback's 30-qubit
+    /// ceiling, so either way the run is refused before anything is allocated.
+    ///
+    /// Skipped unless Linux overcommit is in mode 0 or 2, as its Python
+    /// counterpart in `tests/python/test_memory_budget.py` is: if the width
+    /// check ever regressed, those modes refuse the 16 TiB allocation and the
+    /// test fails cleanly, while mode 1 (or a system without that refusal)
+    /// would grant it and the run would try to write it.
+    #[test]
+    fn a_transpiler_that_widens_the_circuit_is_checked_at_the_new_width() {
+        if !overcommit_refuses_impossible_allocations() {
+            eprintln!("skipped: needs Linux overcommit mode 0 or 2 to refuse a 16 TiB allocation");
+            return;
+        }
+        let backend = NativeStatevectorBackend::with_transpiler(
+            0,
+            Box::new(WideningTranspiler {
+                width: polypus_sim::MAX_QUBITS,
+            }),
+        );
+        let narrow = || {
+            BoundCircuit::Native(
+                ParameterizedCircuit::new(2)
+                    .h(0)
+                    .measure_all()
+                    .assign_parameters(&[])
+                    .unwrap(),
+            )
+        };
+        let params = RunParams {
+            id: "widened".to_string(),
+            shots: 8,
+            seed: Some(1),
+            opt_level: OptLevel::default(),
+        };
+        let start = std::time::Instant::now();
+        let shots = backend.run_circuits(&[narrow()], &params).unwrap_err();
+        let exact = backend
+            .run_circuits_exact(&[narrow()], &params)
+            .unwrap_err();
+        for err in [shots, exact] {
+            assert!(
+                matches!(&err, BackendError::InsufficientMemory(e) if e.num_qubits == 40)
+                    || matches!(&err, BackendError::NativeCircuit(m)
+                        if m.contains("requests 40 qubits") && m.contains("POLYPUS_MEM_BUDGET")),
+                "the widened circuit must be refused at its new width: {err:?}"
+            );
+        }
+        assert!(start.elapsed().as_secs() < 5, "refused before allocating");
+    }
+
     #[test]
     fn with_fusion_toggles_the_simulator_flag() {
         assert!(NativeStatevectorBackend::new(0).simulator.fusion);
@@ -1711,6 +1845,71 @@ mod tests {
         assert!(backend
             .check_memory_against(30, one_mib(BudgetSource::Fallback))
             .is_ok());
+    }
+
+    /// Issue #428: above 30 qubits a known budget decides (refused before
+    /// allocating when the statevector does not fit, let through when it
+    /// does), while the blind fallback keeps 30 as the ceiling, with the
+    /// simulator's ceiling error plus the `POLYPUS_MEM_BUDGET` hint. Above the
+    /// simulator's own ceiling its error stays the one a run fails with.
+    #[test]
+    fn above_30_qubits_a_known_budget_decides_and_the_fallback_keeps_30_428() {
+        use polypus_backend::mem_budget::FALLBACK_MAX_QUBITS;
+        use polypus_backend::BudgetSource;
+        let backend = NativeStatevectorBackend::new(0);
+        let wide = FALLBACK_MAX_QUBITS + 4; // 34 qubits: 256 GiB
+        let budget = |bytes, source| MemBudget { bytes, source };
+        for source in [BudgetSource::Explicit, BudgetSource::Detected] {
+            // 1 TiB holds it: no longer refused by a fixed constant.
+            assert!(backend
+                .check_memory_against(wide, budget(1 << 40, source))
+                .is_ok());
+            // 64 GiB does not: InsufficientMemory, before anything is allocated.
+            let refused = backend
+                .check_memory_against(wide, budget(64 << 30, source))
+                .unwrap_err();
+            assert!(
+                matches!(&refused, BackendError::InsufficientMemory(e)
+                    if e.num_qubits == wide && e.source == source),
+                "{refused:?}"
+            );
+        }
+        // The fallback (no limit detected): 30 still runs, 31 is the ceiling
+        // error it always was, now naming the opt-in.
+        let fallback = budget(16 << 30, BudgetSource::Fallback);
+        assert!(backend
+            .check_memory_against(FALLBACK_MAX_QUBITS, fallback)
+            .is_ok());
+        for n in [FALLBACK_MAX_QUBITS + 1, wide, polypus_sim::MAX_QUBITS] {
+            let refused = backend.check_memory_against(n, fallback).unwrap_err();
+            let BackendError::NativeCircuit(message) = &refused else {
+                panic!("expected the ceiling error, got {refused:?}");
+            };
+            assert!(
+                message.contains(&format!("requests {n} qubits")),
+                "{message}"
+            );
+            assert!(message.contains("at most 30"), "{message}");
+            assert!(message.contains("POLYPUS_MEM_BUDGET"), "{message}");
+            // The adjoint gradient goes through the same gate.
+            assert!(backend.adjoint_fits_against(n, fallback).is_err());
+        }
+        // Above the simulator's ceiling, its own error (from the run) stays.
+        assert!(backend
+            .check_memory_against(polypus_sim::MAX_QUBITS + 1, fallback)
+            .is_ok());
+        // An exact kernel of states wider than 30 is refused the same way.
+        let rows = vec![ParameterizedCircuit::new(FALLBACK_MAX_QUBITS + 1)
+            .h(0)
+            .assign_parameters(&[])
+            .unwrap()];
+        let refused = backend
+            .fidelity_matrix_against(&rows, None, None, fallback)
+            .unwrap_err();
+        assert!(
+            matches!(&refused, BackendError::NativeCircuit(m) if m.contains("POLYPUS_MEM_BUDGET")),
+            "{refused:?}"
+        );
     }
 
     /// The ceiling error is still what a circuit above `MAX_QUBITS` gets from
@@ -2805,7 +3004,8 @@ mod tests {
                 .unwrap_err()
                 .to_string()
         );
-        // No known limit never refuses; above the ceiling is the simulator's.
+        // No known limit refuses nothing up to 30 qubits; above the ceiling is
+        // the simulator's.
         let fallback = MemBudget {
             bytes: 1,
             source: BudgetSource::Fallback,

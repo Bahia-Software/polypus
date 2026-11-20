@@ -126,6 +126,7 @@ _CostFunction = Union[Callable[[str], float], CachedCost, Qubo, Ising]
 _TrainCallback = Callable[[TrainProgress], Union[bool, np.bool_, None]]
 
 class _CalibrationOutcome(TypedDict):
+    # Qubits at/above which gates go parallel; 31 means never (issue #428).
     threshold: int
     num_threads: int
     duration_secs: float

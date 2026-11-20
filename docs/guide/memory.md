@@ -17,10 +17,21 @@ An invalid value (`abc`, `1.5G`, `0`) is not silently dropped: it is reported on
 
 ## The default
 
-When the variable is unset or invalid, the budget is the smaller of the RAM available when the process starts (`MemAvailable`) and the process's cgroup memory limit (cgroup v2 `memory.max` of its cgroup and every ancestor, or cgroup v1 `memory.limit_in_bytes`), minus a safety reserve of 10 % of that limit, at least 512 MiB and at most half of it. When nothing can be detected (macOS, Windows), the budget is a fixed 16 GiB. Because that is a guess, it only throttles: nothing is ever refused against it.
+When the variable is unset or invalid, the budget is the smaller of the RAM available when the process starts (`MemAvailable`) and the process's cgroup memory limit (cgroup v2 `memory.max` of its cgroup and every ancestor, or cgroup v1 `memory.limit_in_bytes`), minus a safety reserve of 10 % of that limit, at least 512 MiB and at most half of it. When nothing can be detected (macOS, Windows), the budget is a fixed 16 GiB. Because that is a guess, it only throttles: no circuit is refused for lack of memory against it. What still stops a run there is the qubit ceiling below: 30 qubits.
 
 > [!WARNING]
 > **On a shared machine with no cgroup limit** (a login node, a workstation several people use), the default is whatever RAM happened to be free when your process started, so a single run may take most of it. Set `POLYPUS_MEM_BUDGET` to your fair share there.
+
+## The qubit ceiling
+
+The native simulator (`backend="polypus"` and `polypus.statevector`) holds up to **40 qubits** (16 TiB), and below that the budget decides (issue #428):
+
+| Budget | 31 to 40 qubits |
+|---|---|
+| Set with `POLYPUS_MEM_BUDGET`, or detected (Linux) | runs if its statevector fits, `polypus.InsufficientMemoryError` before allocating otherwise |
+| None detected (macOS, Windows) | refused as above 40: `ValueError` from `polypus.statevector`, `polypus.NativeCircuitError` from a run, the message naming `POLYPUS_MEM_BUDGET` |
+
+So on a 64 GiB node the budget lets 31 and 32 qubits run, and refuses 33 and above; on macOS, setting `POLYPUS_MEM_BUDGET=64G` does the same. Above 40 qubits the ceiling's error is unconditional. If the system still refuses the memory after the budget let a circuit through (the budget was set above the memory really free), the run fails with a message saying so instead of crashing the process; on Linux the system may also grant the memory and kill the process later, so set the budget to what is truly available.
 
 ## Several processes in one cgroup
 

@@ -38,13 +38,15 @@ pub mod transpiler;
 
 // --- re-export the pyo3-free contract so downstream import paths are unchanged ---
 pub use polypus_backend::{
-    check_statevector_fits, create_registered_backend, is_registered, max_statevector_concurrency,
-    merge_counts, register_backend, registered_names, validate_run_results, wave_concurrency,
-    BackendBuildContext, BackendCapabilities, BackendError, BackendFactory, BoundCircuit,
-    BudgetSource, CallSeeds, CancelToken, CircuitTask, Counts, ForeignCircuit, IdentityTranspiler,
-    InfrastructureError, InsufficientMemory, InsufficientMemoryForResult, Interrupt, MemBudget,
-    OptLevel, OptionValue, Planner, PlannerRequirements, QuantumBackend, RunParams,
-    SequentialPlanner, ShotDistributingPlanner, TranspileOptions, Transpiler,
+    active_budget, check_fallback_ceiling, check_fits, check_statevector_against,
+    check_statevector_fits, create_registered_backend, fallback_ceiling_hint, is_registered,
+    max_statevector_concurrency, merge_counts, qubit_ceiling, register_backend, registered_names,
+    validate_run_results, wave_concurrency, BackendBuildContext, BackendCapabilities, BackendError,
+    BackendFactory, BoundCircuit, BudgetSource, CallSeeds, CancelToken, CircuitTask, Counts,
+    FallbackCeiling, ForeignCircuit, IdentityTranspiler, InfrastructureError, InsufficientMemory,
+    InsufficientMemoryForResult, Interrupt, MemBudget, OptLevel, OptionValue, Planner,
+    PlannerRequirements, QuantumBackend, RunParams, SequentialPlanner, ShotDistributingPlanner,
+    StatevectorRefusal, TranspileOptions, Transpiler, FALLBACK_MAX_QUBITS,
 };
 
 // --- this crate's own additions ---
