@@ -121,12 +121,27 @@ def test_qpus_get_distinct_seeds(monkeypatch):
     assert len({tuple(sorted(c.items())) for c in result.counts}) == 4
 
 
-def test_seed_is_masked_to_aer_range(monkeypatch):
-    # Seeds are masked to 63 bits (CUNQA's vQPUs are Aer-based); the per-QPU
-    # offset wraps inside that range.
+def test_the_per_qpu_offset_wraps_inside_the_aer_range(monkeypatch):
+    # CUNQA's vQPUs are Aer-based: the largest seed they take is 2**63 - 1, and
+    # the per-QPU offset `seed + k` is masked to 63 bits, so it wraps to 0.
     fake = FakeCunqa()
-    _run(fake, monkeypatch, seed=2**64 - 1)
+    _run(fake, monkeypatch, seed=_MASK)
     assert [run["options"]["seed"] for run in fake.runs] == [_MASK, 0]
+
+
+@pytest.mark.parametrize("seed", [2**63, 2**64 - 1])
+def test_a_seed_of_two_to_the_63_or_more_is_rejected_before_any_qpu(monkeypatch, seed):
+    # C-7, #393: it used to reach the QPUs masked to 63 bits, so it reported a
+    # seed Aer never received. Now it is a ConfigurationError (a ValueError)
+    # raised before CUNQA is touched: no family is raised and nothing runs.
+    fake = FakeCunqa()
+    with pytest.raises(
+        polypus.ConfigurationError,
+        match=rf'seed {seed} is out of range for infrastructure="cunqa"',
+    ):
+        _run(fake, monkeypatch, seed=seed)
+    assert fake.calls == []
+    assert fake.runs == []
 
 
 def test_unseeded_run_reports_a_seed_that_replays_it(monkeypatch):

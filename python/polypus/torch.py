@@ -47,7 +47,8 @@ PyTorch: import it as ``polypus.torch``.
   the layer is converted (``layer.float()``). GPU tensors are moved to the CPU
   and back; that path is not tested in CI.
 - **Seeds.** With ``seed``, every call to the backend gets its own seed,
-  derived from ``(seed, number of the forward pass, forward or backward)``:
+  derived from ``(seed, number of the forward pass, forward or backward)``
+  and kept below ``2**63``, the range Qiskit Aer takes (contract C-7, #393):
   a backward pass uses the number of its forward pass, so two layers built
   with the same ``seed`` and fed the same data give the same values and
   gradients, step by step (a forward pass counts even when it raises, so twin
@@ -84,6 +85,10 @@ __all__ = ["QuantumLayer", "from_trained"]
 
 _InitialParams = Union[Sequence[float], npt.NDArray[np.float64], torch.Tensor]
 
+# The largest seed every backend takes: Aer's `seed_simulator` is a signed
+# 64-bit integer (C-7).
+_SEED_MASK = 2**63 - 1
+
 # The role of a backend call in a seed's derivation.
 _FORWARD = 0
 _BACKWARD = 1
@@ -116,7 +121,9 @@ class _Call:
         if self.base_seed is None:
             return None
         sequence = np.random.SeedSequence([self.base_seed, self.step, role])
-        return int(sequence.generate_state(1, dtype=np.uint64)[0])
+        # Below 2**63, which Aer and CUNQA require (#393). Masking keeps every
+        # value Aer received before, when the seam masked it the same way.
+        return int(sequence.generate_state(1, dtype=np.uint64)[0]) & _SEED_MASK
 
 
 class _Expectation(torch.autograd.Function):

@@ -221,7 +221,9 @@ class Cunqa(Infraestructure):
                     # deterministic seed instead of every QPU reproducing the
                     # exact same counts; masked to the 63-bit range Aer
                     # accepts, since CUNQA's simulated QPUs are Aer-based (same
-                    # reason as local.py's mask) (contract C-7).
+                    # reason as local.py's mask) (contract C-7). The base seed
+                    # is below 2**63 (#393); `+ k` and the derived per-call
+                    # seeds can reach past it, and wrap.
                     #
                     # Pinned against a fake CUNQA (tests/python/
                     # test_cunqa_run_flow.py) and checked on CUNQA 3.0.0

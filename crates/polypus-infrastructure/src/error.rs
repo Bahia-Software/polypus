@@ -80,6 +80,38 @@ impl Error for EntropyError {
     }
 }
 
+/// An explicit seed the selected backend cannot take: `2^63` or more on a
+/// backend that runs on Qiskit Aer, whose `seed_simulator` is a signed 64-bit
+/// integer ([`BackendConfig::check_seed`](crate::BackendConfig::check_seed),
+/// contract C-7, #393).
+///
+/// Checked before any backend is built; the FFI edge raises it as
+/// `polypus.ConfigurationError` (a `ValueError`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedOutOfRange {
+    /// The rejected seed.
+    pub seed: u64,
+    /// How the caller selected the backend, as a Python keyword argument
+    /// (`backend="aer"`, `infrastructure="cunqa"`).
+    pub backend: &'static str,
+}
+
+impl fmt::Display for SeedOutOfRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "seed {} is out of range for {}: Qiskit Aer takes a seed from 0 to {} \
+             (below 2**63); the native backend (infrastructure=\"local\", \
+             backend=\"polypus\") takes any 64-bit seed",
+            self.seed,
+            self.backend,
+            crate::execution_config::AER_SEED_LIMIT - 1
+        )
+    }
+}
+
+impl Error for SeedOutOfRange {}
+
 /// An entropy failure crosses the backend contract type-erased, like any other
 /// provider error this crate defines.
 impl From<EntropyError> for BackendError {
