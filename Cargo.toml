@@ -10,7 +10,8 @@
 #   - crates/polypus-optimizers : pure-Rust variational optimizers (DE, PSO, QNG, CMA-ES) decoupled
 #                              from circuits and Python via EvaluationOracle/VarianceOracle
 #   - crates/polypus-observable : pure-Rust, GIL-free cost observables (QUBO/Ising and other
-#                              diagonal costs) mapping measurement counts to expectation values
+#                              diagonal costs, Pauli-sum grouping and parity reduction) mapping
+#                              measurement counts to expectation values
 #   - crates/polypus-qml     : pure-Rust quantum machine learning (datasets, layered models,
 #                              Pauli readout, losses); produces polypus-circuit circuits (no PyO3)
 #   - crates/polypus-backend : the pyo3-free QuantumBackend contract a third party implements,

@@ -24,7 +24,7 @@ with PyO3 Python bindings. The Cargo workspace has fourteen crates (the `fuzz/` 
 | `polypus-sim` | Statevector simulator (GIL-free; optional rayon via the `parallel` feature) | No |
 | `polypus-physics` | Physics: classical Monte Carlo transport + quantum Hamiltonians as multi-qubit Pauli sums (fermion-to-qubit mappings, tapering, exact diagonalization) + molecular integrals and H₂ (`chemistry`); pure Rust | No |
 | `polypus-optimizers` | Variational optimizers (DE, PSO, QNG, CMA-ES, Adam, SPSA, Rotosolve) behind evaluation and gradient oracles, and `AlgorithmExternal`, the bridge that runs an `AskTell` optimizer (Optuna, Nevergrad, pycma through the Python bindings) | No |
-| `polypus-observable` | Cost observables (Qubo / Ising) reducing measurement counts to a cost; pure math | No |
+| `polypus-observable` | Cost observables reducing measurement counts to a cost: Qubo / Ising, and Pauli sums (qubit-wise-commuting grouping with basis rotations, and a parity reducer); pure math | No |
 | `polypus-qml` | Quantum machine learning: datasets, layered variational models (encoders, ansatz, convolution, pooling), Pauli readout and losses; produces `polypus-circuit` circuits and turns counts into fitness, never executes them | No |
 | `polypus-backend` | The **pyo3-free backend contract** a third party implements: the `QuantumBackend` trait, `BoundCircuit`, `RunParams`, `BackendError`/`InfrastructureError`, the `Planner`, the transpiler seam, the memory budget and the runtime **backend registry** (`register_backend`, `BackendBuildContext`). Zero PyO3 in its dependency tree | No |
 | `polypus-backend-conformance` | Reusable conformance battery a third party runs against its `QuantumBackend` (error classification, shot conservation, batching/waves, concurrency, result validation); depends only on `polypus-backend` and `polypus-circuit` | No |
@@ -264,7 +264,7 @@ boundary stays out-of-process and explicit; see
     `crates/polypus-orchestration/src/dispatch.rs`; no shared slot is needed here
     because `statevector` is single-shot and the hook runs on the calling
     thread. What is *not* interruptible is `Statevector::new`'s `2^n`
-    allocation — one `vec![]` with nowhere to put a checkpoint — which is why
+    allocation — one allocation with nowhere to put a checkpoint — which is why
     the post-run check above stays: near the qubit ceiling that allocation is
     the whole run.
 - Preserve concurrent execution: candidates that bind/evaluate truly in
@@ -297,11 +297,24 @@ boundary stays out-of-process and explicit; see
   parallel kernel is tested against its sequential version.
 - **Qubit ceiling:** a dense statevector needs `2^n` complex amplitudes
   (`16 · 2^n` bytes), so `polypus-sim` refuses circuits above
-  `polypus_sim::MAX_QUBITS` (30 ≈ 16 GiB) as the **first** thing
+  `polypus_sim::MAX_QUBITS` (40 ≈ 16 TiB) as the **first** thing
   `StatevectorSimulator::run` does — before any allocation, and low enough that
-  `1 << n` cannot overflow. At the seam this surfaces as a `ValueError` naming
-  the requested and the supported count (`polypus.statevector`;
-  `tests/python/test_statevector.py`). Below the ceiling, those amplitudes cross
+  neither `1 << n` nor `16 · 2^n` can overflow a 64-bit `usize`. At the seam
+  this surfaces as a `ValueError` naming the requested and the supported count
+  (`polypus.statevector`; `tests/python/test_statevector.py`). Below it, the
+  **memory budget** (`polypus-backend`'s `mem_budget`, issue #428) decides:
+  with a known limit (`POLYPUS_MEM_BUDGET` or the detected RAM/cgroup) a
+  statevector that does not fit is `InsufficientMemoryError` before allocating
+  and one that fits runs; with no limit detected (the blind 16 GiB fallback,
+  which never refuses) the ceiling stays at 30 qubits
+  (`mem_budget::FALLBACK_MAX_QUBITS`), with the same ceiling error plus a hint
+  naming `POLYPUS_MEM_BUDGET`. A direct `polypus-sim` caller has no budget:
+  `Statevector::new` allocates fallibly (`try_reserve_exact`) and returns
+  `SimError::AllocationFailed` when the system refuses the memory, instead of
+  aborting (with Linux overcommit the system may grant it and kill the process
+  later, so the budget stays the real guard). The calibration cache's
+  "parallelism disabled" value is pinned at `31`, its value when the ceiling
+  was 30, and read as "never" whatever the ceiling. Below the ceiling, those amplitudes cross
   the seam as a **NumPy array of `dtype=complex128`** — one contiguous buffer
   moved out of the `Statevector` (`into_amplitudes`, no copy) and wrapped by
   rust-numpy — rather than as a `list` of boxed Python `complex` objects. That

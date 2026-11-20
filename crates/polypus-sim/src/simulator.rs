@@ -73,6 +73,11 @@ pub trait Simulator {
 ///
 /// Chosen so the checkpoint is imperceptible as latency: a Ctrl+C is honored
 /// within about a frame.
+///
+/// Mirrored as `MIN_HOOK_INTERVAL` in `tests/cancellation.rs`, whose throttle
+/// bound would silently weaken if only this one were raised; the unit test
+/// `the_hook_interval_matches_its_mirror_in_the_cancellation_tests` fails
+/// until both change together.
 const CANCELLATION_CHECK_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Bound on what the hook may cost the run: it is called at most once per
@@ -119,8 +124,8 @@ const CLOCK_READ_WORK_UNITS: usize = 1 << 16;
 /// traversal, not the ≤`MAX_FUSED_DIAGONAL_RUN` factors per amplitude).
 ///
 /// 64 sits comfortably above the longest diagonal run any real circuit produces
-/// — a QFT phase column is ≤ `n − 1` gates, ≤ 29 at [`MAX_QUBITS`](crate::MAX_QUBITS)
-/// = 30 — so QFT never hits the cap, while a genuinely deep run (a QAOA cost
+/// — a QFT phase column is ≤ `n − 1` gates, ≤ 39 at [`MAX_QUBITS`](crate::MAX_QUBITS)
+/// = 40 — so QFT never hits the cap, while a genuinely deep run (a QAOA cost
 /// layer, a Trotterized `ZZ`/`RZ` evolution) is chunked into bandwidth-bound
 /// passes rather than one growing pass. Unlike the parallel threshold, this is a
 /// fixed architectural safety bound, not a hardware-tuned value: it needs no
@@ -463,7 +468,7 @@ impl Simulator for StatevectorSimulator {
         sv.set_parallel_threshold(self.parallel_threshold);
         // `Statevector::new`'s `2^n` allocation above is deliberately *not* a
         // cancellation point: near the qubit ceiling it dominates the run, but
-        // it is one `vec![]` with nothing to interleave a check into. What the
+        // it is one allocation with nothing to interleave a check into. What the
         // hook covers is the gate sequence — whose cost (gates x `2^n`) is
         // unbounded, where the allocation's is capped by `max_qubits`.
         let mut cancellation = CancellationCheck::new(should_cancel, circuit.num_qubits());
@@ -811,6 +816,16 @@ mod tests {
             parallel_threshold: MAX_QUBITS + 1,
             fusion: true,
         }
+    }
+
+    /// `tests/cancellation.rs` cannot see this private constant, so it mirrors
+    /// it as `MIN_HOOK_INTERVAL = 25 ms` for its throttle bound. Raising only
+    /// this one would leave that bound checking a shorter gap than the
+    /// throttle keeps; pinning the value here makes such a change fail until
+    /// the mirror is updated with it.
+    #[test]
+    fn the_hook_interval_matches_its_mirror_in_the_cancellation_tests() {
+        assert_eq!(CANCELLATION_CHECK_INTERVAL, Duration::from_millis(25));
     }
 
     /// Same as [`sequential_sim`], with fusion disabled — the reference every

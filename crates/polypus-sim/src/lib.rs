@@ -33,9 +33,13 @@
 //! ## Scalability
 //!
 //! A statevector stores `2^n` complex amplitudes (`16 · 2^n` bytes), so memory
-//! — not Rust — is the ceiling: ~16 MiB at 20 qubits, ~16 GiB at 30. Requests
-//! above [`MAX_QUBITS`] return [`SimError::TooManyQubits`] instead of
-//! attempting a doomed allocation. Gate kernels are applied in place (no
+//! — not Rust — is the ceiling: ~16 MiB at 20 qubits, ~16 GiB at 30, ~16 TiB
+//! at 40. Requests above [`MAX_QUBITS`] return [`SimError::TooManyQubits`]
+//! instead of attempting a doomed allocation; below it, an allocation the
+//! system refuses is [`SimError::AllocationFailed`], not an abort. Deciding
+//! whether a statevector fits the host is the caller's memory budget (the
+//! `polypus-backend` crate's, which also keeps 30 qubits as the ceiling when it
+//! cannot detect any memory limit). Gate kernels are applied in place (no
 //! per-gate allocation), with a diagonal fast path and optional parallelism.
 //!
 //! ## Cancellation
@@ -96,13 +100,22 @@ pub use rng::SplitMix64;
 pub use simulator::{sample_projected, Simulator, StatevectorSimulator};
 pub use statevector::Statevector;
 
-/// Maximum number of qubits the statevector backend will allocate.
+/// Maximum number of qubits the statevector backend will allocate: its
+/// technical ceiling.
 ///
-/// A statevector needs `2^n` complex amplitudes (`16 · 2^n` bytes), so 30
-/// qubits already requires 16 GiB. Requests above this return
-/// [`SimError::TooManyQubits`] rather than attempting the allocation. The value
-/// is also well below `usize::BITS`, so `1 << n` can never overflow.
-pub const MAX_QUBITS: usize = 30;
+/// A statevector needs `2^n` complex amplitudes (`16 · 2^n` bytes): 30 qubits
+/// take 16 GiB, 34 take 256 GiB and 40 take 16 TiB. Requests above this return
+/// [`SimError::TooManyQubits`] rather than attempting the allocation. Below it,
+/// whether a statevector fits is the caller's memory budget's decision (the
+/// `polypus-backend` budget, issue #428); a direct caller of this crate gets
+/// [`SimError::AllocationFailed`] when the system refuses the memory, instead
+/// of an abort. The value keeps `16 · 2^n` (the statevector's bytes) within
+/// `usize`, so neither `1 << n` nor the byte count can overflow.
+pub const MAX_QUBITS: usize = 40;
+
+// `16 · 2^MAX_QUBITS` bytes must fit in a `usize` (64-bit targets; a 32-bit one
+// would need a lower ceiling and fails to build here instead of overflowing).
+const _: () = assert!(MAX_QUBITS + 4 < usize::BITS as usize);
 
 /// Statevectors [`StatevectorSimulator::adjoint_gradient`] holds at once: the
 /// state `ψ` and the pulled-back observable `λ`. A caller that budgets memory

@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description       = "Pure-Rust diagonal cost observables (QUBO/Ising) mapping measurement counts to expectation values. rayon-parallel over candidates, GIL-free. No Python."
+description       = "Pure-Rust cost observables mapping measurement counts to expectation values: diagonal QUBO/Ising costs, and Pauli sums through qubit-wise-commuting grouping and a parity reducer. rayon-parallel over candidates, GIL-free. No Python."
 
 [lib]
 name = "polypus_observable"
@@ -19,6 +19,12 @@ rayon = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }
+# Only for the Pauli-sum acceptance tests (tests/pauli_sum.rs, issue #530): the
+# 4-qubit H2 Hamiltonian, and a simulated state to measure it on. The library
+# itself does not depend on them.
+polypus-circuit = { workspace = true }
+polypus-physics = { workspace = true }
+polypus-sim = { workspace = true }
 
 [lints]
 workspace = true

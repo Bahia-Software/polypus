@@ -1000,8 +1000,8 @@ impl PyReadout {
 /// Training or test samples for a native model, in the `x_train` slot of
 /// `qml.train` (then without `y_train`) or the `x` slot of `qml.predict`.
 ///
-/// `Dataset(x, y=None)` validates the rows (non-empty, equal length, finite)
-/// and, if given, one finite label per row. Without `y` the dataset is
+/// `Dataset(x, y=None)` validates the rows (non-empty, at least one feature,
+/// equal length, finite) and, if given, one finite label per row. Without `y` the dataset is
 /// *unlabeled* (plan F4): it trains only with `loss="expectation"`, and the mark
 /// survives a split. Labels are `float`s; class indices for
 /// `"categorical_cross_entropy"` are whole numbers.
@@ -3484,7 +3484,8 @@ fn kernel_encoder<'py>(encoder: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Encod
 
 /// The rows of `x` (rows or a `Dataset`, whose labels are not used) for
 /// `qml.kernel_matrix`, checked as `qml.expval` checks its rows (empty,
-/// ragged, non-finite), each a `polypus.ConfigurationError` naming `name`.
+/// zero-width, ragged, non-finite), each a `polypus.ConfigurationError`
+/// naming `name`.
 fn kernel_rows(x: &Bound<'_, PyAny>, name: &str) -> PyResult<polypus_qml::Dataset> {
     if let Ok(dataset) = x.cast::<PyDataset>() {
         return Ok(dataset.try_borrow()?.inner.clone());

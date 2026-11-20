@@ -1,10 +1,11 @@
 name: Hygiene
 
 # Blocks internal files, ignored artefacts, infrastructure data, notebooks with
-# outputs, oversized blobs, Cargo.toml/CITATION.cff version drift and stale
-# internal version pins. Logic and policy live in .github/scripts/hygiene.py,
-# .github/scripts/release_check.py and .github/hygiene-allow.txt; changes to
-# any of them, or to this file, need human review.
+# outputs, oversized blobs, Cargo.toml/CITATION.cff version drift, stale
+# internal version pins and CHANGELOG.md edits outside a release. Logic and
+# policy live in .github/scripts/hygiene.py, .github/scripts/release_check.py
+# and .github/hygiene-allow.txt; changes to any of them, or to this file, need
+# human review.
 #
 # Pull requests and merge-queue groups run the public rules only. The maintainers' private patterns
 # (secret HYGIENE_LEAK_PATTERNS) run after the merge, on the push to main: they

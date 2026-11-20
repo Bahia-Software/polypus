@@ -43,8 +43,10 @@ pub mod transpiler;
 pub use circuit::{BoundCircuit, ForeignCircuit};
 pub use error::{BackendError, InfrastructureError};
 pub use mem_budget::{
-    check_statevector_fits, max_statevector_concurrency, BudgetSource, InsufficientMemory,
-    InsufficientMemoryForResult, MemBudget,
+    active_budget, check_fallback_ceiling, check_fits, check_statevector_against,
+    check_statevector_fits, fallback_ceiling_hint, max_statevector_concurrency, qubit_ceiling,
+    BudgetSource, FallbackCeiling, InsufficientMemory, InsufficientMemoryForResult, MemBudget,
+    StatevectorRefusal, FALLBACK_MAX_QUBITS,
 };
 pub use params::RunParams;
 pub use planner::{

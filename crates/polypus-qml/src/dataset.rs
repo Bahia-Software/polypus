@@ -15,7 +15,8 @@ use crate::rng::{shuffle, SplitMix64};
 ///
 /// Construct with [`Dataset::from_rows`], which rejects every non-finite value
 /// up front (mirroring C-2's `NonFiniteParam` policy). Once built, a `Dataset`
-/// is guaranteed non-empty, rectangular, and entirely finite.
+/// is guaranteed non-empty, rectangular, at least one feature wide, and
+/// entirely finite.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dataset {
     /// Row-major: sample `i`, feature `j` is `features[i * num_features + j]`.
@@ -31,13 +32,16 @@ impl Dataset {
     /// Validation runs in order and fails on the first violation found:
     ///
     /// 1. `rows` empty → [`ValidationError::EmptyDataset`].
-    /// 2. a row whose width differs from the first row's width →
+    /// 2. the first row has no features (width 0) →
+    ///    [`ValidationError::NoFeatures`]: a model would encode nothing and
+    ///    predict a constant. Fewer features than qubits stays accepted.
+    /// 3. a row whose width differs from the first row's width →
     ///    [`ValidationError::RaggedRows`] for the first such row.
-    /// 3. `labels.len() != rows.len()` →
+    /// 4. `labels.len() != rows.len()` →
     ///    [`ValidationError::LabelCountMismatch`].
-    /// 4. a non-finite feature → [`ValidationError::NonFiniteFeature`] for the
+    /// 5. a non-finite feature → [`ValidationError::NonFiniteFeature`] for the
     ///    first one in row-major order.
-    /// 5. a non-finite label → [`ValidationError::NonFiniteLabel`] for the
+    /// 6. a non-finite label → [`ValidationError::NonFiniteLabel`] for the
     ///    first one.
     ///
     /// Storage is a single flat, row-major allocation.
@@ -47,6 +51,9 @@ impl Dataset {
         }
 
         let num_features = rows[0].len();
+        if num_features == 0 {
+            return Err(ValidationError::NoFeatures);
+        }
         for (sample, row) in rows.iter().enumerate() {
             if row.len() != num_features {
                 return Err(ValidationError::RaggedRows {
@@ -97,7 +104,7 @@ impl Dataset {
         self.num_samples
     }
 
-    /// Number of features per sample.
+    /// Number of features per sample. Always `>= 1`.
     pub fn num_features(&self) -> usize {
         self.num_features
     }
@@ -304,6 +311,36 @@ mod tests {
         assert_eq!(
             Dataset::from_rows(&[], &[]),
             Err(ValidationError::EmptyDataset)
+        );
+    }
+
+    #[test]
+    fn zero_width_samples_rejected() {
+        for data in [rows(&[&[]]), rows(&[&[], &[]])] {
+            let labels = vec![0.0; data.len()];
+            assert_eq!(
+                Dataset::from_rows(&data, &labels),
+                Err(ValidationError::NoFeatures)
+            );
+        }
+    }
+
+    #[test]
+    fn zero_width_first_row_is_reported_before_ragged_rows() {
+        // The first row fixes the width, so a zero-width one is the error, not
+        // the wider row after it.
+        assert_eq!(
+            Dataset::from_rows(&rows(&[&[], &[1.0]]), &[0.0, 0.0]),
+            Err(ValidationError::NoFeatures)
+        );
+        // A zero-width row after a non-empty first row is still ragged.
+        assert_eq!(
+            Dataset::from_rows(&rows(&[&[1.0], &[]]), &[0.0, 0.0]),
+            Err(ValidationError::RaggedRows {
+                sample: 1,
+                expected: 1,
+                got: 0,
+            })
         );
     }
 
