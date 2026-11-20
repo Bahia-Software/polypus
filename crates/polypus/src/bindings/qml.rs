@@ -72,10 +72,11 @@ fn validation_to_config_err(e: ValidationError) -> PyErr {
     configuration_error(e.to_string())
 }
 
-/// An integer (or an `__index__` one) that does not fit in a `usize`, as
-/// [`extract_count`] finds it: the integer (what `__index__` returns, for an
-/// object that is not an `int`) as Python prints it, and its sign, which picks
-/// the message.
+/// An integer (or an `__index__` one) that does not fit in the unsigned type
+/// it is read as (a `usize` count, a `u32` such as `shots`, a `u64` seed), as
+/// [`extract_unsigned`] finds it: the integer (what `__index__` returns, for
+/// an object that is not an `int`) as Python prints it, and its sign, which
+/// picks the message.
 struct OutOfRangeCount {
     shown: String,
     negative: bool,
@@ -92,20 +93,41 @@ impl OutOfRangeCount {
             format!("expected an integer of at most {}, got {shown}", usize::MAX)
         }
     }
+
+    /// Why the setting `name` cannot be this value: below zero,
+    /// `"{name} must be {lowest}, got …"`, in the words of the setting's own
+    /// lower bound; above `max`, the largest value its type holds,
+    /// `"{name} must be at most {max}, got …"`.
+    fn refusal(&self, name: &str, lowest: &str, max: impl std::fmt::Display) -> String {
+        let shown = &self.shown;
+        if self.negative {
+            format!("{name} must be {lowest}, got {shown}")
+        } else {
+            format!("{name} must be at most {max}, got {shown}")
+        }
+    }
 }
 
 /// `ob` as a `usize`, the conversion every count-like argument of the native
-/// API shares (contract C-11): the count when it fits, an [`OutOfRangeCount`]
-/// for an integer outside `usize`, which each caller refuses in its own words
-/// instead of PyO3's `OverflowError`, and PyO3's own error for anything else
-/// (a `TypeError` for another type).
+/// API shares (contract C-11): [`extract_unsigned`] for a `usize`.
+fn extract_count(ob: &Bound<'_, PyAny>) -> PyResult<Result<usize, OutOfRangeCount>> {
+    extract_unsigned(ob)
+}
+
+/// `ob` as the unsigned integer type `T` (`usize`, `u32` or `u64`): the value
+/// when it fits, an [`OutOfRangeCount`] for an integer outside `T`, which each
+/// caller refuses in its own words instead of PyO3's `OverflowError`, and
+/// PyO3's own error for anything else (a `TypeError` for another type).
 ///
-/// A `bool` is not a count, although Python makes it an `int`: it is a
+/// A `bool` is not an integer here, although Python makes it an `int`: it is a
 /// `TypeError`, as `final_shots` treats one. An object with `__index__` (a
 /// NumPy integer, say) is the integer it returns: an out-of-range one is
 /// described by that integer, never compared or printed as the object itself,
 /// which may support neither.
-fn extract_count(ob: &Bound<'_, PyAny>) -> PyResult<Result<usize, OutOfRangeCount>> {
+fn extract_unsigned<'py, T>(ob: &Bound<'py, PyAny>) -> PyResult<Result<T, OutOfRangeCount>>
+where
+    T: for<'a> FromPyObject<'a, 'py, Error = PyErr>,
+{
     let py = ob.py();
     if ob.is_instance_of::<PyBool>() {
         return Err(PyTypeError::new_err(format!(
@@ -113,7 +135,7 @@ fn extract_count(ob: &Bound<'_, PyAny>) -> PyResult<Result<usize, OutOfRangeCoun
             ob.str()?
         )));
     }
-    match ob.extract::<usize>() {
+    match ob.extract::<T>() {
         Ok(count) => Ok(Ok(count)),
         Err(err) if err.is_instance_of::<PyOverflowError>(py) => {
             let index = PyModule::import(py, "operator")?.call_method1("index", (ob,))?;
@@ -176,6 +198,119 @@ impl std::fmt::Display for BatchSizeArg {
             BatchSizeArg::OutOfRange(out_of_range) => f.write_str(&out_of_range.shown),
         }
     }
+}
+
+/// An execution integer of the native API: `shots`, `n_qpus`, `nodes` and
+/// `cores_per_qpu` (`T = u32`) and `seed` (`T = u64`) of `Model.fit`,
+/// `TrainedModel.predict`/`run` and the primitives, and the `seed` of
+/// `Dataset.train_test_split`. The value when it fits in `T`, or the
+/// integer that does not (negative or oversized), kept so that the entry
+/// point refuses it at its place in the order of checks (contract C-11),
+/// naming the argument, rather than PyO3's `OverflowError` at the call. A
+/// `bool` or any other type is a `TypeError`.
+pub(crate) struct UnsignedArg<T>(Result<T, OutOfRangeCount>);
+
+impl<'a, 'py, T> FromPyObject<'a, 'py> for UnsignedArg<T>
+where
+    T: for<'b> FromPyObject<'b, 'py, Error = PyErr>,
+{
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        Ok(UnsignedArg(extract_unsigned(&ob)?))
+    }
+}
+
+impl<T: Copy> UnsignedArg<T> {
+    /// `value`, which fits: a signature's default. PyO3 shows a default that
+    /// is not a literal as `...`, so each signature with one restates itself
+    /// in a `text_signature`.
+    fn of(value: T) -> Self {
+        UnsignedArg(Ok(value))
+    }
+
+    /// The integer, or why the setting `name` cannot be it
+    /// ([`OutOfRangeCount::refusal`], with `max` the largest value of `T`).
+    fn in_range(&self, name: &str, lowest: &str, max: impl std::fmt::Display) -> Result<T, String> {
+        match &self.0 {
+            Ok(value) => Ok(*value),
+            Err(out_of_range) => Err(out_of_range.refusal(name, lowest, max)),
+        }
+    }
+}
+
+/// What a negative `shots` or `n_qpus` must be: the words of `0`'s refusal
+/// (`validate_shots_and_qpus`), so `-1` reads as `0` does.
+const AT_LEAST_ONE: &str = ">= 1";
+
+/// What a negative `nodes` or `cores_per_qpu` must be off `cunqa`: their
+/// type's bound, since only `cunqa` refuses `0`.
+const NON_NEGATIVE: &str = "an integer >= 0";
+
+/// What a negative `nodes` or `cores_per_qpu` must be on `cunqa`: the words of
+/// `0`'s refusal there (`validate_cunqa_allocation`), so `-1` reads as `0`
+/// does.
+const CUNQA_AT_LEAST_ONE: &str = ">= 1 for the 'cunqa' infrastructure";
+
+/// What a negative `seed` must be, in the words of `polypus.torch`'s check.
+const SEED_LOWEST: &str = "an integer >= 0 or None";
+
+/// `shots` and `n_qpus` checked as every native entry point checks them, in
+/// this order: each within a `u32` (a negative one with the message of `0`),
+/// then both `>= 1` ([`validate_shots_and_qpus`]). Each refusal a
+/// `polypus.ConfigurationError` naming the argument and the value.
+fn checked_shots_and_qpus(
+    shots: &UnsignedArg<u32>,
+    n_qpus: &UnsignedArg<u32>,
+) -> PyResult<(u32, u32)> {
+    let shots = shots
+        .in_range("shots", AT_LEAST_ONE, u32::MAX)
+        .map_err(configuration_error)?;
+    let n_qpus = n_qpus
+        .in_range("n_qpus", AT_LEAST_ONE, u32::MAX)
+        .map_err(configuration_error)?;
+    validate_shots_and_qpus(shots, n_qpus)?;
+    Ok((shots, n_qpus))
+}
+
+/// `nodes` and `cores_per_qpu` checked as every native entry point checks
+/// them: each within a `u32` on any infrastructure, then the CUNQA allocation
+/// ([`validate_cunqa_allocation`], which refuses `0` on `cunqa` only). Each
+/// refusal a `polypus.ConfigurationError` naming the argument and the value;
+/// a negative one says what `0`'s refusal says on `cunqa`
+/// (`nodes must be >= 1 for the 'cunqa' infrastructure, got -1`) and
+/// `nodes must be an integer >= 0, got -1` elsewhere.
+fn checked_allocation(
+    infrastructure: &str,
+    nodes: &UnsignedArg<u32>,
+    cores_per_qpu: &UnsignedArg<u32>,
+    walltime: Option<&str>,
+) -> PyResult<(u32, u32)> {
+    let lowest = if infrastructure == "cunqa" {
+        CUNQA_AT_LEAST_ONE
+    } else {
+        NON_NEGATIVE
+    };
+    let nodes = nodes
+        .in_range("nodes", lowest, u32::MAX)
+        .map_err(configuration_error)?;
+    let cores_per_qpu = cores_per_qpu
+        .in_range("cores_per_qpu", lowest, u32::MAX)
+        .map_err(configuration_error)?;
+    validate_cunqa_allocation(infrastructure, nodes, cores_per_qpu, walltime)?;
+    Ok((nodes, cores_per_qpu))
+}
+
+/// An explicit `seed` within a `u64`, or `None`: one outside it is refused
+/// with `wrap` (a `polypus.ConfigurationError` at the entry points, a plain
+/// `ValueError` in the `Dataset` builder), naming `seed` and the value.
+fn checked_seed(
+    seed: Option<&UnsignedArg<u64>>,
+    wrap: impl FnOnce(String) -> PyErr,
+) -> PyResult<Option<u64>> {
+    seed.map(|seed| seed.in_range("seed", SEED_LOWEST, u64::MAX))
+        .transpose()
+        .map_err(wrap)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1050,9 +1185,17 @@ impl PyDataset {
     /// `floor(num_samples * test_fraction)` of them go to the test set.
     /// `test_fraction` lies in the open interval `(0, 1)`. An explicit `seed`
     /// reproduces the split; `None` draws one from OS entropy (contract C-7).
-    /// Both halves keep this dataset's labeled or unlabeled mark.
+    /// An explicit `seed` is an integer from `0` to `2**64 - 1` (a
+    /// `ValueError` otherwise; a `bool` is a `TypeError`). Both halves keep
+    /// this dataset's labeled or unlabeled mark.
     #[pyo3(signature = (test_fraction, seed=None))]
-    fn train_test_split(&self, test_fraction: f64, seed: Option<u64>) -> PyResult<(Self, Self)> {
+    fn train_test_split(
+        &self,
+        test_fraction: f64,
+        seed: Option<UnsignedArg<u64>>,
+    ) -> PyResult<(Self, Self)> {
+        // A builder: a plain `ValueError`, as `test_fraction`'s (C-11).
+        let seed = checked_seed(seed.as_ref(), PyValueError::new_err)?;
         let seed = seed_or_entropy(seed, random_seed)?;
         let (train, test) = self
             .inner
@@ -1298,36 +1441,47 @@ impl Model {
     ///   is the native simulator on `infrastructure="local"` and Aer otherwise
     ///   (CUNQA's QPUs run Aer); an explicit `backend` wins. `seed` drives the
     ///   optimizer, the shots and the minibatches (C-7), and `id` is a prefix to
-    ///   which a UUID is appended (C-9).
+    ///   which a UUID is appended (C-9). `shots`, `n_qpus`, `nodes` and
+    ///   `cores_per_qpu` are integers from `0` to `4294967295`, and `seed` one
+    ///   from `0` to `2**64 - 1`, on top of their own rules (C-11).
     ///
     /// Every check runs before a backend exists and raises
     /// `polypus.ConfigurationError` (a `ValueError`), except a value of the
-    /// wrong type (a `final_shots` that is not an integer, a `callback` that is
+    /// wrong type (a `bool` or another non-integer as `shots`, `n_qpus`,
+    /// `nodes`, `cores_per_qpu`, `seed` or `final_shots`, a `callback` that is
     /// neither callable nor `None`), a `TypeError`. The fitness is the
     /// negated mean loss over the samples, which the optimizers maximise.
-    #[pyo3(signature = (
-        x, y=None, *, method, loss=None, shots=1024, infrastructure="local", n_qpus=1,
-        nodes=1, cores_per_qpu=2, walltime=None, options=None, sim_method="automatic",
-        noise_model=None, backend=None, seed=None, id="qml", exact=false, batch_size=None,
-        initial_point=None, final_shots=None, callback=None,
-    ))]
+    #[pyo3(
+        signature = (
+            x, y=None, *, method, loss=None, shots=UnsignedArg::of(1024),
+            infrastructure="local", n_qpus=UnsignedArg::of(1), nodes=UnsignedArg::of(1),
+            cores_per_qpu=UnsignedArg::of(2), walltime=None, options=None,
+            sim_method="automatic", noise_model=None, backend=None, seed=None, id="qml",
+            exact=false, batch_size=None, initial_point=None, final_shots=None, callback=None,
+        ),
+        text_signature = "($self, x, y=None, *, method, loss=None, shots=1024, \
+            infrastructure=\"local\", n_qpus=1, nodes=1, cores_per_qpu=2, walltime=None, \
+            options=None, sim_method=\"automatic\", noise_model=None, backend=None, seed=None, \
+            id=\"qml\", exact=False, batch_size=None, initial_point=None, final_shots=None, \
+            callback=None)"
+    )]
     fn fit<'py>(
         &self,
         x: &Bound<'py, PyAny>,
         y: Option<&Bound<'py, PyAny>>,
         method: &Bound<'py, PyAny>,
         loss: Option<&str>,
-        shots: u32,
+        shots: UnsignedArg<u32>,
         infrastructure: &str,
-        n_qpus: u32,
-        nodes: u32,
-        cores_per_qpu: u32,
+        n_qpus: UnsignedArg<u32>,
+        nodes: UnsignedArg<u32>,
+        cores_per_qpu: UnsignedArg<u32>,
         walltime: Option<String>,
         options: Option<OptionsArg>,
         sim_method: &str,
         noise_model: Option<Bound<'py, PyAny>>,
         backend: Option<&str>,
-        seed: Option<u64>,
+        seed: Option<UnsignedArg<u64>>,
         id: &str,
         exact: bool,
         batch_size: Option<BatchSizeArg>,
@@ -1337,10 +1491,12 @@ impl Model {
     ) -> PyResult<Py<PyAny>> {
         let start = Instant::now();
         let py = x.py();
-        validate_shots_and_qpus(shots, n_qpus)?;
-        validate_cunqa_allocation(infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
+        let (shots, n_qpus) = checked_shots_and_qpus(&shots, &n_qpus)?;
+        let (nodes, cores_per_qpu) =
+            checked_allocation(infrastructure, &nodes, &cores_per_qpu, walltime.as_deref())?;
         validate_id(id)?;
         let loss = loss.map(parse_loss).transpose()?;
+        let seed = checked_seed(seed.as_ref(), configuration_error)?;
         let effective_seed = resolve_optimizer_seed(seed, method_seed(method), random_seed)?;
         let dimensions = u32::try_from(self.num_params).map_err(|_| {
             configuration_error(format!(
@@ -1603,33 +1759,47 @@ impl ExactResult {
 }
 
 /// The execution arguments `TrainedModel.predict` and `run`, and `qml.expval`,
-/// `qml.jacobian` and `qml.vjp`, share.
+/// `qml.jacobian`, `qml.vjp` and `qml.kernel_matrix`, share, as they come
+/// from Python: the integers not yet checked against their types' range
+/// ([`check`](Self::check) and [`into_config`](Self::into_config) do it).
 struct Execution<'a, 'py> {
-    shots: u32,
+    shots: UnsignedArg<u32>,
     infrastructure: &'a str,
-    n_qpus: u32,
-    nodes: u32,
-    cores_per_qpu: u32,
+    n_qpus: UnsignedArg<u32>,
+    nodes: UnsignedArg<u32>,
+    cores_per_qpu: UnsignedArg<u32>,
     walltime: Option<String>,
     options: Option<OptionsArg>,
     sim_method: &'a str,
     noise_model: Option<Bound<'py, PyAny>>,
     backend: Option<&'a str>,
-    seed: Option<u64>,
+    seed: Option<UnsignedArg<u64>>,
     exact: bool,
 }
 
+/// What [`Execution::check`] has checked: the backend it resolved, and the
+/// integers, each within its type and past its own rule.
+struct CheckedExecution<'a> {
+    backend: &'a str,
+    shots: u32,
+    n_qpus: u32,
+    nodes: u32,
+    cores_per_qpu: u32,
+}
+
 impl<'a> Execution<'a, '_> {
-    /// The checks that need no data: `shots` and `n_qpus`, the CUNQA
-    /// allocation, then `exact` against the backend, which it resolves
-    /// (`backend=None` by infrastructure) and returns. Each a
-    /// `polypus.ConfigurationError`.
-    fn check(&self) -> PyResult<&'a str> {
-        validate_shots_and_qpus(self.shots, self.n_qpus)?;
-        validate_cunqa_allocation(
+    /// The checks that need no data: `shots` and `n_qpus`
+    /// ([`checked_shots_and_qpus`]), `nodes`, `cores_per_qpu` and the CUNQA
+    /// allocation ([`checked_allocation`]), then `exact` against the backend,
+    /// which it resolves (`backend=None` by infrastructure). Each a
+    /// `polypus.ConfigurationError`. The `seed` waits for
+    /// [`into_config`](Self::into_config).
+    fn check(&self) -> PyResult<CheckedExecution<'a>> {
+        let (shots, n_qpus) = checked_shots_and_qpus(&self.shots, &self.n_qpus)?;
+        let (nodes, cores_per_qpu) = checked_allocation(
             self.infrastructure,
-            self.nodes,
-            self.cores_per_qpu,
+            &self.nodes,
+            &self.cores_per_qpu,
             self.walltime.as_deref(),
         )?;
         let backend = resolve_backend(self.backend, self.infrastructure);
@@ -1641,41 +1811,53 @@ impl<'a> Execution<'a, '_> {
                  native simulator computes exact probabilities",
             ));
         }
-        Ok(backend)
+        Ok(CheckedExecution {
+            backend,
+            shots,
+            n_qpus,
+            nodes,
+            cores_per_qpu,
+        })
     }
 
-    /// The run's [`ExecutionConfig`] for `backend` (from [`check`](Self::check)),
-    /// with an `id` of `id_prefix` plus a UUID and the seed: `None` on `qmio`,
-    /// where an explicit one is a `polypus.ConfigurationError`, else the
-    /// explicit one or one drawn from OS entropy (C-7).
-    fn into_config(self, backend: &str, id_prefix: &str) -> PyResult<ExecutionConfig> {
+    /// The run's [`ExecutionConfig`] for what [`check`](Self::check) returned,
+    /// with an `id` of `id_prefix` plus a UUID and the seed: an explicit one
+    /// outside a `u64` is a `polypus.ConfigurationError`; then `None` on
+    /// `qmio`, where an explicit one is a `polypus.ConfigurationError`, else
+    /// the explicit one or one drawn from OS entropy (C-7).
+    fn into_config(
+        self,
+        checked: CheckedExecution<'_>,
+        id_prefix: &str,
+    ) -> PyResult<ExecutionConfig> {
+        let explicit_seed = checked_seed(self.seed.as_ref(), configuration_error)?;
         // As in `run_quantum_circuit` (C-7): `qmio` is hardware, so a seed there
         // would be silently ineffective.
         let seed = if self.infrastructure == "qmio" {
-            if self.seed.is_some() {
+            if explicit_seed.is_some() {
                 return Err(configuration_error(
                     "seed is not supported for the 'qmio' infrastructure (real quantum hardware)",
                 ));
             }
             None
         } else {
-            Some(seed_or_entropy(self.seed, random_seed)?)
+            Some(seed_or_entropy(explicit_seed, random_seed)?)
         };
         let backend_config = config_from_strings(
             self.infrastructure,
-            backend,
+            checked.backend,
             self.sim_method,
             self.noise_model.map(|nm| nm.unbind()),
-            self.nodes,
-            self.cores_per_qpu,
+            checked.nodes,
+            checked.cores_per_qpu,
             self.walltime.as_deref(),
             None,
             self.options.map(OptionsArg::into_inner),
         )?;
         Ok(ExecutionConfig {
             id: unique_id(id_prefix)?,
-            shots: self.shots,
-            n_qpus: self.n_qpus,
+            shots: checked.shots,
+            n_qpus: checked.n_qpus,
             infrastructure: self.infrastructure.to_string(),
             backend_config,
             opt_level: OptLevel::default(),
@@ -1735,7 +1917,8 @@ impl TrainedModel {
     fn run_rows(&self, x: &Bound<'_, PyAny>, exec: Execution<'_, '_>) -> PyResult<RowsRun> {
         let py = x.py();
         let start = Instant::now();
-        let backend = exec.check()?;
+        let checked = exec.check()?;
+        let backend = checked.backend;
         // The labels play no part in inference.
         let (rows, _) = native_dataset(x, None)?;
         let compiled = self
@@ -1750,9 +1933,13 @@ impl TrainedModel {
                     .map_err(qml_to_config_err)
             })
             .collect::<PyResult<Vec<_>>>()?;
-        let (infrastructure, n_qpus, shots, exact) =
-            (exec.infrastructure, exec.n_qpus, exec.shots, exec.exact);
-        let config = exec.into_config(backend, &format!("qml_{n_qpus}_{infrastructure}"))?;
+        let (infrastructure, n_qpus, shots, exact) = (
+            exec.infrastructure,
+            checked.n_qpus,
+            checked.shots,
+            exec.exact,
+        );
+        let config = exec.into_config(checked, &format!("qml_{n_qpus}_{infrastructure}"))?;
         let (id, seed) = (config.id.clone(), config.seed);
         log::info!(
             "qml inference {id} starting: rows={}, infrastructure={infrastructure}, \
@@ -1842,25 +2029,31 @@ impl TrainedModel {
     /// `"threshold"` (±1) and for `"argmax"` (the class index), `float` for
     /// `"raw"` (the expectation itself). With `exact=True` the decisions come
     /// from exact probabilities instead of shots.
-    #[pyo3(signature = (
-        x, *, shots=1024, infrastructure="local", n_qpus=1, nodes=1, cores_per_qpu=2,
-        walltime=None, options=None, sim_method="automatic", noise_model=None, backend=None,
-        seed=None, exact=false,
-    ))]
+    #[pyo3(
+        signature = (
+            x, *, shots=UnsignedArg::of(1024), infrastructure="local", n_qpus=UnsignedArg::of(1),
+            nodes=UnsignedArg::of(1), cores_per_qpu=UnsignedArg::of(2), walltime=None,
+            options=None, sim_method="automatic", noise_model=None, backend=None, seed=None,
+            exact=false,
+        ),
+        text_signature = "($self, x, *, shots=1024, infrastructure=\"local\", n_qpus=1, nodes=1, \
+            cores_per_qpu=2, walltime=None, options=None, sim_method=\"automatic\", \
+            noise_model=None, backend=None, seed=None, exact=False)"
+    )]
     fn predict<'py>(
         &self,
         x: &Bound<'py, PyAny>,
-        shots: u32,
+        shots: UnsignedArg<u32>,
         infrastructure: &str,
-        n_qpus: u32,
-        nodes: u32,
-        cores_per_qpu: u32,
+        n_qpus: UnsignedArg<u32>,
+        nodes: UnsignedArg<u32>,
+        cores_per_qpu: UnsignedArg<u32>,
         walltime: Option<String>,
         options: Option<OptionsArg>,
         sim_method: &str,
         noise_model: Option<Bound<'py, PyAny>>,
         backend: Option<&str>,
-        seed: Option<u64>,
+        seed: Option<UnsignedArg<u64>>,
         exact: bool,
     ) -> PyResult<Bound<'py, PyList>> {
         let run = self.run_rows(
@@ -1909,25 +2102,31 @@ impl TrainedModel {
     /// The raw results for each row of `x`: a `RunResult` whose `counts` holds
     /// one dict per row (`merged_counts` is `None`: the rows are different
     /// circuits), or, with `exact=True`, an `ExactResult` of probabilities.
-    #[pyo3(signature = (
-        x, *, shots=1024, infrastructure="local", n_qpus=1, nodes=1, cores_per_qpu=2,
-        walltime=None, options=None, sim_method="automatic", noise_model=None, backend=None,
-        seed=None, exact=false,
-    ))]
+    #[pyo3(
+        signature = (
+            x, *, shots=UnsignedArg::of(1024), infrastructure="local", n_qpus=UnsignedArg::of(1),
+            nodes=UnsignedArg::of(1), cores_per_qpu=UnsignedArg::of(2), walltime=None,
+            options=None, sim_method="automatic", noise_model=None, backend=None, seed=None,
+            exact=false,
+        ),
+        text_signature = "($self, x, *, shots=1024, infrastructure=\"local\", n_qpus=1, nodes=1, \
+            cores_per_qpu=2, walltime=None, options=None, sim_method=\"automatic\", \
+            noise_model=None, backend=None, seed=None, exact=False)"
+    )]
     fn run<'py>(
         &self,
         x: &Bound<'py, PyAny>,
-        shots: u32,
+        shots: UnsignedArg<u32>,
         infrastructure: &str,
-        n_qpus: u32,
-        nodes: u32,
-        cores_per_qpu: u32,
+        n_qpus: UnsignedArg<u32>,
+        nodes: UnsignedArg<u32>,
+        cores_per_qpu: UnsignedArg<u32>,
         walltime: Option<String>,
         options: Option<OptionsArg>,
         sim_method: &str,
         noise_model: Option<Bound<'py, PyAny>>,
         backend: Option<&str>,
-        seed: Option<u64>,
+        seed: Option<UnsignedArg<u64>>,
         exact: bool,
     ) -> PyResult<Py<PyAny>> {
         let run = self.run_rows(
@@ -3022,7 +3221,7 @@ fn primitive_inputs(
     Ok((compiled, rows, bound.params().to_vec()))
 }
 
-/// Run `primitive` on the backend `exec` names (`backend`, from
+/// Run `primitive` on the backend `exec` names (`checked`, from
 /// [`Execution::check`]), with the GIL released for the whole block loop.
 /// Draws the seed and the id (logged, not returned: pass a `seed` to replay).
 fn run_primitive<P: Primitive + Send>(
@@ -3030,12 +3229,17 @@ fn run_primitive<P: Primitive + Send>(
     entry: &str,
     primitive: &mut P,
     exec: Execution<'_, '_>,
-    backend: &str,
+    checked: CheckedExecution<'_>,
 ) -> PyResult<()> {
     let start = Instant::now();
-    let (infrastructure, n_qpus, shots, exact) =
-        (exec.infrastructure, exec.n_qpus, exec.shots, exec.exact);
-    let config = exec.into_config(backend, &format!("qml_{entry}_{n_qpus}_{infrastructure}"))?;
+    let (infrastructure, backend, n_qpus, shots, exact) = (
+        exec.infrastructure,
+        checked.backend,
+        checked.n_qpus,
+        checked.shots,
+        exec.exact,
+    );
+    let config = exec.into_config(checked, &format!("qml_{entry}_{n_qpus}_{infrastructure}"))?;
     let (id, seed) = (config.id.clone(), config.seed);
     let circuits_per_sample = primitive.circuits_per_sample();
     log::info!(
@@ -3104,32 +3308,45 @@ fn shape_to_py_err(e: ShapeError) -> PyErr {
 ///   `exact=True` the exact expectations (`infrastructure="local"`,
 ///   `backend="polypus"`), otherwise each one estimated from `shots` shots;
 ///   `backend=None` by infrastructure; `seed` drawn when omitted and refused on
-///   `qmio`. The seed is logged, not returned: pass one to replay.
+///   `qmio`. The seed is logged, not returned: pass one to replay. `shots`,
+///   `n_qpus`, `nodes` and `cores_per_qpu` are integers from `0` to
+///   `4294967295`, and `seed` one from `0` to `2**64 - 1`, on top of their
+///   own rules.
 /// - **Runs** one circuit per row, in blocks of rows over one backend for the
 ///   whole call, with the GIL released; Ctrl+C stops it between blocks.
 ///
 /// Every check runs before a backend exists and raises
-/// `polypus.ConfigurationError` (a `ValueError`).
-#[pyfunction(name = "expval", signature = (
-    model, x, params, *, shots=1024, infrastructure="local", n_qpus=1, nodes=1,
-    cores_per_qpu=2, walltime=None, options=None, sim_method="automatic", noise_model=None,
-    backend=None, seed=None, exact=false,
-))]
+/// `polypus.ConfigurationError` (a `ValueError`), except a `bool` or another
+/// non-integer as `shots`, `n_qpus`, `nodes`, `cores_per_qpu` or `seed`: a
+/// `TypeError`.
+#[pyfunction(
+    name = "expval",
+    signature = (
+        model, x, params, *, shots=UnsignedArg::of(1024), infrastructure="local",
+        n_qpus=UnsignedArg::of(1), nodes=UnsignedArg::of(1),
+        cores_per_qpu=UnsignedArg::of(2), walltime=None, options=None,
+        sim_method="automatic", noise_model=None, backend=None, seed=None, exact=false,
+    ),
+    text_signature = "(model, x, params, *, shots=1024, \
+        infrastructure=\"local\", n_qpus=1, nodes=1, cores_per_qpu=2, walltime=None, \
+        options=None, sim_method=\"automatic\", noise_model=None, backend=None, \
+        seed=None, exact=False)"
+)]
 pub fn expval<'py>(
     model: &Bound<'py, PyAny>,
     x: &Bound<'py, PyAny>,
     params: Vec<f64>,
-    shots: u32,
+    shots: UnsignedArg<u32>,
     infrastructure: &str,
-    n_qpus: u32,
-    nodes: u32,
-    cores_per_qpu: u32,
+    n_qpus: UnsignedArg<u32>,
+    nodes: UnsignedArg<u32>,
+    cores_per_qpu: UnsignedArg<u32>,
     walltime: Option<String>,
     options: Option<OptionsArg>,
     sim_method: &str,
     noise_model: Option<Bound<'py, PyAny>>,
     backend: Option<&str>,
-    seed: Option<u64>,
+    seed: Option<UnsignedArg<u64>>,
     exact: bool,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let py = x.py();
@@ -3148,7 +3365,7 @@ pub fn expval<'py>(
         exact,
     };
     let model = primitive_model(model, "expval")?;
-    let backend = exec.check()?;
+    let checked = exec.check()?;
     let (compiled, rows, params) = primitive_inputs(model.get(), x, params)?;
     let templates = (0..rows.num_samples())
         .map(|i| compiled.template_for(rows.sample(i)))
@@ -3161,7 +3378,7 @@ pub fn expval<'py>(
         params,
         values: Vec::with_capacity(num_samples * num_observables),
     };
-    run_primitive(py, "expval", &mut primitive, exec, backend)?;
+    run_primitive(py, "expval", &mut primitive, exec, checked)?;
     let values = array2(num_samples, num_observables, primitive.values).map_err(shape_to_py_err)?;
     Ok(values.into_pyarray(py))
 }
@@ -3188,28 +3405,38 @@ pub fn expval<'py>(
 ///   circuit.
 ///
 /// Every check runs before a backend exists and raises
-/// `polypus.ConfigurationError` (a `ValueError`).
-#[pyfunction(name = "jacobian", signature = (
-    model, x, params, *, wrt="params", shots=1024, infrastructure="local", n_qpus=1, nodes=1,
-    cores_per_qpu=2, walltime=None, options=None, sim_method="automatic", noise_model=None,
-    backend=None, seed=None, exact=false,
-))]
+/// `polypus.ConfigurationError` (a `ValueError`), except a `bool` or another
+/// non-integer as `shots`, `n_qpus`, `nodes`, `cores_per_qpu` or `seed`: a
+/// `TypeError`.
+#[pyfunction(
+    name = "jacobian",
+    signature = (
+        model, x, params, *, wrt="params", shots=UnsignedArg::of(1024), infrastructure="local",
+        n_qpus=UnsignedArg::of(1), nodes=UnsignedArg::of(1),
+        cores_per_qpu=UnsignedArg::of(2), walltime=None, options=None,
+        sim_method="automatic", noise_model=None, backend=None, seed=None, exact=false,
+    ),
+    text_signature = "(model, x, params, *, wrt=\"params\", shots=1024, \
+        infrastructure=\"local\", n_qpus=1, nodes=1, cores_per_qpu=2, walltime=None, \
+        options=None, sim_method=\"automatic\", noise_model=None, backend=None, \
+        seed=None, exact=False)"
+)]
 pub fn jacobian<'py>(
     model: &Bound<'py, PyAny>,
     x: &Bound<'py, PyAny>,
     params: Vec<f64>,
     wrt: &str,
-    shots: u32,
+    shots: UnsignedArg<u32>,
     infrastructure: &str,
-    n_qpus: u32,
-    nodes: u32,
-    cores_per_qpu: u32,
+    n_qpus: UnsignedArg<u32>,
+    nodes: UnsignedArg<u32>,
+    cores_per_qpu: UnsignedArg<u32>,
     walltime: Option<String>,
     options: Option<OptionsArg>,
     sim_method: &str,
     noise_model: Option<Bound<'py, PyAny>>,
     backend: Option<&str>,
-    seed: Option<u64>,
+    seed: Option<UnsignedArg<u64>>,
     exact: bool,
 ) -> PyResult<Py<PyAny>> {
     let py = x.py();
@@ -3229,7 +3456,7 @@ pub fn jacobian<'py>(
     };
     let model = primitive_model(model, "jacobian")?;
     let wrt = parse_wrt(wrt)?;
-    let backend = exec.check()?;
+    let checked = exec.check()?;
     let (compiled, rows, params) = primitive_inputs(model.get(), x, params)?;
     let samples: Vec<&[f64]> = (0..rows.num_samples()).map(|i| rows.sample(i)).collect();
     let plan = compiled
@@ -3243,7 +3470,7 @@ pub fn jacobian<'py>(
         by_params: Vec::new(),
         by_inputs: Vec::new(),
     };
-    run_primitive(py, "jacobian", &mut primitive, exec, backend)?;
+    run_primitive(py, "jacobian", &mut primitive, exec, checked)?;
     let array = |columns: usize, values: Vec<f64>| {
         array3(n, k, columns, values)
             .map(|a| a.into_pyarray(py).into_any())
@@ -3386,29 +3613,38 @@ fn cotangent_values(
 ///
 /// Every check runs before a backend exists and raises
 /// `polypus.ConfigurationError` (a `ValueError`), except a cotangent value
-/// that is not a real number: the `TypeError` `x` raises for one.
-#[pyfunction(name = "vjp", signature = (
-    model, x, params, cotangent, *, wrt="params", shots=1024, infrastructure="local", n_qpus=1,
-    nodes=1, cores_per_qpu=2, walltime=None, options=None, sim_method="automatic",
-    noise_model=None, backend=None, seed=None, exact=false,
-))]
+/// that is not a real number, the `TypeError` `x` raises for one, and a
+/// `bool` or another non-integer as an execution integer, a `TypeError`.
+#[pyfunction(
+    name = "vjp",
+    signature = (
+        model, x, params, cotangent, *, wrt="params", shots=UnsignedArg::of(1024),
+        infrastructure="local", n_qpus=UnsignedArg::of(1), nodes=UnsignedArg::of(1),
+        cores_per_qpu=UnsignedArg::of(2), walltime=None, options=None,
+        sim_method="automatic", noise_model=None, backend=None, seed=None, exact=false,
+    ),
+    text_signature = "(model, x, params, cotangent, *, wrt=\"params\", shots=1024, \
+        infrastructure=\"local\", n_qpus=1, nodes=1, cores_per_qpu=2, walltime=None, \
+        options=None, sim_method=\"automatic\", noise_model=None, backend=None, \
+        seed=None, exact=False)"
+)]
 pub fn vjp<'py>(
     model: &Bound<'py, PyAny>,
     x: &Bound<'py, PyAny>,
     params: Vec<f64>,
     cotangent: &Bound<'py, PyAny>,
     wrt: &str,
-    shots: u32,
+    shots: UnsignedArg<u32>,
     infrastructure: &str,
-    n_qpus: u32,
-    nodes: u32,
-    cores_per_qpu: u32,
+    n_qpus: UnsignedArg<u32>,
+    nodes: UnsignedArg<u32>,
+    cores_per_qpu: UnsignedArg<u32>,
     walltime: Option<String>,
     options: Option<OptionsArg>,
     sim_method: &str,
     noise_model: Option<Bound<'py, PyAny>>,
     backend: Option<&str>,
-    seed: Option<u64>,
+    seed: Option<UnsignedArg<u64>>,
     exact: bool,
 ) -> PyResult<Py<PyAny>> {
     let py = x.py();
@@ -3428,7 +3664,7 @@ pub fn vjp<'py>(
     };
     let model = primitive_model(model, "vjp")?;
     let wrt = parse_wrt(wrt)?;
-    let backend = exec.check()?;
+    let checked = exec.check()?;
     let (compiled, rows, params) = primitive_inputs(model.get(), x, params)?;
     let cotangent = cotangent_values(cotangent, rows.num_samples(), compiled.num_observables())?;
     let samples: Vec<&[f64]> = (0..rows.num_samples()).map(|i| rows.sample(i)).collect();
@@ -3437,7 +3673,7 @@ pub fn vjp<'py>(
         .map_err(qml_to_config_err)?;
     let (n, num_features) = (plan.num_samples(), plan.num_features());
     let mut primitive = VjpRun::new(plan, params, cotangent);
-    run_primitive(py, "vjp", &mut primitive, exec, backend)?;
+    run_primitive(py, "vjp", &mut primitive, exec, checked)?;
     let VjpRun {
         by_params,
         by_inputs,
@@ -3525,27 +3761,37 @@ fn kernel_states(
 ///   not be positive semi-definite.
 ///
 /// Every check runs before a backend exists and raises
-/// `polypus.ConfigurationError` (a `ValueError`).
-#[pyfunction(name = "kernel_matrix", signature = (
-    encoder, x1, x2=None, *, shots=1024, infrastructure="local", n_qpus=1, nodes=1,
-    cores_per_qpu=2, walltime=None, options=None, sim_method="automatic", noise_model=None,
-    backend=None, seed=None, exact=false,
-))]
+/// `polypus.ConfigurationError` (a `ValueError`), except a `bool` or another
+/// non-integer as `shots`, `n_qpus`, `nodes`, `cores_per_qpu` or `seed`: a
+/// `TypeError`.
+#[pyfunction(
+    name = "kernel_matrix",
+    signature = (
+        encoder, x1, x2=None, *, shots=UnsignedArg::of(1024), infrastructure="local",
+        n_qpus=UnsignedArg::of(1), nodes=UnsignedArg::of(1),
+        cores_per_qpu=UnsignedArg::of(2), walltime=None, options=None,
+        sim_method="automatic", noise_model=None, backend=None, seed=None, exact=false,
+    ),
+    text_signature = "(encoder, x1, x2=None, *, shots=1024, \
+        infrastructure=\"local\", n_qpus=1, nodes=1, cores_per_qpu=2, walltime=None, \
+        options=None, sim_method=\"automatic\", noise_model=None, backend=None, \
+        seed=None, exact=False)"
+)]
 pub fn kernel_matrix<'py>(
     encoder: &Bound<'py, PyAny>,
     x1: &Bound<'py, PyAny>,
     x2: Option<&Bound<'py, PyAny>>,
-    shots: u32,
+    shots: UnsignedArg<u32>,
     infrastructure: &str,
-    n_qpus: u32,
-    nodes: u32,
-    cores_per_qpu: u32,
+    n_qpus: UnsignedArg<u32>,
+    nodes: UnsignedArg<u32>,
+    cores_per_qpu: UnsignedArg<u32>,
     walltime: Option<String>,
     options: Option<OptionsArg>,
     sim_method: &str,
     noise_model: Option<Bound<'py, PyAny>>,
     backend: Option<&str>,
-    seed: Option<u64>,
+    seed: Option<UnsignedArg<u64>>,
     exact: bool,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let py = x1.py();
@@ -3564,7 +3810,7 @@ pub fn kernel_matrix<'py>(
         exact,
     };
     let encoder = kernel_encoder(encoder)?;
-    let backend = exec.check()?;
+    let checked = exec.check()?;
     let (feature_map, rows) = {
         // A copy: the encoder can be built on afterwards without changing it.
         let stack = encoder.try_borrow()?.stack.clone();
@@ -3597,7 +3843,7 @@ pub fn kernel_matrix<'py>(
     let kernel = FidelityKernel::from_states(rows, columns).map_err(qml_to_config_err)?;
     let (num_rows, num_columns) = (kernel.num_rows(), kernel.num_columns());
     let mut primitive = KernelRun::new(kernel);
-    run_primitive(py, "kernel_matrix", &mut primitive, exec, backend)?;
+    run_primitive(py, "kernel_matrix", &mut primitive, exec, checked)?;
     let matrix = primitive.into_matrix().map_err(qml_to_py_err)?;
     let matrix = array2(num_rows, num_columns, matrix).map_err(shape_to_py_err)?;
     Ok(matrix.into_pyarray(py))
@@ -4021,6 +4267,107 @@ mod tests {
                 let err = extract(source).err().unwrap();
                 assert!(err.is_instance_of::<PyTypeError>(py), "{source}: {err}");
             }
+        });
+    }
+
+    #[test]
+    fn pyo3_overflows_on_an_integer_outside_u32_or_u64() {
+        // What `extract_unsigned` relies on to tell "out of range" from
+        // "not an integer": PyO3's own `u32`/`u64` conversion raises
+        // `OverflowError`, never another exception, for both signs.
+        Python::initialize();
+        Python::attach(|py| {
+            let eval = |source: &str| {
+                py.eval(&std::ffi::CString::new(source).unwrap(), None, None)
+                    .unwrap()
+            };
+            let index_huge = index_only("2**70");
+            for source in ["-1", "2**32", "-2**70", index_huge.as_str()] {
+                let err = eval(source).extract::<u32>().unwrap_err();
+                assert!(err.is_instance_of::<PyOverflowError>(py), "{source}: {err}");
+            }
+            for source in ["-1", "2**64", "-2**70", index_huge.as_str()] {
+                let err = eval(source).extract::<u64>().unwrap_err();
+                assert!(err.is_instance_of::<PyOverflowError>(py), "{source}: {err}");
+            }
+        });
+    }
+
+    #[test]
+    fn an_execution_integer_out_of_range_is_kept_for_the_entry_point_to_refuse() {
+        Python::initialize();
+        Python::attach(|py| {
+            let eval = |source: &str| {
+                py.eval(&std::ffi::CString::new(source).unwrap(), None, None)
+                    .unwrap()
+            };
+            let as_u32 = |source: &str| eval(source).extract::<UnsignedArg<u32>>();
+            let as_u64 = |source: &str| eval(source).extract::<UnsignedArg<u64>>();
+            let shots = |arg: UnsignedArg<u32>| arg.in_range("shots", ">= 1", u32::MAX);
+            let seed =
+                |arg: UnsignedArg<u64>| arg.in_range("seed", "an integer >= 0 or None", u64::MAX);
+
+            // In range: the value, the whole of each type included, and an
+            // object with only `__index__` as the integer it returns.
+            let index_three = index_only("3");
+            for (source, value) in [
+                ("0", 0),
+                ("16", 16),
+                ("2**32 - 1", u32::MAX),
+                (index_three.as_str(), 3),
+            ] {
+                assert_eq!(shots(as_u32(source).unwrap()), Ok(value), "{source}");
+            }
+            for (source, value) in [("0", 0), ("2**64 - 1", u64::MAX), (index_three.as_str(), 3)] {
+                assert_eq!(seed(as_u64(source).unwrap()), Ok(value), "{source}");
+            }
+
+            // Outside it: kept, never PyO3's `OverflowError`, and described by
+            // the integer (never the object) with the setting's own words.
+            let index_minus_one = index_only("-1");
+            for (source, message) in [
+                ("-1", "shots must be >= 1, got -1"),
+                (index_minus_one.as_str(), "shots must be >= 1, got -1"),
+                ("2**32", "shots must be at most 4294967295, got 4294967296"),
+                (
+                    "2**70",
+                    "shots must be at most 4294967295, got 1180591620717411303424",
+                ),
+            ] {
+                assert_eq!(
+                    shots(as_u32(source).unwrap()),
+                    Err(message.to_string()),
+                    "{source}"
+                );
+            }
+            for (source, message) in [
+                ("-1", "seed must be an integer >= 0 or None, got -1"),
+                (
+                    "2**64",
+                    "seed must be at most 18446744073709551615, got 18446744073709551616",
+                ),
+            ] {
+                assert_eq!(
+                    seed(as_u64(source).unwrap()),
+                    Err(message.to_string()),
+                    "{source}"
+                );
+            }
+
+            // Another type is a `TypeError`, a `bool` included, for both.
+            for source in ["True", "False", "4.0", "'4'", "None", "4j"] {
+                let err = as_u32(source).err().unwrap();
+                assert!(err.is_instance_of::<PyTypeError>(py), "{source}: {err}");
+                let err = as_u64(source).err().unwrap();
+                assert!(err.is_instance_of::<PyTypeError>(py), "{source}: {err}");
+            }
+            // An `__index__` that raises propagates its own exception.
+            let raising = "type('Raising', (), {'__index__': \
+                           lambda self: (_ for _ in ()).throw(RuntimeError('boom'))})()";
+            let err = as_u32(raising).err().unwrap();
+            assert!(err.is_instance_of::<PyRuntimeError>(py), "{err}");
+            let err = as_u64(raising).err().unwrap();
+            assert!(err.is_instance_of::<PyRuntimeError>(py), "{err}");
         });
     }
 
