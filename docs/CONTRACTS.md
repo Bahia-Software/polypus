@@ -2661,10 +2661,25 @@ that does not depend on the data is checked where it is written, as a plain
   refused at the call, before the layer is checked: `reps`, the
   `num_qubits` of `Encoder`/`Ansatz` (where `0` is refused too, with its own
   message), and a Pauli position, in `Z`/`X`/`Y` and in the
-  `[(pauli, position), …]` list (below). A parameter count that does not fit
-  in a `usize` (a huge `reps`, or any layer after one) is
-  `ValidationError::TooManyParams`. Both are a `ValueError` that leaves the
-  object as it was, never PyO3's `OverflowError` or a panic. A count of
+  `[(pauli, position), …]` list (below). A model has at most
+  `MAX_MODEL_QUBITS` (1 000 000) qubits: `Encoder`/`Ansatz` refuse more at
+  construction, and `compile` (so `qml.load` and the kernel's `FeatureMap`)
+  with `ValidationError::TooManyQubits`. The gates a model's layers emit
+  are counted in each layer's `plan`, before any gate or parameter of it
+  exists, against `MAX_MODEL_GATES` (4 000 000): a layer that takes the
+  model past it is `ValidationError::ModelTooLarge` with
+  `SizeLimit::Budget`, and one whose count does not fit in a `usize` (a
+  huge `reps`) the same variant with `SizeLimit::Overflow`; the two
+  messages differ. Encoders are counted for the feature count `compile` is
+  given: none at the builder; the samples' wherever the model meets data,
+  where the error is that call's own (a `polypus.ConfigurationError` in
+  `fit`, `predict`, `run`, `qml.expval`/`jacobian`/`vjp` and
+  `qml.kernel_matrix`, a `ValueError` in `circuit(x)`). The basis encoder
+  is counted as if every feature were `1.0`; the readout's basis change and
+  measurements are not counted. An amplitude encoder emits `2^(n+1) − 3`
+  gates, so it takes at most 20 qubits. All of these are a `ValueError`
+  that leaves the object as it was, never PyO3's `OverflowError` or a
+  panic. A count of
   another type (a `bool`, a `str`, a `float`) is a `TypeError`; an object
   with `__index__` (a NumPy integer) is the integer it returns, which an
   out-of-range message shows.

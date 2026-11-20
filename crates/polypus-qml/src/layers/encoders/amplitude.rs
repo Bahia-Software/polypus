@@ -40,16 +40,27 @@ impl LayerOps for AmplitudeEncoder {
             return Err(ValidationError::AmplitudeEncoderNotFirst);
         }
         let k = ctx.active.len();
-        let max = 1usize << k;
-        if ctx.num_features > max {
-            return Err(ValidationError::TooManyFeatures {
-                max,
-                got: ctx.num_features,
-            });
+        // 2^k amplitudes; with 2^k past a `usize`, every feature count fits.
+        if let Some(max) = power_of_two(k) {
+            if ctx.num_features > max {
+                return Err(ValidationError::TooManyFeatures {
+                    max,
+                    got: ctx.num_features,
+                });
+            }
         }
-        // Like every encoder, reserves no θ: the range stays empty.
+        // One `Ry` at level 0, then 2^l `Ry` and 2^l `Cx` at each level
+        // `l = 1..k`: 2^(k+1) − 3 gates, whatever the sample. Counted before
+        // anything of size 2^k exists, so `emit_traced` only ever sees a `k`
+        // the budget admits. Like every encoder, reserves no θ: the range
+        // stays empty.
+        let gates = match k {
+            0 => Some(0),
+            _ => power_of_two(k + 1).map(|levels| levels - 3),
+        };
+        let params = ctx.reserve(gates, Some(0))?;
         Ok(LayerAllocation {
-            params: ctx.param_cursor..ctx.param_cursor,
+            params,
             active: ctx.active.clone(),
         })
     }
@@ -69,6 +80,8 @@ impl LayerOps for AmplitudeEncoder {
             return Err(QmlError::ZeroNormSample);
         }
         let k = alloc.active.len();
+        // `plan` admitted this `k` against the gate budget (20 at most), so
+        // neither this shift nor those of `level_angles` can overflow.
         let dim = 1usize << k;
         // The normalized amplitudes, zero-padded to 2^k. Index `j` addresses
         // basis state |j⟩ under the C-3 little-endian convention (`plan`
@@ -87,6 +100,13 @@ impl LayerOps for AmplitudeEncoder {
         }
         Ok(())
     }
+}
+
+/// `2^exponent`, or `None` if it does not fit in a `usize`.
+fn power_of_two(exponent: usize) -> Option<usize> {
+    u32::try_from(exponent)
+        .ok()
+        .and_then(|exponent| 1usize.checked_shl(exponent))
 }
 
 /// The `2^l` conditional `Ry` angles for level `l` of the preparation tree.
@@ -200,6 +220,7 @@ mod tests {
             num_features,
             param_cursor: 0,
             layers_planned: 0,
+            gate_count: 0,
         }
     }
 
@@ -337,6 +358,45 @@ mod tests {
         let out = walsh_hadamard_transform(&[3.0, 1.0]);
         assert!((out[0] - 2.0).abs() < 1e-12); // (3 + 1)/2
         assert!((out[1] - 1.0).abs() < 1e-12); // (3 - 1)/2
+    }
+
+    #[test]
+    fn plan_bounds_the_exponential_gate_count_without_panicking() {
+        use crate::error::SizeLimit;
+        // 20 qubits: 2^21 − 3 gates, within the budget.
+        let mut c = ctx(20, 0);
+        AmplitudeEncoder.plan(&mut c).unwrap();
+        assert_eq!(c.gate_count, 2_097_149);
+        // 21 qubits: 2^22 − 3, past it.
+        assert_eq!(
+            AmplitudeEncoder.plan(&mut ctx(21, 3)).unwrap_err(),
+            ValidationError::ModelTooLarge {
+                layer: 0,
+                reason: SizeLimit::Budget {
+                    gates: 4_194_301,
+                    max_gates: 4_000_000,
+                },
+            }
+        );
+        // From 63 qubits on, 2^(k+1) does not fit in a usize; from 64 on,
+        // neither does 2^k. Neither shift panics.
+        for k in [63, 64, 65, 200] {
+            let mut c = ctx(k, 0);
+            assert_eq!(
+                AmplitudeEncoder.plan(&mut c).unwrap_err(),
+                ValidationError::ModelTooLarge {
+                    layer: 0,
+                    reason: SizeLimit::Overflow,
+                },
+                "k = {k}"
+            );
+            assert_eq!(c.gate_count, 0);
+        }
+        // The feature check still runs where 2^k fits.
+        assert_eq!(
+            AmplitudeEncoder.plan(&mut ctx(2, 5)).unwrap_err(),
+            ValidationError::TooManyFeatures { max: 4, got: 5 }
+        );
     }
 
     #[test]

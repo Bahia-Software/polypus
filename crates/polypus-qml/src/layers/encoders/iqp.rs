@@ -5,7 +5,7 @@
 use polypus_circuit::{Fixed, GateInstruction, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
-use crate::layers::{entanglement_pairs, Entanglement};
+use crate::layers::{entanglement_pair_count, entanglement_pairs, Entanglement};
 use crate::model::{InputTrace, LayerAllocation, LayerContext, LayerOps};
 
 /// IQP feature encoding: a layer of Hadamards, one `Rz(x_i)` per feature, and
@@ -74,9 +74,15 @@ impl LayerOps for IqpEncoder {
                 active: ctx.active.len(),
             });
         }
-        // Encoders reserve no θ: the range stays empty and the cursor unmoved.
+        // An `H` and an `Rz` per feature, and an `Rzz` per pair of the encoded
+        // qubits. Encoders reserve no θ: the range stays empty and the cursor
+        // unmoved.
+        let f = ctx.num_features;
+        let gates = entanglement_pair_count(f, self.entanglement)
+            .and_then(|pairs| f.checked_mul(2)?.checked_add(pairs));
+        let params = ctx.reserve(gates, Some(0))?;
         Ok(LayerAllocation {
-            params: ctx.param_cursor..ctx.param_cursor,
+            params,
             active: ctx.active.clone(),
         })
     }
@@ -130,6 +136,7 @@ mod tests {
             num_features,
             param_cursor: 0,
             layers_planned: 0,
+            gate_count: 0,
         }
     }
 

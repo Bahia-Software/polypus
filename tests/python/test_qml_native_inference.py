@@ -224,7 +224,33 @@ class TestSaveLoad:
         ]
         entry["reps"] = 2**64 - 1
         path.write_text(json.dumps(saved))
-        with pytest.raises(ValueError, match="layer 1 needs more trainable parameters"):
+        with pytest.raises(
+            ValueError, match="layer 1 needs more gates than fit in a usize"
+        ):
+            load(path)
+        # 2**40 blocks fit in a usize, not in the gate budget.
+        entry["reps"] = 2**40
+        path.write_text(json.dumps(saved))
+        with pytest.raises(
+            ValueError, match="layer 1 takes the model to .* past the limit of 4000000"
+        ):
+            load(path)
+
+    def test_an_edited_qubit_count_past_the_limit_is_a_value_error(
+        self, trained, tmp_path
+    ):
+        import json
+
+        from polypus.qml import load
+
+        path = tmp_path / "model.json"
+        trained.save(path)
+        saved = json.loads(path.read_text())
+        saved["spec"]["num_qubits"] = 10**6 + 1
+        path.write_text(json.dumps(saved))
+        with pytest.raises(
+            ValueError, match="model has 1000001 qubits, past the limit of 1000000"
+        ):
             load(path)
 
     @pytest.mark.parametrize(
@@ -332,12 +358,15 @@ class TestSaveLoadStronglyEntangling:
         path = tmp_path / "model.json"
         _strongly_entangling_trained().save(path)
         saved = json.loads(path.read_text())
-        # 3 × 2 qubits × 2**62 parameters do not fit in a usize. The default
-        # ranges, so the count is the first thing that fails.
+        # 3 × 2 qubits × 2**62 parameters (and more gates) do not fit in a
+        # usize. The default ranges, so the count is the first thing that
+        # fails.
         entry = _strongly_entangling_entry(saved)
         entry["reps"], entry["ranges"] = 2**62, None
         path.write_text(json.dumps(saved))
-        with pytest.raises(ValueError, match="layer 1 needs more trainable parameters"):
+        with pytest.raises(
+            ValueError, match="layer 1 needs more gates than fit in a usize"
+        ):
             load(path)
 
 
@@ -397,10 +426,12 @@ class TestSaveLoadSimplifiedTwoDesign:
         path = tmp_path / "model.json"
         _simplified_two_design_trained().save(path)
         saved = json.loads(path.read_text())
-        # 2 × 3 pairs × 2**62 blocks do not fit in a usize.
+        # 2 × 3 pairs × 2**62 blocks (and more gates) do not fit in a usize.
         _simplified_two_design_entry(saved)["reps"] = 2**62
         path.write_text(json.dumps(saved))
-        with pytest.raises(ValueError, match="layer 1 needs more trainable parameters"):
+        with pytest.raises(
+            ValueError, match="layer 1 needs more gates than fit in a usize"
+        ):
             load(path)
 
     def test_a_single_qubit_loads_any_reps(self, tmp_path):

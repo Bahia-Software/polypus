@@ -130,7 +130,7 @@ mod rng;
 
 pub use adjoint::{AdjointRun, DiagonalObservable};
 pub use dataset::Dataset;
-pub use error::{QmlError, ValidationError};
+pub use error::{QmlError, SizeLimit, ValidationError};
 pub use jacobian::{ExpectationJacobian, Jacobian, JacobianBlock, JacobianWrt, Vjp};
 pub use kernel::{FeatureMap, FeatureStates, FidelityKernel};
 pub use layers::{
@@ -139,7 +139,7 @@ pub use layers::{
     RotationAxis, SimplifiedTwoDesignAnsatz, StronglyEntanglingAnsatz,
 };
 pub use loss::Loss;
-pub use model::{CompiledModel, QuantumModel, TrainedModel};
+pub use model::{CompiledModel, QuantumModel, TrainedModel, MAX_MODEL_GATES, MAX_MODEL_QUBITS};
 pub use observables::{Observable, Pauli, PauliString};
 pub use problem::{minibatch_indices, QmlProblem};
 pub use readout::{Decision, Readout};
