@@ -6,7 +6,10 @@ calls a recipe of the root justfile, and the recipes `ci-all` reaches cover
 every one CI calls. These tests fail when a step grows its own command (also
 inside an "Install ..." step, or through an action's arguments or an
 environment variable), names a recipe the justfile lacks, or calls one
-`just ci-all` would not run.
+`just ci-all` would not run. They also fail when something outside the
+justfile changes what a recipe runs: a step that writes $GITHUB_ENV or
+$GITHUB_PATH (other than the three that switch toolchains), a recipe that
+does, a shell other than the default, or an action nobody has reviewed.
 """
 
 import re
@@ -20,11 +23,36 @@ CI = REPO / ".github" / "workflows" / "ci.yml"
 JUSTFILE = REPO / "justfile"
 PRE_COMMIT = REPO / ".pre-commit-config.yaml"
 
-# Steps that run a command of their own although it checks nothing, with why.
-# Steps that only install something are named "Install ..." and may run only
-# the installer commands below.
+# Steps that run a command of their own although it checks nothing: the one
+# command each may run, and why. Steps that only install something are named
+# "Install ..." and may run only the installer commands below.
 EXEMPT_STEPS = {
-    "reference-data/ is not checked out": "asserts the job's sparse checkout, which only CI has",
+    "reference-data/ is not checked out": (
+        "test ! -e reference-data",
+        "asserts the job's sparse checkout, which only CI has",
+    ),
+}
+
+# A line that writes $GITHUB_ENV or $GITHUB_PATH changes every step after it.
+# Only these steps may run one, and only TOOLCHAIN_WRITE: they point the job at
+# the toolchain the justfile names (`just --evaluate msrv` or `nightly`).
+ENV_FILES = re.compile(r"GITHUB_(ENV|PATH)\b")
+TOOLCHAIN_WRITE = 'echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"'
+ENV_WRITERS = {
+    ("msrv", "Install Rust (the justfile's MSRV)"),
+    ("fuzz", "Install Rust (the justfile's nightly)"),
+    ("miri", "Install Rust (the justfile's nightly, with Miri)"),
+}
+
+# The actions ci.yml may use. An action can set variables or extend PATH for
+# the steps after it (setup-python and install-action extend PATH), which the
+# tests below cannot see; adding one to this list is that review.
+KNOWN_ACTIONS = {
+    "actions/checkout",
+    "actions/setup-python",
+    "astral-sh/ruff-action",
+    "Swatinem/rust-cache",
+    "taiki-e/install-action",
 }
 
 # Recipes CI calls that `ci-all` does not reach, with why.
@@ -217,9 +245,119 @@ def test_no_environment_variable_changes_a_command():
     )
 
 
-def test_every_exempt_step_still_exists():
-    names = {step.get("name") for _, step in run_steps()}
-    assert set(EXEMPT_STEPS) <= names, set(EXEMPT_STEPS) - names
+def env_writes(workflow):
+    """Each (job, step name, line) of `workflow` that names $GITHUB_ENV or $GITHUB_PATH."""
+    return [
+        (job_id, step.get("name", ""), line)
+        for job_id, job in workflow["jobs"].items()
+        for step in job.get("steps", [])
+        for line in command_lines(step.get("run", ""))
+        if ENV_FILES.search(line)
+    ]
+
+
+def unexpected_env_writes(workflow):
+    return [
+        write
+        for write in env_writes(workflow)
+        if write[:2] not in ENV_WRITERS or write[2] != TOOLCHAIN_WRITE
+    ]
+
+
+def test_env_writes_are_found_in_any_spelling():
+    def step(run, job="test", name="Install foo"):
+        return {"jobs": {job: {"steps": [{"name": name, "run": run}]}}}
+
+    for run in (
+        'echo "RUSTFLAGS=-Awarnings" >> "$GITHUB_ENV"',
+        "echo RUSTFLAGS=-Awarnings >>$GITHUB_ENV",
+        'echo "RUSTFLAGS=-Awarnings" | tee -a "${GITHUB_ENV}"',
+        'echo "$HOME/bin" >> "$GITHUB_PATH"',
+        "env_file=$GITHUB_ENV",
+        "just fmt\necho X=1 >> $GITHUB_ENV",
+    ):
+        assert unexpected_env_writes(step(run)), run
+    # The allowed line is allowed only in its own steps, and only by itself.
+    assert not unexpected_env_writes(step(TOOLCHAIN_WRITE, *sorted(ENV_WRITERS)[0]))
+    assert unexpected_env_writes(step(TOOLCHAIN_WRITE))
+    assert unexpected_env_writes(step(TOOLCHAIN_WRITE, "msrv", "Install just"))
+    assert unexpected_env_writes(
+        step('echo "PATH=/x:$PATH" >> "$GITHUB_PATH"', *sorted(ENV_WRITERS)[0])
+    )
+    # A comment is not a command.
+    assert not unexpected_env_writes(step("# >> $GITHUB_ENV is not allowed here"))
+
+
+def test_only_the_toolchain_steps_write_github_env_or_path():
+    workflow = yaml.safe_load(CI.read_text())
+    unexpected = unexpected_env_writes(workflow)
+    assert not unexpected, (
+        "these ci.yml lines change the environment of every later step, so a "
+        "recipe would run differently in CI than locally; set the variable in "
+        "the recipe instead:\n" + "\n".join(map(str, unexpected))
+    )
+    stale = ENV_WRITERS - {write[:2] for write in env_writes(workflow)}
+    assert not stale, f"ENV_WRITERS names steps that write nothing: {sorted(stale)}"
+
+
+def test_no_recipe_writes_github_env_or_path():
+    lines = [
+        line.strip()
+        for line in JUSTFILE.read_text().splitlines()
+        if ENV_FILES.search(line) and not line.strip().startswith("#")
+    ]
+    assert not lines, (
+        "a recipe that writes $GITHUB_ENV or $GITHUB_PATH changes the CI steps "
+        f"after it, which a local run never sees: {lines}"
+    )
+
+
+def test_no_step_changes_the_shell_of_its_commands():
+    workflow = yaml.safe_load(CI.read_text())
+    found = ["workflow: defaults"] if "defaults" in workflow else []
+    for job_id, job in workflow["jobs"].items():
+        if "defaults" in job:
+            found.append(f"{job_id}: defaults")
+        found += [
+            f"{job_id}: {step.get('name', step.get('run', '').strip())}: shell"
+            for step in job.get("steps", [])
+            if "shell" in step
+        ]
+    assert not found, (
+        "ci.yml runs these commands in a shell of its own, which a local run "
+        f"does not; set the shell in the recipe instead: {found}"
+    )
+
+
+def test_every_action_is_known():
+    used = {step["uses"].split("@")[0] for _, step in steps() if "uses" in step}
+    unknown = used - KNOWN_ACTIONS
+    assert not unknown, (
+        "ci.yml uses actions nobody has checked for variables or PATH entries "
+        "they leave to later steps; check them and add them to KNOWN_ACTIONS: "
+        f"{sorted(unknown)}"
+    )
+    stale = KNOWN_ACTIONS - used
+    assert not stale, (
+        f"KNOWN_ACTIONS names actions ci.yml no longer uses: {sorted(stale)}"
+    )
+
+
+def test_every_exempt_step_runs_only_its_command():
+    # Every step of that name, not just one: the exemption goes by name.
+    seen = set()
+    for job_id, step in run_steps():
+        name = step.get("name")
+        if name in EXEMPT_STEPS:
+            seen.add(name)
+            command = EXEMPT_STEPS[name][0]
+            lines = command_lines(step["run"])
+            assert lines == [command], (
+                f"{job_id}: the exempt step {name!r} runs {lines}, not just "
+                f"{command!r}; anything else goes in a recipe"
+            )
+    missing = set(EXEMPT_STEPS) - seen
+    assert not missing, f"no ci.yml step is named {sorted(missing)} any more"
 
 
 def test_every_recipe_ci_calls_exists(recipes, ci_calls):

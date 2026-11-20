@@ -77,7 +77,9 @@ Every check of `.github/workflows/ci.yml` is a recipe of the root
 [`justfile`](https://github.com/Bahia-Software/polypus/blob/main/justfile), and
 `ci.yml` calls those recipes instead of repeating their commands, so the two
 cannot drift apart (a test, `tests/docs/test_ci_recipes.py`, fails when a
-`ci.yml` step runs a command of its own). The checks of `hygiene.yml` and
+`ci.yml` step runs a command of its own, or changes what a recipe runs through
+an environment variable, `$GITHUB_ENV`, `$GITHUB_PATH`, a shell setting or an
+unreviewed action). The checks of `hygiene.yml` and
 `docs.yml` have recipes too (`just hygiene`, `just docs-site`), although those
 workflows run their own commands. Install
 [just](https://just.systems) once; CI pins the version in `ci.yml`
