@@ -243,7 +243,7 @@ The [tutorials](https://github.com/Bahia-Software/polypus-tutorials), in English
 | [Memory budget](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/memory.md) | `POLYPUS_MEM_BUDGET`, cgroup detection, `InsufficientMemoryError` |
 | [Performance](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/performance.md) | Batched simulation, GIL-free binding, gate-parallel auto-calibration |
 
-The [documentation site](https://bahia-software.github.io/polypus/) hosts the [user and developer guides](https://bahia-software.github.io/polypus/) and the changelog; the Rust API of every crate is under [`rust/`](https://bahia-software.github.io/polypus/rust/polypus/).
+The [documentation site](https://bahia-software.github.io/polypus/) hosts the [user and developer guides](https://bahia-software.github.io/polypus/) and the changelog; the Rust API of each release is on [docs.rs](https://docs.rs/polypus), and that of `main`, not yet released, under the site's [`rust/`](https://bahia-software.github.io/polypus/rust/polypus/).
 
 ## Architecture
 

@@ -51,10 +51,9 @@ pub enum EvaluationError {
     /// whose class comes from Qiskit is wrapped; a `ValueError`/`TypeError`
     /// raised there keeps its class.
     Qiskit(DisplaySafePyErr),
-    /// A Rust-originated infrastructure failure on the QML evaluation path
-    /// (Tokio runtime construction, or a worker task panic surfaced as a
-    /// `JoinError`). Never a Python exception, so unlike `Python` it must not be
-    /// re-raised verbatim.
+    /// A Rust-originated infrastructure failure on the QML evaluation path (a
+    /// planner the backend cannot run, or a failed minibatch selection). Never a
+    /// Python exception, so unlike `Python` it must not be re-raised verbatim.
     Runtime(String),
     /// Converting data across the Rust↔Python boundary on the evaluation path
     /// failed (e.g. `expectation_values`'s return value isn't `list[float]`).
