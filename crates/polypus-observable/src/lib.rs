@@ -103,8 +103,7 @@ pub enum ReducerLocality {
 /// value per candidate, in the same order.
 ///
 /// Implementations are `Send + Sync` so a single `Arc<dyn CostObservable>` can be
-/// shared across an oracle's worker threads (e.g. the QML oracle's
-/// `spawn_blocking` tasks) and evaluated concurrently.
+/// held by an oracle that is shared across threads, and evaluated concurrently.
 pub trait CostObservable: Send + Sync {
     /// Evaluate every candidate's counts. Returns one value per candidate, or the
     /// first error encountered.

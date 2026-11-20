@@ -371,10 +371,12 @@ class Local(Infraestructure):
             **sim_options,
         )
         if seed is not None:
-            # Rust resolves `seed` from the full u64 range, but Aer's
-            # `seed_simulator` takes a signed 64-bit int (rejects values
-            # >= 2**63 with a confusing low-level TypeError); mask down to
-            # that range rather than truncating precision unevenly.
+            # Aer's `seed_simulator` takes a signed 64-bit int (it rejects
+            # values >= 2**63 with a confusing low-level TypeError). The run's
+            # base seed is already below 2**63: Rust draws it there and
+            # rejects a larger explicit one on Aer (contract C-7, #393). The
+            # mask is for the seeds Rust derives for later calls of a run
+            # (`stream_seed`), which span the full u64 range.
             result = sim.run(
                 qcs, shots=shots, seed_simulator=seed & 0x7FFFFFFFFFFFFFFF
             ).result()

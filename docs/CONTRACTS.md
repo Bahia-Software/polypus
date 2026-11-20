@@ -26,7 +26,7 @@ Rules of the road:
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` (+ `crates/polypus-optimizers/tests/initial_point.rs` and `tests/python/test_initial_point.py` for `initial_point`, `tests/python/test_final_shots.py` for `final_shots`, and `tests/python/test_qml_native_initial_point_final_shots.py` for both through `qml.Model.fit`; `crates/polypus-optimizers/tests/observer.rs` and `tests/python/test_callback.py` for `callback`) | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | `release.yml` gate (tag, internal pins, CHANGELOG.md, CITATION.cff ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff, pins) + `tests/python/test_version_coherence.py` (`polypus.__version__` ↔ Cargo.toml ↔ installed distribution) | ✅ present | tag/Cargo diverged at 0.6.0 |
-| C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249) or the run `id`'s UUID (#264); both fixed: `polypus.BackendError` |
+| C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`, `test_seed_range.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249) or the run `id`'s UUID (#264); both fixed: `polypus.BackendError`; on Aer about half of the drawn seeds, and any explicit one, of `2**63` or more reached Aer masked to 63 bits, so the reported seed was not the one Aer used (#393, fixed: drawn below `2**63`, an explicit one raises `polypus.ConfigurationError`) |
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 | C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
@@ -1795,6 +1795,26 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     calls produce **independent** noise (never the run-`id`-derived
     repetition that motivated this contract). The run `id` is decoupled from
     the RNG — it is only a logging/temp-file/SLURM label.
+  - **Seed range** (#393). Aer's `seed_simulator` is a signed 64-bit integer,
+    so the backends that run on Aer — `backend="aer"` and CUNQA's simulated
+    QPUs — take a seed from `0` to `2**63 - 1`; the native backend and a
+    registered backend (the subprocess bridge, a third party's) take any
+    64-bit seed. A seed drawn from OS entropy is always below `2**63`, on
+    every backend, so the seed a run reports is the one Aer receives on the
+    run's first call (and CUNQA on QPU 0 of it): a run of one call, such as a
+    `run_quantum_circuit` with `n_qpus=1`, replays outside Polypus with
+    `AerSimulator(seed_simulator=seed)`; later calls get derived seeds (below).
+    An explicit seed of `2**63` or more on an Aer path raises
+    `polypus.ConfigurationError` (a `ValueError`) before any backend is built
+    (`BackendConfig::check_seed`, called by every entry point this contract
+    lists); until #393 it reached Aer masked to 63 bits, so two seeds that
+    differed only in bit 63 gave the same counts. The 63-bit mask in
+    `local.py` and `cunqa.py` still applies to the seeds Polypus derives: the
+    per-call seeds below and CUNQA's per-QPU `seed + k`. **Enforcing tests:**
+    `tests/python/test_seed_range.py` (every entry point),
+    `test_a_seed_of_two_to_the_63_or_more_is_rejected_before_any_qpu` in
+    `tests/python/test_cunqa_run_flow.py`, and the `check_seed`/`random_seed`
+    tests in `crates/polypus-infrastructure/src/execution_config.rs`.
   - **Per-circuit seeds (native backend).** A native backend seeded with `s`
     numbers the circuits it runs `0, 1, 2, ...` (a global counter across the
     batches it executes, reserved as one contiguous block per batch) and seeds
@@ -1819,7 +1839,8 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     `local.rs`, `polypus_python`'s `cunqa.py` mirrors `local.py`), with a
     per-QPU offset so distributed shots aren't identical copies: the circuit
     sent to QPU `k` runs with the call's seed (below) `+ k`, masked to 63
-    bits. With shots split
+    bits (so `2**63 - 1 + 1` wraps to `0`; the base seed itself is below
+    `2**63`, see the seed range above). With shots split
     across the QPUs, replica `i` runs on QPU `i`, so every replica gets its own
     QPU and seed even when the split is uneven (`shots` not a multiple of
     `n_qpus`) and is sent as one `run_qcs` call per batch size, each carrying
@@ -1833,8 +1854,11 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     a seed would give false confidence in reproducibility. `seed=None`
     behaves exactly as before.
 - **`train(..., seed=None)` / `qml.train(..., seed=None)`** seed the optimizer's
-  RNG and are **always accepted**, for every backend, because the seed's primary
-  job (making population init / mutation deterministic, inside the pure-Rust
+  RNG and are **always accepted**, for every backend, within that backend's
+  seed range (see **Seed range** above: on Aer and CUNQA a seed of `2**63` or
+  more, from the kwarg or from the optimizer's `seed` field, is a
+  `polypus.ConfigurationError`), because the seed's primary job (making
+  population init / mutation deterministic, inside the pure-Rust
   `polypus-optimizers`) is independent of which backend evaluates the oracle.
   Precedence: the explicit `seed` kwarg wins; otherwise the `seed` field pinned
   on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA`/`Rotosolve` instance; otherwise a fresh OS-entropy
@@ -1882,19 +1906,23 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   exactly. With `exact=True` nothing is sampled, and the seed drives only the
   optimizer and the minibatches. An explicit `seed` is an integer from 0 to
   2⁶⁴ − 1: one outside is a `polypus.ConfigurationError` naming it, a `bool` a
-  `TypeError` (C-11, **Execution integers**).
+  `TypeError` (C-11, **Execution integers**). On Aer and CUNQA the effective
+  seed must also be below `2**63` (**Seed range** above), checked once the
+  backend's configuration is built.
 - **`TrainedModel.predict(..., seed=None)` / `TrainedModel.run(..., seed=None)`**
   seed shot sampling like `run_quantum_circuit`: an explicit seed reproduces the
   counts, `None` draws one from OS entropy, and an explicit seed on `qmio` is a
   `ValueError`. With `exact=True` nothing is sampled. An explicit `seed` is
   an integer from 0 to 2⁶⁴ − 1, as for `Model.fit`, checked before the `qmio`
-  refusal (C-11).
+  refusal (C-11), and below `2**63` on Aer and CUNQA (**Seed range** above),
+  checked after it.
 - **`qml.expval(..., seed=None)` / `qml.jacobian(..., seed=None)` /
   `qml.vjp(..., seed=None)`** follow
   `TrainedModel.run`: an explicit seed reproduces the result bit for bit, `None`
   draws one from OS entropy, an explicit seed on `qmio` is a `ValueError`, and
   with `exact=True` nothing is sampled. An explicit `seed` is an integer from
-  0 to 2⁶⁴ − 1, as for `Model.fit`, checked before the `qmio` refusal (C-11).
+  0 to 2⁶⁴ − 1, as for `Model.fit`, checked before the `qmio` refusal (C-11),
+  and below `2**63` on Aer and CUNQA (**Seed range** above), checked after it.
   They return bare arrays with no manifest,
   so the effective seed is only logged (with the run `id`, at `info`): to replay
   a call, pass a `seed`. A call runs its rows in blocks over one backend (C-11);
@@ -1905,8 +1933,12 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   a `qml.train` does (below).
 - **`polypus.torch.QuantumLayer(..., seed=None)`** never passes its `seed` on
   as such: forward pass `n` of the layer calls `qml.expval` with
-  `SeedSequence([seed, n, 0]).generate_state(1, uint64)[0]`, and the backward
-  pass of that forward pass calls `qml.vjp` with `[seed, n, 1]`, so every
+  `SeedSequence([seed, n, 0]).generate_state(1, uint64)[0] & (2**63 - 1)`, and
+  the backward pass of that forward pass calls `qml.vjp` with `[seed, n, 1]`
+  masked the same way — below `2**63`, the seed range of Aer and CUNQA, which
+  until #393 masked it the same way at the seam, so a seeded layer on Aer gives
+  the values it gave before; on the native backend the derived seeds whose bit
+  63 was set changed — so every
   backend call of a training gets its own stream, a layer rebuilt with the same
   `seed` replays the values and gradients step by step, and seeds `s` and
   `s+1` share no stream. The counter is the layer's, outside the `state_dict`.
@@ -1961,7 +1993,8 @@ share shot noise, and the same seed replays the whole sequence:
 Until #411, Aer, CUNQA and the bridge received the base seed on every call,
 so batch slot `i` was sampled with the same random numbers in every
 generation, unlike the native backend; seeded results on those backends
-changed in 0.8.0. **Enforcing tests:** `tests/python/test_seed_streams.py`
+changed in 0.8.0. A derived per-call seed is a full 64-bit value; Aer and
+CUNQA receive it masked to 63 bits (`local.py`, `cunqa.py`). **Enforcing tests:** `tests/python/test_seed_streams.py`
 (the seeds Aer and the fake CUNQA receive over a `train`, read off the
 `run_qcs` seam, and their replay), `consecutive_calls_get_their_own_streams`
 in `crates/polypus-infrastructure/src/native.rs`,
@@ -2767,7 +2800,9 @@ holds, is the same `ValueError` at the call.
   `cores_per_qpu`, right before the CUNQA allocation (on `cunqa`, their
   `>= 1` and `walltime`); `seed` right before a `seed` on `qmio` is refused,
   and in `fit`, which has no such refusal, after `id` and `loss`, before the
-  optimizer seed is resolved (C-7).
+  optimizer seed is resolved (C-7). The narrower range of Aer and CUNQA
+  (below `2**63`, C-7 **Seed range**) is checked later, once the backend's
+  configuration is built.
 
 `Dataset.train_test_split(seed=…)` follows the same rule as a builder: an
 out-of-range `seed` is a plain `ValueError` with the same message, a `bool` a
@@ -2847,7 +2882,7 @@ execution integers, the rows against the model, `exact`, a `seed` on `qmio`):
 before a backend exists, as `polypus.ConfigurationError`, in this order:
 `shots` and `n_qpus`, `nodes`, `cores_per_qpu` and the CUNQA allocation,
 `exact`, the rows against the model, the range of `seed`, a `seed` on
-`qmio`.
+`qmio`, a `seed` of `2**63` or more on Aer or CUNQA (C-7).
 
 **Inspecting the circuit.** `model.circuit(x, params=None)` and
 `TrainedModel.circuit(x)` return the `polypus.Circuit` the model runs for the
@@ -2956,7 +2991,8 @@ Python, for a training loop of the caller's own:
   `vjp`, the `cotangent` (its rows not ragged, real, then its shape, the
   error naming the expected and the received one; then each value read as a
   number, a `TypeError` as for `x`); the model and rows against `wrt` ((g)'s
-  errors); the range of `seed`, then a `seed` on `qmio`. The `TypeError`
+  errors); the range of `seed`, then a `seed` on `qmio`, then a `seed` of
+  `2**63` or more on Aer or CUNQA (C-7). The `TypeError`
   for `model` comes first, and before it, as the arguments are read, that
   of an execution integer that is not an integer (a `bool` included). Only
   NumPy's `ValueError` becomes the cotangent's `ConfigurationError`; any other
@@ -3023,8 +3059,8 @@ seed=None, exact=False)` exposes (h) to Python:
   feature count against the encoder and every sample the encoders reject (a
   zero sample for amplitude encoding, a non-binary one for basis encoding);
   the same for `x2`, whose rows must be as wide as `x1`'s; a matrix too large;
-  the range of `seed`, then a `seed` on `qmio`. The messages name `x1` or
-  `x2`.
+  the range of `seed`, then a `seed` on `qmio`, then a `seed` of `2**63` or
+  more on Aer or CUNQA (C-7). The messages name `x1` or `x2`.
 
 **The PyTorch layer (`polypus.torch`).** `polypus.torch.QuantumLayer(model, *,
 initial_params=None, <qml.expval's execution arguments>)` is a
@@ -3069,8 +3105,9 @@ above.
   in its tensor's dtype and device.
 - **Seeds (C-7).** With `seed=s`, forward pass `n` (counted per layer from 0,
   not in the `state_dict`, so not thread-safe) calls `expval` with
-  `SeedSequence([s, n, 0]).generate_state(1, uint64)[0]` and its backward pass
-  calls `vjp` with `[s, n, 1]` (a forward pass counts even when it raises,
+  `SeedSequence([s, n, 0]).generate_state(1, uint64)[0] & (2**63 - 1)` (below
+  the Aer seed range's limit, #393) and its backward pass calls `vjp` with
+  `[s, n, 1]` masked the same way (a forward pass counts even when it raises,
   so twin layers stay in step): two layers with the same `seed` replay the
   same values and gradients step by step, every call has its own stream, and
   neighbouring seeds share none. Without `seed`, `None` reaches every call,
