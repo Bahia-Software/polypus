@@ -8,29 +8,17 @@
 //! oracle's values, and every postcondition of contract C-5 against what the
 //! oracle saw. No Python is involved.
 
+use polypus_circuit::rng::SplitMix64;
 use polypus_optimizers::{
     AlgorithmExternal, AlgorithmExternalArgs, AskTell, AskTellError, EvaluationOracle,
     OptimizationOutcome, Optimizer, OptimizerError,
 };
 use std::sync::{Arc, Mutex};
 
-/// SplitMix64: a small deterministic generator, so the tests depend on no
-/// RNG crate's stream.
-struct SplitMix(u64);
-
-impl SplitMix {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    /// Uniform in `[lo, hi)`.
-    fn uniform(&mut self, lo: f64, hi: f64) -> f64 {
-        lo + (hi - lo) * ((self.next() >> 11) as f64 / (1u64 << 53) as f64)
-    }
+/// Uniform in `[lo, hi)`, from the workspace's SplitMix64, so the tests depend
+/// on no RNG crate's stream.
+fn uniform(rng: &mut SplitMix64, lo: f64, hi: f64) -> f64 {
+    lo + (hi - lo) * rng.next_f64()
 }
 
 /// What the random search was asked for and told.
@@ -58,7 +46,7 @@ enum End {
 /// `edit` may change batch `k` before it is proposed; `fail_ask` and
 /// `fail_tell` make the `k`-th call of each fail.
 struct RandomSearch {
-    rng: SplitMix,
+    rng: SplitMix64,
     dims: usize,
     sizes: Vec<usize>,
     batches: Option<usize>,
@@ -72,7 +60,7 @@ struct RandomSearch {
 impl RandomSearch {
     fn new(seed: u64, dims: usize, sizes: &[usize]) -> Self {
         RandomSearch {
-            rng: SplitMix(seed),
+            rng: SplitMix64::new(seed),
             dims,
             sizes: sizes.to_vec(),
             batches: None,
@@ -109,7 +97,7 @@ impl AskTell for RandomSearch {
         let mut batch: Vec<Vec<f64>> = (0..size)
             .map(|_| {
                 (0..self.dims)
-                    .map(|_| self.rng.uniform(-2.0, 2.0))
+                    .map(|_| uniform(&mut self.rng, -2.0, 2.0))
                     .collect()
             })
             .collect();
