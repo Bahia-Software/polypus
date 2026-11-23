@@ -2,9 +2,9 @@
 //! shot sampling. These live in a separate `impl` block to keep
 //! [`statevector`](crate::statevector) focused on evolution.
 
-use crate::rng::SplitMix64;
 use crate::statevector::Statevector;
 use crate::SimError;
+use polypus_circuit::rng::SplitMix64;
 use std::collections::HashMap;
 
 impl Statevector {

@@ -41,7 +41,8 @@ use crate::loss::{categorical_cross_entropy, categorical_cross_entropy_gradient,
 use crate::model::{CompiledModel, InputGate};
 use crate::observables::BitstringWeight;
 use crate::readout::Decision;
-use crate::rng::{shuffle, SplitMix64};
+use crate::rng::shuffle;
+use polypus_circuit::rng::SplitMix64;
 
 /// A trainable QML problem: a compiled model, a training set and a loss, with
 /// one circuit template precompiled per training sample (features fixed, `θ`
@@ -887,10 +888,9 @@ pub fn minibatch_indices(
     call_index: u64,
     batch_size: usize,
 ) -> Vec<usize> {
-    // Mixing constant: SplitMix64's own golden-ratio increment
-    // (0x9E3779B97F4A7C15), reused here to decorrelate `call_index` values
-    // without an O(call_index) fast-forward.
-    let mixed = seed ^ call_index.wrapping_mul(0x9E3779B97F4A7C15);
+    // Mixing constant: SplitMix64's own golden-ratio increment, reused here to
+    // decorrelate `call_index` values without an O(call_index) fast-forward.
+    let mixed = seed ^ call_index.wrapping_mul(SplitMix64::GAMMA);
     let mut rng = SplitMix64::new(mixed);
     let mut indices: Vec<usize> = (0..num_samples).collect();
     shuffle(&mut indices, &mut rng);

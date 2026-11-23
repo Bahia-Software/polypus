@@ -367,10 +367,13 @@ boundary stays out-of-process and explicit; see
   guarantees: there they need `/proc/meminfo`, which a Linux test environment
   must provide. Several processes sharing one cgroup (MPI ranks of a job step)
   each see the whole limit and must set `POLYPUS_MEM_BUDGET` per process.
-- **Reproducibility:** the RNG is seedable (`rng.rs` in `polypus-sim` and in
-  `polypus-optimizers`). Results must be deterministic given a seed. Don't
-  introduce nondeterminism: iteration order over a `HashMap` affecting
-  results, unseeded RNG, parallelism that changes reduction order, etc.
+- **Reproducibility:** the in-repo generators are seedable: the workspace's
+  SplitMix64 (`rng.rs` in `polypus-circuit`, for shots, seeds, splits and
+  minibatches) and the optimizers' `OptRng` (`rng.rs` in
+  `polypus-optimizers`); `polypus-physics` draws from the `rand::Rng` its
+  caller passes. Results must be deterministic given a seed. Don't introduce
+  nondeterminism: iteration order over a `HashMap` affecting results,
+  unseeded RNG, parallelism that changes reduction order, etc.
   A floating-point reduction over a `HashMap`/`HashSet` therefore accumulates
   in sorted-key order, never in iteration order (which differs per map and per
   process): the cost reducers sum a counts map in ascending bitstring order.

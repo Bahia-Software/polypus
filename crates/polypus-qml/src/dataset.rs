@@ -8,7 +8,8 @@
 //! serves both classification and regression.
 
 use crate::error::ValidationError;
-use crate::rng::{shuffle, SplitMix64};
+use crate::rng::shuffle;
+use polypus_circuit::rng::SplitMix64;
 
 /// A validated supervised dataset: a rectangular feature matrix plus one label
 /// per sample.
