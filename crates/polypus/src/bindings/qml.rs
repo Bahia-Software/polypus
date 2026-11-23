@@ -1784,8 +1784,10 @@ pub struct TrainedModel {
 impl TrainedModel {
     /// Bind every row of `x` to the parameters and run the circuits: sampled
     /// through the scheduler, or, with `exact`, as exact probabilities on the
-    /// native simulator. Every check runs before a backend exists and raises
-    /// `polypus.ConfigurationError`.
+    /// native simulator, kept as they are (`read` = [`RowRead::Results`]) or
+    /// read into each row's decision as soon as it is computed
+    /// ([`RowRead::Predictions`], issue #645). Every check runs before a
+    /// backend exists and raises `polypus.ConfigurationError`.
     fn run_rows(
         &self,
         x: &Bound<'_, PyAny>,
@@ -1947,7 +1949,9 @@ impl TrainedModel {
             },
             RowRead::Predictions,
         )?;
-        let values = match &run.results {
+        // `RowRead::Predictions` reads exact rows into `Predictions`, so an
+        // `Exact` result does not reach here; read it the same way regardless.
+        let values = match run.results {
             RowResults::Counts(counts) => counts
                 .iter()
                 .map(|counts| run.compiled.predict_from_counts(counts))
@@ -1956,7 +1960,7 @@ impl TrainedModel {
                 .iter()
                 .map(|p| run.compiled.predict_from_probabilities(p))
                 .collect::<Result<Vec<_>, _>>(),
-            RowResults::Predictions(values) => Ok(values.clone()),
+            RowResults::Predictions(values) => Ok(values),
         }
         .map_err(qml_to_py_err)?;
         let py = x.py();
@@ -4513,24 +4517,31 @@ mod tests {
 
     /// #645: `predict(exact=True)` reads each row's decision as its map is
     /// built; the decisions are what the maps give, bit for bit.
+    /// With a raw readout the decision is `⟨O₀⟩` itself, so "bit for bit"
+    /// compares real values, not class indices.
     #[test]
     fn exact_predictions_are_the_maps_decisions_bit_for_bit() {
-        let (compiled, rows, theta) = primitive_model_and_rows();
-        let circuits: Vec<BoundCircuit> = rows
-            .iter()
-            .map(|row| BoundCircuit::Native(compiled.bind(row, &theta).unwrap()))
-            .collect();
-        let native = NativeStatevectorBackend::new(0);
-        let params = run_params(0, 1);
-        let read = exact_predictions(&native, &params, &compiled, &circuits).unwrap();
-        let from_maps: Vec<f64> = native
-            .run_circuits_exact(&circuits, &params)
-            .unwrap()
-            .iter()
-            .map(|map| compiled.predict_from_probabilities(map).unwrap())
-            .collect();
-        assert_eq!(read.len(), rows.len());
-        assert_eq!(format!("{read:?}"), format!("{from_maps:?}"));
+        let (argmax, rows, _) = primitive_model_and_rows();
+        for compiled in [argmax, model_with_observables(1)] {
+            let theta: Vec<f64> = (0..compiled.num_params())
+                .map(|p| -0.7 + 0.13 * p as f64)
+                .collect();
+            let circuits: Vec<BoundCircuit> = rows
+                .iter()
+                .map(|row| BoundCircuit::Native(compiled.bind(row, &theta).unwrap()))
+                .collect();
+            let native = NativeStatevectorBackend::new(0);
+            let params = run_params(0, 1);
+            let read = exact_predictions(&native, &params, &compiled, &circuits).unwrap();
+            let from_maps: Vec<f64> = native
+                .run_circuits_exact(&circuits, &params)
+                .unwrap()
+                .iter()
+                .map(|map| compiled.predict_from_probabilities(map).unwrap())
+                .collect();
+            assert_eq!(read.len(), rows.len());
+            assert_eq!(format!("{read:?}"), format!("{from_maps:?}"));
+        }
     }
 
     /// The kernel reads probabilities: it keeps the maps, and refuses

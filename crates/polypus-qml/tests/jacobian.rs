@@ -142,11 +142,15 @@ fn a_reading_too_short_for_the_readout_is_a_length_mismatch() {
             got: 3
         }
     );
-    // As for the maps, a slice of the wrong length is refused too.
-    assert!(matches!(
-        jacobian.jacobian_from_expectations(&[]).unwrap_err(),
-        QmlError::CountsLengthMismatch { .. }
-    ));
+    // The map reader's own errors come first: a slice of the wrong length is
+    // its mismatch even when every reading is too wide too.
+    assert_eq!(
+        jacobian.jacobian_from_expectations(&wide[1..]).unwrap_err(),
+        QmlError::CountsLengthMismatch {
+            expected: jacobian.num_circuits(),
+            got: jacobian.num_circuits() - 1
+        }
+    );
 }
 
 /// Two parameter points that are neither zero nor symmetric, so no derivative

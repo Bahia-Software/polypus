@@ -571,6 +571,13 @@ pub enum QmlError {
     /// A slice of counts maps handed to
     /// [`fitness_from_counts`](crate::QmlProblem::fitness_from_counts) has a
     /// length different from the number of training circuits.
+    ///
+    /// Also a circuit's reading of the wrong width for the exact readers that
+    /// take expectations instead of maps (issue #645), such as
+    /// [`fitness_from_expectations`](crate::QmlProblem::fitness_from_expectations):
+    /// `expected` is then the width (or, for one too short, the entries it
+    /// must have at least) and `got` the reading's. The message still speaks
+    /// of counts maps.
     CountsLengthMismatch {
         /// The number of circuits (and hence counts maps) expected.
         expected: usize,

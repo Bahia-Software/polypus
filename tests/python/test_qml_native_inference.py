@@ -107,6 +107,25 @@ class TestInference:
         assert all(type(value) is float for value in values)
         assert values == pytest.approx([1.0, 0.0], abs=1e-12)
 
+    def test_exact_raw_decisions_are_the_exact_expectations_bit_for_bit(self):
+        # #645: `predict(exact=True)` reads each row's decision as soon as its
+        # probabilities are computed; with a raw readout the decision is
+        # ⟨O₀⟩, which `qml.expval(exact=True)` reads from the same
+        # probabilities by the same estimator: equal, not just close.
+        from polypus import qml
+        from polypus.qml import Ansatz, Encoder, Model, Readout, Z
+
+        model = Model(
+            Encoder(3).angle_encoder("ry"),
+            Ansatz(3).hardware_efficient(1),
+            Readout([Z(0) @ Z(2)], decision="raw"),
+        )
+        params = [0.3 - 0.11 * k for k in range(model.num_params)]
+        rows = [[0.2 + 0.37 * i + 0.13 * j for j in range(3)] for i in range(7)]
+        values = model.bind(params).predict(rows, exact=True)
+        expectations = qml.expval(model, rows, params, exact=True)
+        assert values == [float(row[0]) for row in expectations.tolist()]
+
     def test_argmax_decisions_are_class_indices(self):
         from polypus.qml import Ansatz, Encoder, Model, Readout, Z
 

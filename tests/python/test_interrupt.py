@@ -694,32 +694,29 @@ def test_native_qml_kernel_matrix_responds_to_sigint_promptly(exact):
 #
 # Sizing: the minibatch loop is trivial (`batch_size=1`, one DE generation of 8
 # candidates, milliseconds), while the rescore scores every one of `_SAMPLES`
-# `_QUBITS`-qubit circuits, over a second. So a frozen thread's gap (≈ the
+# circuits, over a second. So a frozen thread's gap (≈ the
 # rescore) and a live one's (≈ 50-100 ms) differ by more than an order of
 # magnitude, and `_MAX_LIVE_GAP_S` sits between them. The child fails with a
 # resize hint if the rescore ever gets too short to tell the two apart.
 #
-# The rescore runs on every core, so its length depends on how many there are:
+# The rescore runs on every core, so how long it takes depends on the machine:
 # since #645 the exact path reads each circuit on the thread that simulates it,
 # and 4000 12-qubit samples took 0.3 s on 32 cores (1.6 s before), too short to
-# tell, while 1.6 s on 4. So the rescore scores 14-qubit circuits, 200 per core
-# the process may use and never fewer than 1500: about 1.4 s from 8 to 32
-# cores, 2.5 s on 4 (what a 4-core runner took before) and 5 s on 2 (measured
-# with `taskset`). Wider circuits and a per-core count rather than more
-# samples everywhere, because the per-sample Python work, which holds the GIL,
-# sets the live thread's gap (0.1 s at 6000 samples, 0.35 s at 24000), and more
-# samples would cost a small CI runner time for nothing.
-
-
-def _usable_cores() -> int:
-    """The cores this process (and the child it starts) may run on."""
-    try:
-        return len(os.sched_getaffinity(0))
-    except AttributeError:  # macOS, Windows
-        return os.cpu_count() or 1
-
-
-_RESCORE_SAMPLES = max(1500, 200 * _usable_cores())
+# tell. Counting cores cannot size it: a dedicated core is about 1.5x a
+# hyperthread, a cgroup quota leaves rayon fewer threads than the affinity
+# shows, and more samples lengthen the live thread's gap (the per-sample
+# Python work holds the GIL: 0.1 s at 6000 samples, 0.8 s at 51200). So the
+# child keeps `_SAMPLES` at 1500 (a gap under 0.1 s) and widens the circuits
+# instead, one qubit at a time from `_FIRST_QUBITS` until the rescore lasts
+# `_MIN_RESCORE_S`: each qubit about doubles the simulation and adds no Python
+# work. Measured with `taskset` on a 32-thread machine, hyperthread pairs and
+# separate cores alike: 14 qubits on 2 to 7 cores (rescore 4.9 s to 1.1 s), 15
+# on 8 to 32 (1.2 s to 2.0 s), a gap of at most 0.08 s, and the whole child
+# 1.3 s to 5.2 s (2.8 s on 4 cores, as a CI runner). Only a rescore still too
+# short at `_LAST_QUBITS` (hundreds of cores) reports the machine as unsized.
+_SAMPLES = 1500
+_FIRST_QUBITS = 14
+_LAST_QUBITS = 20
 _HEARTBEAT_INTERVAL_S = 0.05
 _MAX_LIVE_GAP_S = 1.0
 _MIN_RESCORE_S = 1.0
@@ -730,64 +727,72 @@ import sys, time, threading
 import polypus
 from polypus import qml
 
-_QUBITS = 14
-_SAMPLES = {_RESCORE_SAMPLES}
 
-model = qml.Model(
-    qml.Encoder(_QUBITS).angle_encoder("ry"),
-    qml.Ansatz(_QUBITS).hardware_efficient(1),
-    qml.Readout([qml.Z(0)], decision="sign"),
-)
+def model(qubits):
+    return qml.Model(
+        qml.Encoder(qubits).angle_encoder("ry"),
+        qml.Ansatz(qubits).hardware_efficient(1),
+        qml.Readout([qml.Z(0)], decision="sign"),
+    )
 
 
-def data(n):
+def data(n, qubits):
     # Distinct rows so the encoder does real per-sample work; the labels only
     # need to be valid, since the rescore's timing is what is measured.
-    x = [[0.3 + 0.0001 * i + 0.01 * j for j in range(_QUBITS)] for i in range(n)]
+    x = [[0.3 + 0.0001 * i + 0.01 * j for j in range(qubits)] for i in range(n)]
     y = [1 if i % 2 else -1 for i in range(n)]
     return x, y
 
 
-def fit(n, ident):
-    x, y = data(n)
-    model.fit(
+def fit(m, n, qubits, ident):
+    x, y = data(n, qubits)
+    m.fit(
         x, y,
         method=polypus.DE(generations=1, population_size=8, tolerance=1e-12),
         loss="hinge", id=ident, seed=7, exact=True, batch_size=1,
     )
 
 
-fit(4, "warmup")
+def rescore(qubits):
+    # The fit whose full-set rescore is timed, with a heartbeat thread alive
+    # throughout: (duration, largest gap between beats).
+    m = model(qubits)
+    fit(m, 4, qubits, "warmup")
+    stamps = []
+    stop = []
 
-stamps = []
-stop = False
+    def heartbeat():
+        while not stop:
+            stamps.append(time.time())
+            time.sleep({_HEARTBEAT_INTERVAL_S!r})
+
+    beat = threading.Thread(target=heartbeat, daemon=True)
+    beat.start()
+    time.sleep(0.2)  # let the heartbeat establish its cadence first
+    start = time.time()
+    fit(m, {_SAMPLES!r}, qubits, "rescore_gil")
+    duration = time.time() - start
+    stop.append(True)
+    beat.join()
+    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    return duration, (max(gaps) if gaps else float("inf"))
 
 
-def heartbeat():
-    while not stop:
-        stamps.append(time.time())
-        time.sleep({_HEARTBEAT_INTERVAL_S!r})
+qubits = {_FIRST_QUBITS!r}
+while True:
+    duration, max_gap = rescore(qubits)
+    if duration >= {_MIN_RESCORE_S!r} or qubits >= {_LAST_QUBITS!r}:
+        break
+    qubits += 1
 
-
-beat = threading.Thread(target=heartbeat, daemon=True)
-beat.start()
-time.sleep(0.2)  # let the heartbeat establish its cadence first
-
-start = time.time()
-fit(_SAMPLES, "rescore_gil")
-duration = time.time() - start
-stop = True
-beat.join()
-
-gaps = [b - a for a, b in zip(stamps, stamps[1:])]
-max_gap = max(gaps) if gaps else float("inf")
+line = f"qubits={{qubits}} duration={{duration:.3f}} max_gap={{max_gap:.3f}}"
 if duration < {_MIN_RESCORE_S!r}:
-    print(f"UNSIZED duration={{duration:.3f}} max_gap={{max_gap:.3f}}", flush=True)
+    print(f"UNSIZED {{line}}", flush=True)
     sys.exit(2)
 if max_gap < {_MAX_LIVE_GAP_S!r}:
-    print(f"PASS duration={{duration:.3f}} max_gap={{max_gap:.3f}}", flush=True)
+    print(f"PASS {{line}}", flush=True)
     sys.exit(0)
-print(f"FAIL duration={{duration:.3f}} max_gap={{max_gap:.3f}}", flush=True)
+print(f"FAIL {{line}}", flush=True)
 sys.exit(1)
 """
 
@@ -816,7 +821,8 @@ def test_minibatch_rescore_runs_gil_free():
     if "UNSIZED" in out:
         pytest.fail(
             "the full-set rescore was too short on this machine to tell a frozen "
-            f"thread from a live one: raise _SAMPLES.\nstdout:\n{out}\nstderr:\n{err}"
+            "thread from a live one, even at _LAST_QUBITS: raise it."
+            f"\nstdout:\n{out}\nstderr:\n{err}"
         )
     assert proc.returncode == 0 and "PASS" in out, (
         "a background Python thread froze during the full-set rescore: it ran "

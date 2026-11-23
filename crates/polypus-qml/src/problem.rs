@@ -3439,6 +3439,25 @@ mod tests {
                 got: 2
             }
         );
+        // Every reader refuses a reading wider than `read_probabilities`'s.
+        let theta = vec![0.1; scalar.num_params()];
+        let wide_gradient = vec![vec![0.5, 0.25]; scalar.num_gradient_circuits().unwrap()];
+        let too_wide = QmlError::CountsLengthMismatch {
+            expected: 1,
+            got: 2,
+        };
+        assert_eq!(
+            scalar
+                .gradient_from_expectations(&wide_gradient)
+                .unwrap_err(),
+            too_wide
+        );
+        assert_eq!(
+            scalar
+                .adjoint_runs_from_expectations(&theta, &wide)
+                .unwrap_err(),
+            too_wide
+        );
         // The map readers' own errors come first and in their order: a model
         // without a shift rule is `NoExactGradient`, a `theta` of the wrong
         // length `WrongNumberOfParams`, and a slice of the wrong length its
