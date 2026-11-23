@@ -2680,9 +2680,11 @@ that does not depend on the data is checked where it is written, as a plain
 `predict` and `run` below are `polypus.ConfigurationError`):
 
 - each `Encoder`/`Ansatz` builder call re-checks its layers (a misplaced
-  amplitude encoder, pooling below two active qubits, a
-  `strongly_entangling` range out of bounds) and leaves the object as it was
-  when it raises;
+  amplitude encoder, pooling below two active qubits, a convolution whose
+  `pairing` selects no pair (`"odd_pairs"` below three active qubits,
+  `"even_pairs"` and `"alternating"` below two;
+  `ValidationError::ConvNeedsQubits`), a `strongly_entangling` range out of
+  bounds) and leaves the object as it was when it raises;
 - `Model` checks that the `Encoder` and the `Ansatz` have the same width, that
   some layer loads the data, that the layers reserve trainable parameters, and
   that the readout's positions exist among the qubits still active at the end;
