@@ -1117,6 +1117,13 @@ mod tests {
         assert!(!same_nodes(zero.nodes(), minus_zero.nodes()));
     }
 
+    /// The probe sequence is pinned: an expression's id after a collision
+    /// must not move between builds.
+    #[test]
+    fn probe_is_pinned() {
+        assert_eq!(probe(42), 0xBDD7_3226_2FEB_6E95);
+    }
+
     #[test]
     fn gate_body_expressions_refer_to_formal_parameters() {
         use Node::*;

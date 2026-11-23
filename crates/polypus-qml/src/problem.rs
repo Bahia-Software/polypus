@@ -1946,6 +1946,13 @@ mod tests {
         assert!(differs, "every call_index produced the same minibatch");
     }
 
+    /// The minibatch stream is pinned: a change would move every seeded
+    /// minibatch training, so it must be deliberate.
+    #[test]
+    fn minibatch_indices_is_pinned() {
+        assert_eq!(minibatch_indices(10, 42, 3, 4), vec![3, 5, 4, 0]);
+    }
+
     #[test]
     fn subset_reproduces_the_full_problem_on_those_samples() {
         // Full problem over 4 distinct-feature samples with distinct labels.

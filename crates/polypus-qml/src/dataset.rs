@@ -428,6 +428,21 @@ mod tests {
         assert_eq!(recovered, vec![0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
     }
 
+    /// The split stream is pinned: with seed 42 the shuffle of `0..10` is
+    /// `[0, 9, 5, 8, 6, 4, 7, 2, 1, 3]`, and `floor(10 * 0.3) = 3` of it go to
+    /// test. A change would move every seeded split, so it must be deliberate.
+    #[test]
+    fn split_is_pinned() {
+        let features: Vec<Vec<f64>> = (0..10).map(|i| vec![f64::from(i)]).collect();
+        let labels: Vec<f64> = (0..10).map(f64::from).collect();
+        let ds = Dataset::from_rows(&features, &labels).unwrap();
+        let (train, test) = ds.train_test_split(0.3, 42).unwrap();
+        // Each label is its sample's original index.
+        assert_eq!(test.labels(), [0.0, 9.0, 5.0]);
+        assert_eq!(train.labels(), [8.0, 6.0, 4.0, 7.0, 2.0, 1.0, 3.0]);
+        assert_eq!(test.sample(1), [9.0]);
+    }
+
     #[test]
     fn invalid_test_fraction_at_boundaries() {
         let ds = Dataset::from_rows(&rows(&[&[0.0], &[1.0]]), &[0.0, 1.0]).unwrap();
