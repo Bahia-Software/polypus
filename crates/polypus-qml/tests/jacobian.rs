@@ -92,9 +92,61 @@ fn crate_jacobian(
     let jacobian = model.jacobian(samples, wrt).unwrap();
     let circuits = jacobian.circuits(theta).unwrap();
     assert_eq!(circuits.len(), jacobian.num_circuits());
-    jacobian
-        .jacobian_from_probabilities(&exact_probabilities(&circuits))
-        .unwrap()
+    let probabilities = exact_probabilities(&circuits);
+    let from_maps = jacobian
+        .jacobian_from_probabilities(&probabilities)
+        .unwrap();
+    // #645: each circuit's expectations, read from its map as the exact
+    // native path reads them, give the same Jacobian bit for bit (`{:?}`
+    // prints every `f64` exactly, a `-0.0` included).
+    let readings: Vec<Vec<f64>> = probabilities
+        .iter()
+        .map(|map| model.expectations_from_probabilities(map).unwrap())
+        .collect();
+    let from_readings = jacobian.jacobian_from_expectations(&readings).unwrap();
+    assert_eq!(format!("{from_readings:?}"), format!("{from_maps:?}"));
+    from_maps
+}
+
+#[test]
+fn a_reading_too_short_for_the_readout_is_a_length_mismatch() {
+    let model = QuantumModel::new(2)
+        .angle_encoder(RotationAxis::Ry)
+        .hardware_efficient(1)
+        .readout(
+            Readout::new(
+                vec![observable(&[0], Pauli::Z), observable(&[1], Pauli::Z)],
+                Decision::Raw,
+            )
+            .unwrap(),
+        )
+        .compile(2)
+        .unwrap();
+    let jacobian = model
+        .jacobian(&[vec![0.3, 0.9]], JacobianWrt::Params)
+        .unwrap();
+    let readings = vec![vec![0.5]; jacobian.num_circuits()];
+    assert_eq!(
+        jacobian.jacobian_from_expectations(&readings).unwrap_err(),
+        QmlError::CountsLengthMismatch {
+            expected: 2,
+            got: 1
+        }
+    );
+    // A reading wider than the readout is refused rather than read in part.
+    let wide = vec![vec![0.5, 0.25, 0.125]; jacobian.num_circuits()];
+    assert_eq!(
+        jacobian.jacobian_from_expectations(&wide).unwrap_err(),
+        QmlError::CountsLengthMismatch {
+            expected: 2,
+            got: 3
+        }
+    );
+    // As for the maps, a slice of the wrong length is refused too.
+    assert!(matches!(
+        jacobian.jacobian_from_expectations(&[]).unwrap_err(),
+        QmlError::CountsLengthMismatch { .. }
+    ));
 }
 
 /// Two parameter points that are neither zero nor symmetric, so no derivative
@@ -606,9 +658,21 @@ fn blocks_concatenate_to_the_whole_jacobian() {
         for block in jacobian.blocks(size) {
             let circuits = block.circuits(&theta).unwrap();
             assert_eq!(circuits.len(), block.num_circuits());
-            let part = block
-                .jacobian_from_probabilities(&exact_probabilities(&circuits))
-                .unwrap();
+            let probabilities = exact_probabilities(&circuits);
+            let part = block.jacobian_from_probabilities(&probabilities).unwrap();
+            // #645: a block read from each circuit's expectations, as the
+            // exact primitives read it, is the same block bit for bit,
+            // whichever sample it starts at.
+            let readings: Vec<Vec<f64>> = probabilities
+                .iter()
+                .map(|map| model.expectations_from_probabilities(map).unwrap())
+                .collect();
+            let from_readings = block.jacobian_from_expectations(&readings).unwrap();
+            assert_eq!(
+                format!("{from_readings:?}"),
+                format!("{part:?}"),
+                "size {size}"
+            );
             assert_eq!(part.num_samples(), block.num_samples());
             let (p, i) = part.into_parts();
             params.extend(p.unwrap());

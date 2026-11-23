@@ -694,10 +694,32 @@ def test_native_qml_kernel_matrix_responds_to_sigint_promptly(exact):
 #
 # Sizing: the minibatch loop is trivial (`batch_size=1`, one DE generation of 8
 # candidates, milliseconds), while the rescore scores every one of `_SAMPLES`
-# 12-qubit circuits, seconds on the reference machine. So a frozen thread's gap
-# (≈ the rescore) and a live one's (≈ 50 ms) differ by about two orders of
+# `_QUBITS`-qubit circuits, over a second. So a frozen thread's gap (≈ the
+# rescore) and a live one's (≈ 50-100 ms) differ by more than an order of
 # magnitude, and `_MAX_LIVE_GAP_S` sits between them. The child fails with a
 # resize hint if the rescore ever gets too short to tell the two apart.
+#
+# The rescore runs on every core, so its length depends on how many there are:
+# since #645 the exact path reads each circuit on the thread that simulates it,
+# and 4000 12-qubit samples took 0.3 s on 32 cores (1.6 s before), too short to
+# tell, while 1.6 s on 4. So the rescore scores 14-qubit circuits, 200 per core
+# the process may use and never fewer than 1500: about 1.4 s from 8 to 32
+# cores, 2.5 s on 4 (what a 4-core runner took before) and 5 s on 2 (measured
+# with `taskset`). Wider circuits and a per-core count rather than more
+# samples everywhere, because the per-sample Python work, which holds the GIL,
+# sets the live thread's gap (0.1 s at 6000 samples, 0.35 s at 24000), and more
+# samples would cost a small CI runner time for nothing.
+
+
+def _usable_cores() -> int:
+    """The cores this process (and the child it starts) may run on."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:  # macOS, Windows
+        return os.cpu_count() or 1
+
+
+_RESCORE_SAMPLES = max(1500, 200 * _usable_cores())
 _HEARTBEAT_INTERVAL_S = 0.05
 _MAX_LIVE_GAP_S = 1.0
 _MIN_RESCORE_S = 1.0
@@ -708,8 +730,8 @@ import sys, time, threading
 import polypus
 from polypus import qml
 
-_QUBITS = 12
-_SAMPLES = 4000
+_QUBITS = 14
+_SAMPLES = {_RESCORE_SAMPLES}
 
 model = qml.Model(
     qml.Encoder(_QUBITS).angle_encoder("ry"),
