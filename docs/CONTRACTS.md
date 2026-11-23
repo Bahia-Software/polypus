@@ -84,7 +84,7 @@ at backend construction), whose charset is constrained by C-9.
 | backend | kwargs (exact names) |
 |---|---|
 | local | `qcs: list`, `shots: int`, `sim_method: str`, `max_parallel_experiments: int`, `noise_model` (optional), `seed: int` (optional, C-7), `max_memory_mb: int` (optional, issue #215) |
-| cunqa | `family_id: str`, `qcs: list`, `shots: int`, `qpu_offset: int` (C-7, issue #370), `sim_method: str`, `seed: int` (optional, C-7) |
+| cunqa | `family_id: str`, `qcs: list`, `shots: int`, `qpu_offset: int` (C-7, issue #370), `sim_method: str`, `seeds: list[int]` (optional, C-7, issue #635: one per circuit, the seed its QPU runs with) |
 
 `max_memory_mb` is sent by the local backend **only when the memory budget is a
 known limit** (a valid `POLYPUS_MEM_BUDGET`, or the detected RAM/cgroup limit minus
@@ -98,6 +98,10 @@ lack of memory is raised as `polypus.InsufficientMemoryError` (see Failure modes
 circuit `i` runs on QPU `qpu_offset + i`. It is `0` except when a shot split
 across the QPUs is uneven, which the Rust side sends as one call per batch size,
 each with its first replica's index. The seal reads it with a default of `0`.
+`seeds` holds, for circuit `i`, the seed QPU `qpu_offset + i` runs with, derived
+on the Rust side (C-7) and forwarded as is; the seal refuses a `seeds` whose
+length is not the number of circuits (`ValueError`), and an unseeded run sends
+none.
 
 `family_id` is the run id (`RunParams::id`, derived from
 `ExecutionConfig::id`), whose charset is constrained by C-9; only CUNQA receives
@@ -1809,8 +1813,8 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     (`BackendConfig::check_seed`, called by every entry point this contract
     lists); until #393 it reached Aer masked to 63 bits, so two seeds that
     differed only in bit 63 gave the same counts. The 63-bit mask in
-    `local.py` and `cunqa.py` still applies to the seeds Polypus derives: the
-    per-call seeds below and CUNQA's per-QPU `seed + k`. **Enforcing tests:**
+    `local.py` and `cunqa.rs` still applies to the seeds Polypus derives: the
+    per-call seeds below and CUNQA's per-QPU seeds. **Enforcing tests:**
     `tests/python/test_seed_range.py` (every entry point),
     `test_a_seed_of_two_to_the_63_or_more_is_rejected_before_any_qpu` in
     `tests/python/test_cunqa_run_flow.py`, and the `check_seed`/`random_seed`
@@ -1833,21 +1837,34 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     that was fixed. Aer and CUNQA receive one seed per call instead (see
     [The seed across the calls of one run](#the-seed-across-the-calls-of-one-run)):
     a `run_quantum_circuit` that is one call gives Aer the base seed
-    unchanged, and CUNQA adds its per-QPU offset below.
-  - With `infrastructure="cunqa"`: the same `seed` kwarg is forwarded across
-    the same seam (`crates/polypus-infrastructure/src/cunqa.rs` mirrors
-    `local.rs`, `polypus_python`'s `cunqa.py` mirrors `local.py`), with a
-    per-QPU offset so distributed shots aren't identical copies: the circuit
-    sent to QPU `k` runs with the call's seed (below) `+ k`, masked to 63
-    bits (so `2**63 - 1 + 1` wraps to `0`; the base seed itself is below
-    `2**63`, see the seed range above). With shots split
+    unchanged, and CUNQA runs QPU 0 with it and derives the others' below.
+  - With `infrastructure="cunqa"`: every QPU gets its own seed, so
+    distributed shots aren't identical copies. The circuit sent to QPU `k`
+    runs with the call's seed `c` (below) on QPU 0 and with output `k` of a
+    SplitMix64 stream started at `stream_seed(c, 0)` on QPU `k >= 1`,
+    `stream_seed(stream_seed(c, 0), k)`, masked to 63 bits (`qpu_seed` in
+    `crates/polypus-infrastructure/src/cunqa.rs`). The Rust side derives them
+    and sends them across the seam as `seeds` (C-1), which `polypus_python`'s
+    `cunqa.py` forwards to each QPU's `run(..., seed=...)` as they are. QPU 0
+    keeps the call's seed, so a run of one call reports the seed QPU 0 ran
+    with. Until #635 QPU `k` ran with `c + k`, so QPU `k` of seed `s` ran with
+    QPU `k - 1` of seed `s + 1`'s seed and repetitions seeded `0, 1, 2, ...`
+    overlapped across QPUs, the overlap #348 removed from the native backend;
+    seeded CUNQA counts on QPUs `k >= 1` changed when that was fixed. The
+    QPUs' stream starts at `stream_seed(c, 0)`, not at `c`, because call `n`
+    of a run is seeded `stream_seed(base, n)` (below): with `stream_seed(c,
+    k)`, QPU `k` of a run's first call would share the seed of its whole call
+    `k`. No two QPUs of a run then share a seed, across calls too, short of a
+    SplitMix64 collision (chance about `2**-63` per pair). With shots split
     across the QPUs, replica `i` runs on QPU `i`, so every replica gets its own
     QPU and seed even when the split is uneven (`shots` not a multiple of
     `n_qpus`) and is sent as one `run_qcs` call per batch size, each carrying
     its first replica's index as `qpu_offset` (C-1; fixed in #370). `tests/python/test_cunqa_run_flow.py` pins the seeds, the counts shape
     and reproducibility end to end against a fake CUNQA, and the opt-in
     `tests/python/test_cunqa_real.py` checks that a seed reproduces and that
-    QPUs differ on a real family (#357; passed on CUNQA 3.0.0).
+    QPUs differ on a real family (#357; passed on CUNQA 3.0.0 with the
+    `seed + k` seeds before #635, not yet run with the derived ones, whose
+    QPUs `k >= 1` receive seeds near `2**63`).
   - With physical hardware (`infrastructure="qmio"`): passing an explicit
     `seed` raises `ValueError`. Real quantum processors rely on physical
     processes and cannot be deterministically seeded, so silently accepting
@@ -1960,19 +1977,21 @@ share shot noise, and the same seed replays the whole sequence:
 - The native backend seeds circuit `k` of the run with `circuit_seed(s, k)`
   (above); its calls take consecutive blocks of `k`, so its seeds do not
   depend on how the batches are split.
-- Aer, CUNQA and the subprocess bridge receive one seed per call: the base
+- Aer, CUNQA and the subprocess bridge receive one seed per call (CUNQA then
+  derives one per QPU from it, `qpu_seed` above, and sends those): the base
   seed `s` on call `0` and `stream_seed(s, n)` on call `n >= 1`, the native
   map (`polypus_backend::{stream_seed, CallSeeds}`). Calls are numbered in the
   order the backend receives them, which is the run's: the planners call a
   backend sequentially. Every `run_circuits` call counts, and so does a
   `run_shots_distributed` call on CUNQA, which overrides it; Aer and the
   bridge use the trait's default, one `run_circuits` call per shot group, so
-  an uneven shot split is several calls there. CUNQA adds each QPU's offset to
-  its call's seed. A run of one call, such as a `run_quantum_circuit` with
-  `n_qpus=1` or an even split, therefore seeds Aer exactly as Aer's own
-  `seed_simulator=s` does. On that first call, as before #411, neighbouring
-  base seeds can share streams (on CUNQA, QPU `k+1` of seed `s` is QPU `k` of
-  seed `s+1`); later calls are mixed like the native backend's circuits.
+  an uneven shot split is several calls there. CUNQA runs QPU 0 with its
+  call's seed and derives the other QPUs' from it (`qpu_seed`, above). A run
+  of one call, such as a `run_quantum_circuit` with `n_qpus=1` or an even
+  split, therefore seeds Aer exactly as Aer's own `seed_simulator=s` does,
+  and CUNQA's QPU 0 likewise. On that first call, as before #411, Aer's
+  seeds and CUNQA's QPU-0 seeds of neighbouring base seeds are neighbours
+  (`s` and `s+1`); later calls are mixed like the native backend's circuits.
 - Since a call's seed depends on its index, a seeded Aer or CUNQA run replays
   on the same configuration: the same `n_qpus`, and for a split that depends
   on them, the same memory budget and core count.
@@ -1984,9 +2003,11 @@ Until #411, Aer, CUNQA and the bridge received the base seed on every call,
 so batch slot `i` was sampled with the same random numbers in every
 generation, unlike the native backend; seeded results on those backends
 changed in 0.8.0. A derived per-call seed is a full 64-bit value; Aer and
-CUNQA receive it masked to 63 bits (`local.py`, `cunqa.py`). **Enforcing tests:** `tests/python/test_seed_streams.py`
-(the seeds Aer and the fake CUNQA receive over a `train`, read off the
-`run_qcs` seam, and their replay), `consecutive_calls_get_their_own_streams`
+CUNQA receive it masked to 63 bits (`local.py`, `cunqa.rs`). **Enforcing
+tests:** `tests/python/test_seed_streams.py`
+(the seeds Aer receives over a `train`, read off the `run_qcs` seam, and
+those every QPU of the fake CUNQA runs with, read off its `run` calls, and
+their replay), `consecutive_calls_get_their_own_streams`
 in `crates/polypus-infrastructure/src/native.rs`,
 `crates/polypus-subprocess-backend/tests/seed_streams.rs` (the seeds the
 reference worker receives) and the `CallSeeds` tests in
@@ -2063,14 +2084,19 @@ path and id format (`unique_id_from`)), `crates/polypus/src/exceptions.rs`
 `crates/polypus-infrastructure/src/execution_config.rs` (the fallible draws
 `random_seed_from` / `random_id_bytes_from` and their error messages) and
 `crates/polypus-infrastructure/src/native.rs` (same-seed reproduces /
-omitted-seed differs at the backend level). CUNQA's
-`seed` forwarding follows the same shape as Aer's on the Rust side
-(`crates/polypus-infrastructure/src/cunqa.rs` mirrors `local.rs`) and is pinned
-end to end against a fake CUNQA SDK by `tests/python/test_cunqa_run_flow.py`
-(per-QPU seeds, 63-bit mask, same seed reproduces, reported seed replays). The
+omitted-seed differs at the backend level). CUNQA's seeds are derived on the
+Rust side (`qpu_seed` in `crates/polypus-infrastructure/src/cunqa.rs`) and sent
+as `seeds`, one per circuit, which `cunqa.py` forwards as they are; they are
+pinned end to end against a fake CUNQA SDK by
+`tests/python/test_cunqa_run_flow.py`
+(per-QPU seeds, 63-bit mask, same seed reproduces, reported seed replays) and
+`tests/python/test_seed_streams.py` (every QPU of every call of a `train`), and
+the derivation by the `qpu_seed` tests in
+`crates/polypus-infrastructure/src/cunqa.rs`. The
 `cunqa` package isn't installed in CI; the opt-in
-`tests/python/test_cunqa_real.py` checks the same on a real family and passed
-on CUNQA 3.0.0.
+`tests/python/test_cunqa_real.py` checks the same on a real family; it passed
+on CUNQA 3.0.0 with the `seed + k` seeds before #635 and is still to be run
+with the derived ones.
 
 ---
 

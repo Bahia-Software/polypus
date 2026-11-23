@@ -1,7 +1,9 @@
 use crate::attach::{attach_for_cleanup, attach_or, InterpreterUnavailable};
 use crate::error::BackendError;
+use crate::execution_config::AER_SEED_LIMIT;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::{record_cleanup_failure, BoundCircuit, CallSeeds, QuantumBackend, RunParams};
+use polypus_backend::stream_seed;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
@@ -112,8 +114,34 @@ pub struct CunqaBackend {
     /// so panic-safety is testable with an injected operation.
     release: ReleaseFn,
     /// The seed of each call: the run's on the first, then one derived from it
-    /// and the call's index (contract C-7). QPU `k` of a call adds `k`.
+    /// and the call's index (contract C-7). QPU `k` of a call runs with
+    /// [`qpu_seed`]`(call seed, k)`.
     seeds: CallSeeds,
+}
+
+/// The seed CUNQA runs QPU `qpu` of a call with, from the call's seed `c`
+/// (contract C-7, issue #635): `c` itself on QPU 0, so a run of one call
+/// replays on QPU 0 with the seed it reports, and output `qpu` of a SplitMix64
+/// stream started at [`stream_seed`]`(c, 0)` on the others. Masked to the 63
+/// bits Aer takes, since CUNQA's simulated QPUs are Aer-based.
+///
+/// A plain `c + qpu` made neighbouring seeds share QPUs shifted by one (QPU `k`
+/// of seed `s` ran with QPU `k - 1` of seed `s + 1`'s seed, the overlap #348
+/// removed from the native backend); the mixed stream puts distinct call
+/// seeds on unrelated positions. The QPUs' stream starts at
+/// `stream_seed(c, 0)` rather than at `c` because [`CallSeeds`] gives call `n`
+/// of a run `stream_seed(base, n)`: QPU `k` of the first call would otherwise
+/// run with the seed of the whole call `k`, and two calls would share shot
+/// noise. `CallSeeds` never derives a call from index 0, so that start is the
+/// QPUs' own.
+fn qpu_seed(call_seed: u64, qpu: usize) -> u64 {
+    // `usize` is at most 64 bits on every supported target, so this never
+    // falls back; the fallback only keeps the conversion panic-free.
+    let seed = match u64::try_from(qpu).unwrap_or(u64::MAX) {
+        0 => call_seed,
+        k => stream_seed(stream_seed(call_seed, 0), k),
+    };
+    seed & (AER_SEED_LIMIT - 1)
 }
 
 /// Groups consecutive replicas that request the same shot count, as
@@ -144,8 +172,8 @@ impl CunqaBackend {
     }
 
     /// Runs `qcs` on QPUs `qpu_offset..qpu_offset + qcs.len()` of the family,
-    /// the circuit on QPU `k` with seed `seed + k`, `seed` the call's (contracts
-    /// C-1, C-7).
+    /// the circuit on QPU `k` with seed [`qpu_seed`]`(seed, k)`, `seed` the
+    /// call's (contracts C-1, C-7).
     fn submit(
         &self,
         qcs: &[BoundCircuit],
@@ -190,12 +218,15 @@ impl CunqaBackend {
                 kwargs
                     .set_item("sim_method", &self.sim_method)
                     .map_err(conv)?;
-                // The call's seed, forwarded to each QPU's `run(..., seed=...)`
-                // on the Python side with the QPU's offset (contract C-7); `None`
-                // is simply omitted, so CUNQA's own unseeded default behavior is
-                // unchanged.
+                // One seed per circuit, the one its QPU runs with (contract C-7,
+                // issue #635), forwarded to each QPU's `run(..., seed=...)` on the
+                // Python side as is; `None` is simply omitted, so CUNQA's own
+                // unseeded default behavior is unchanged.
                 if let Some(seed) = config.seed {
-                    kwargs.set_item("seed", seed).map_err(conv)?;
+                    let seeds: Vec<u64> = (0..qcs.len())
+                        .map(|i| qpu_seed(seed, qpu_offset + i))
+                        .collect();
+                    kwargs.set_item("seeds", seeds).map_err(conv)?;
                 }
 
                 let result = module
@@ -228,8 +259,8 @@ impl QuantumBackend for CunqaBackend {
     }
 
     /// The default grouping (one submission per batch size), with each
-    /// submission's QPU and seed offset set to its first replica's index, so
-    /// replica `i` runs on QPU `i` with seed `seed + i`, `seed` this call's,
+    /// submission's QPU offset set to its first replica's index, so replica `i`
+    /// runs on QPU `i` with the seed `qpu_seed(seed, i)`, `seed` this call's,
     /// however the shots split (contract C-7).
     fn run_shots_distributed(
         &self,
@@ -419,6 +450,69 @@ mod tests {
     use pyo3::exceptions::PyValueError;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+
+    /// QPU 0 runs with the call's seed, so a one-call run replays on it with
+    /// the seed it reports; every seed is below 2**63 (contract C-7, #635).
+    #[test]
+    fn qpu_zero_keeps_the_call_seed_and_every_seed_fits_aer() {
+        for seed in [0, 1, 7, AER_SEED_LIMIT - 1] {
+            assert_eq!(qpu_seed(seed, 0), seed);
+        }
+        // A later call's seed is a full 64-bit value: masked like the rest.
+        assert_eq!(qpu_seed(AER_SEED_LIMIT + 5, 0), 5);
+        assert_eq!(qpu_seed(u64::MAX, 0), AER_SEED_LIMIT - 1);
+        for seed in [0, 3, u64::MAX] {
+            for qpu in 0..64 {
+                assert!(qpu_seed(seed, qpu) < AER_SEED_LIMIT, "{seed} {qpu}");
+            }
+        }
+        // The other QPUs take a SplitMix64 stream of their own (pinned, C-7).
+        // The values tests/python/seed_reference.py computes, so the Python
+        // reference the seam tests use is this derivation bit for bit.
+        assert_eq!(stream_seed(42, 9), 0x3E69_C285_108D_BB77);
+        assert_eq!(qpu_seed(42, 9), 0x2066_7245_060A_8EED);
+    }
+
+    /// No two QPUs of a run share a seed, across its calls too: QPU `k` of the
+    /// first call is not the whole call `k`, which `CallSeeds` seeds with
+    /// `stream_seed(base, k)` (C-7: no two calls of a run share shot noise).
+    #[test]
+    fn every_qpu_of_every_call_of_a_run_gets_its_own_seed() {
+        for base in [0, 3, 41, AER_SEED_LIMIT - 1] {
+            let calls = CallSeeds::new();
+            let mut seen = std::collections::HashSet::new();
+            for call in 0..64 {
+                let Some(seed) = calls.next(Some(base)) else {
+                    panic!("a seeded run seeds every call");
+                };
+                for qpu in 0..32 {
+                    assert!(
+                        seen.insert(qpu_seed(seed, qpu)),
+                        "base {base}, call {call}, QPU {qpu}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// #635: QPU `k` of seed `s` does not run with QPU `k - 1` of seed `s + 1`'s
+    /// seed, as it always did with `s + k` (now a SplitMix64 collision, of
+    /// chance about 2**-63); and the QPUs of one call run with distinct seeds.
+    #[test]
+    fn neighbouring_seeds_do_not_share_qpus_shifted_by_one() {
+        for seed in 0..512u64 {
+            for qpu in 1..32 {
+                assert_ne!(
+                    qpu_seed(seed, qpu),
+                    qpu_seed(seed + 1, qpu - 1),
+                    "seed {seed}, QPU {qpu}"
+                );
+            }
+            let call: std::collections::HashSet<u64> =
+                (0..32).map(|qpu| qpu_seed(seed, qpu)).collect();
+            assert_eq!(call.len(), 32, "seed {seed}");
+        }
+    }
 
     #[test]
     fn walltime_accepts_hh_mm_ss() {
