@@ -41,7 +41,9 @@ use crate::layers::{
     IqpEncoder, Layer, PoolBlock, PoolLayer, RotationAxis, SimplifiedTwoDesignAnsatz,
     StronglyEntanglingAnsatz,
 };
-use crate::observables::{CircuitReading, Pauli, ResolvedObservable, ResolvedPauliString};
+use crate::observables::{
+    CircuitReading, ExactState, Pauli, ResolvedObservable, ResolvedPauliString,
+};
 use crate::readout::{Decision, Readout, ResolvedReadout};
 
 /// The accumulator threaded through a model's layers, in order, during
@@ -653,6 +655,21 @@ impl CompiledModel {
             .predict_from_probabilities(probabilities)
     }
 
+    /// [`predict_from_probabilities`](Self::predict_from_probabilities) read
+    /// straight from the sample's state, with no map of its probabilities
+    /// (issue #628): the same prediction, bit for bit.
+    ///
+    /// # Errors
+    ///
+    /// As [`predict_from_probabilities`](Self::predict_from_probabilities)
+    /// for the map the state stands for.
+    pub fn predict_from_state<F: Fn(usize) -> f64>(
+        &self,
+        state: &ExactState<F>,
+    ) -> Result<f64, QmlError> {
+        self.resolved_readout().predict_from_state(state)
+    }
+
     /// The number of readout observables: one per class for an `Argmax`
     /// readout, and the width of
     /// [`expectations_from_counts`](Self::expectations_from_counts).
@@ -680,6 +697,22 @@ impl CompiledModel {
         probabilities: &HashMap<String, f64>,
     ) -> Result<Vec<f64>, QmlError> {
         self.expectations_from_weighted(probabilities)
+    }
+
+    /// [`expectations_from_probabilities`](Self::expectations_from_probabilities)
+    /// read straight from the sample's state, with no map of its
+    /// probabilities (issue #628): the same expectations, bit for bit, and
+    /// what [`ExpectationJacobian::jacobian_from_expectations`] takes.
+    ///
+    /// # Errors
+    ///
+    /// As [`expectations_from_probabilities`](Self::expectations_from_probabilities)
+    /// for the map the state stands for.
+    pub fn expectations_from_state<F: Fn(usize) -> f64>(
+        &self,
+        state: &ExactState<F>,
+    ) -> Result<Vec<f64>, QmlError> {
+        self.expectations_from_weighted(state)
     }
 
     /// The single implementation behind both readers, generic over the weight

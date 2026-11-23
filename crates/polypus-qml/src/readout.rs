@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use crate::error::{QmlError, ValidationError};
-use crate::observables::{BitstringWeight, Observable, ResolvedObservable};
+use crate::observables::{CircuitReading, ExactState, Observable, ResolvedObservable};
 
 /// How observable expectations become a prediction at inference time.
 ///
@@ -132,34 +132,32 @@ impl ResolvedReadout {
 
     /// Turn a `weights` map (finite-shot `counts` or exact `probabilities`) into a
     /// prediction according to the decision — the single implementation behind
-    /// both [`predict`](Self::predict) and
-    /// [`predict_from_probabilities`](Self::predict_from_probabilities), generic
-    /// over the weight type via [`BitstringWeight`] so the `match self.decision`
-    /// is written once instead of mirrored per path.
+    /// [`predict`](Self::predict), [`predict_from_probabilities`](Self::predict_from_probabilities)
+    /// and [`predict_from_state`](Self::predict_from_state), generic over the
+    /// reading via [`CircuitReading`] so the `match self.decision` is written
+    /// once instead of mirrored per path.
     ///
     /// `observables[0]` is always present: `compile` runs [`Readout::validate`]
     /// before building the `ResolvedReadout`, so a readout whose observable
     /// count does not satisfy its decision is rejected there and never reaches
     /// this method.
-    fn predict_from_weighted<W: BitstringWeight>(
-        &self,
-        weights: &HashMap<String, W>,
-    ) -> Result<f64, QmlError> {
+    fn predict_from_weighted<R: CircuitReading>(&self, weights: &R) -> Result<f64, QmlError> {
+        let observables = &self.observables;
         match self.decision {
             Decision::Sign => {
-                let e = W::observable_expectation(&self.observables[0], weights)?;
+                let e = weights.observable_expectation(observables, 0)?;
                 Ok(if e >= 0.0 { 1.0 } else { -1.0 })
             }
             Decision::Threshold(t) => {
-                let e = W::observable_expectation(&self.observables[0], weights)?;
+                let e = weights.observable_expectation(observables, 0)?;
                 Ok(if e >= t { 1.0 } else { -1.0 })
             }
-            Decision::Raw => W::observable_expectation(&self.observables[0], weights),
+            Decision::Raw => weights.observable_expectation(observables, 0),
             Decision::Argmax => {
                 let mut best_index = 0usize;
-                let mut best_value = W::observable_expectation(&self.observables[0], weights)?;
-                for (index, observable) in self.observables.iter().enumerate().skip(1) {
-                    let value = W::observable_expectation(observable, weights)?;
+                let mut best_value = weights.observable_expectation(observables, 0)?;
+                for index in 1..observables.len() {
+                    let value = weights.observable_expectation(observables, index)?;
                     // Strict `>`: ties keep the first (lowest) index.
                     if value > best_value {
                         best_value = value;
@@ -187,6 +185,16 @@ impl ResolvedReadout {
         probabilities: &HashMap<String, f64>,
     ) -> Result<f64, QmlError> {
         self.predict_from_weighted(probabilities)
+    }
+
+    /// [`predict_from_probabilities`](Self::predict_from_probabilities) read
+    /// from the state the map stands for (issue #628): the same prediction,
+    /// bit for bit, with no map.
+    pub(crate) fn predict_from_state<F: Fn(usize) -> f64>(
+        &self,
+        state: &ExactState<F>,
+    ) -> Result<f64, QmlError> {
+        self.predict_from_weighted(state)
     }
 }
 

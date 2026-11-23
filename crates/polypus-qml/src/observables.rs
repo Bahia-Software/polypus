@@ -202,6 +202,20 @@ impl ResolvedObservable {
         Ok(sum)
     }
 
+    /// [`expectation_from_probabilities`](Self::expectation_from_probabilities)
+    /// read from the state the map stands for (issue #628): the same value,
+    /// bit for bit, with no map.
+    pub(crate) fn expectation_from_state<F: Fn(usize) -> f64>(
+        &self,
+        state: &ExactState<F>,
+    ) -> Result<f64, QmlError> {
+        let mut sum = 0.0;
+        for (coeff, string) in &self.terms {
+            sum += coeff * expectation_from_state(state, string)?;
+        }
+        Ok(sum)
+    }
+
     /// Compute `⟨O⟩ = Σ_k c_k · ⟨P_k⟩` from **exact** basis-state
     /// `probabilities` (the exact-mode mirror of
     /// [`expectation`](Self::expectation)).
@@ -309,6 +323,22 @@ impl<W: BitstringWeight> CircuitReading for HashMap<String, W> {
     }
 }
 
+impl<F: Fn(usize) -> f64> CircuitReading for ExactState<F> {
+    fn observable_expectation(
+        &self,
+        observables: &[ResolvedObservable],
+        index: usize,
+    ) -> Result<f64, QmlError> {
+        let observable = observables
+            .get(index)
+            .ok_or(QmlError::CountsLengthMismatch {
+                expected: index + 1,
+                got: observables.len(),
+            })?;
+        observable.expectation_from_state(self)
+    }
+}
+
 impl CircuitReading for Vec<f64> {
     fn observable_expectation(
         &self,
@@ -390,18 +420,36 @@ fn expectation_from_weighted<W: BitstringWeight>(
         }
     }
 
+    parity_average(
+        entries
+            .into_iter()
+            .map(|(key, w)| (key.as_bytes(), w.as_weight())),
+        string,
+        // C-3: qubit `position` is the character at `width - 1 - position`.
+        |bytes, position| bytes[width - 1 - position] == b'1',
+    )
+}
+
+/// The parity estimator's average over `entries`, summed in the order given:
+/// each a basis state and its weight, `reads_one(state, position)` telling
+/// whether the state's qubit `position` is 1. The one place both the
+/// weight-map estimator and the state estimator ([`expectation_from_state`])
+/// do the arithmetic, so given the same states in the same order they give
+/// the same `f64`, bit for bit.
+fn parity_average<S>(
+    entries: impl Iterator<Item = (S, f64)>,
+    string: &ResolvedPauliString,
+    reads_one: impl Fn(&S, usize) -> bool,
+) -> Result<f64, QmlError> {
     let mut weighted = 0.0;
     let mut total = 0.0;
-    for (key, w) in entries {
-        let bytes = key.as_bytes();
+    for (state, weight) in entries {
         let mut parity = 0u32;
         for &(position, _) in &string.0 {
-            // C-3: qubit `position` is the character at `width - 1 - position`.
-            if bytes[width - 1 - position] == b'1' {
+            if reads_one(&state, position) {
                 parity ^= 1;
             }
         }
-        let weight = w.as_weight();
         let sign = if parity == 0 { 1.0 } else { -1.0 };
         weighted += sign * weight;
         total += weight;
@@ -410,6 +458,85 @@ fn expectation_from_weighted<W: BitstringWeight>(
         return Err(QmlError::EmptyCounts);
     }
     Ok(weighted / total)
+}
+
+/// One circuit's exact basis-state probabilities read straight from its
+/// state, without building a map of them (issue #628): `len` basis states
+/// (`2^n` for `n` qubits), keyed `width` bits wide as its counts would be
+/// (C-3), `probability(i)` being basis state `i`'s `|amplitude|²`.
+///
+/// A [`QmlProblem`](crate::QmlProblem) or [`CompiledModel`](crate::CompiledModel)
+/// reads it as it reads the map `NativeStatevectorBackend::run_circuits_exact`
+/// would have built from the same state, value for value and bit for bit:
+/// the states of probability exactly zero are skipped, the rest summed in
+/// basis order (the order of the map's sorted keys), with the same errors.
+/// Reading it allocates nothing, so a gradient that reads its circuits this
+/// way holds one statevector per circuit in flight and nothing more.
+///
+/// It stands for that map only when `width` is at least the number of
+/// qubits (`len <= 2^width`), as for every circuit the native backend runs:
+/// a narrower key would make the map keep one state per key, where this sums
+/// every state.
+pub struct ExactState<F> {
+    len: usize,
+    width: usize,
+    probability: F,
+}
+
+impl<F> std::fmt::Debug for ExactState<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExactState")
+            .field("len", &self.len)
+            .field("width", &self.width)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<F: Fn(usize) -> f64> ExactState<F> {
+    /// The state of `len` basis states, keyed `width` bits wide, whose basis
+    /// state `i` has probability `probability(i)`.
+    pub fn new(len: usize, width: usize, probability: F) -> Self {
+        Self {
+            len,
+            width,
+            probability,
+        }
+    }
+
+    /// The basis states of non-zero probability, in basis order, with theirs.
+    fn entries(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
+        (0..self.len).filter_map(|state| {
+            let p = (self.probability)(state);
+            (p != 0.0).then_some((state, p))
+        })
+    }
+}
+
+/// [`expectation_from_probabilities`] of the map `state` stands for, read from
+/// the state itself: the same checks in the same order (no state of non-zero
+/// probability is [`QmlError::EmptyCounts`]; a position the keys would not
+/// carry, [`QmlError::CountsWidthMismatch`]) and the same sum.
+fn expectation_from_state<F: Fn(usize) -> f64>(
+    state: &ExactState<F>,
+    string: &ResolvedPauliString,
+) -> Result<f64, QmlError> {
+    let mut entries = state.entries().peekable();
+    if entries.peek().is_none() {
+        return Err(QmlError::EmptyCounts);
+    }
+    for &(position, _) in &string.0 {
+        if position >= state.width {
+            return Err(QmlError::CountsWidthMismatch {
+                expected: position + 1,
+                got: state.width,
+            });
+        }
+    }
+    // A key's character at `width - 1 - position` is bit `position` of the
+    // state, and `0` past a `usize`'s bits (the native backend's bitstring).
+    parity_average(entries, string, |&state, position| {
+        position < usize::BITS as usize && (state >> position) & 1 == 1
+    })
 }
 
 /// Estimate `⟨Z_S⟩` from measurement `counts` for a resolved Pauli string `S`.
