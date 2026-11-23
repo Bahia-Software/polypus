@@ -48,7 +48,9 @@ use super::optimizer::{
 };
 use super::options::OptionsArg;
 use super::results::{counts_to_pylist, finish_optimization, log_training_start, RunResult};
-use super::seeds::{method_seed, resolve_optimizer_seed, seed_or_entropy, unique_id};
+use super::seeds::{
+    check_seed_for_backend, method_seed, resolve_optimizer_seed, seed_or_entropy, unique_id,
+};
 use crate::evaluation::{
     candidate_window_size, Label, MinibatchConfig, OracleErrorSlot, QmlOracleFactory, QmlSource,
 };
@@ -1301,8 +1303,9 @@ impl Model {
     /// - **Execution** takes the arguments of `polypus.train`. `backend=None`
     ///   is the native simulator on `infrastructure="local"` and Aer otherwise
     ///   (CUNQA's QPUs run Aer); an explicit `backend` wins. `seed` drives the
-    ///   optimizer, the shots and the minibatches (C-7), and `id` is a prefix to
-    ///   which a UUID is appended (C-9).
+    ///   optimizer, the shots and the minibatches (C-7); on Aer and CUNQA it
+    ///   must be below `2**63` (`polypus.ConfigurationError` otherwise, #393).
+    ///   `id` is a prefix to which a UUID is appended (C-9).
     ///
     /// Every check runs before a backend exists and raises
     /// `polypus.ConfigurationError` (a `ValueError`), except a value of the
@@ -1411,6 +1414,7 @@ impl Model {
             None,
             options.map(OptionsArg::into_inner),
         )?;
+        check_seed_for_backend(Some(effective_seed), &backend_config)?;
         let effective_id = unique_id(id)?;
         let config = Arc::new(ExecutionConfig {
             id: effective_id.clone(),
@@ -1676,6 +1680,7 @@ impl<'a> Execution<'a, '_> {
             None,
             self.options.map(OptionsArg::into_inner),
         )?;
+        check_seed_for_backend(seed, &backend_config)?;
         Ok(ExecutionConfig {
             id: unique_id(id_prefix)?,
             shots: self.shots,
@@ -3107,8 +3112,9 @@ fn shape_to_py_err(e: ShapeError) -> PyErr {
 /// - **Execution** takes `TrainedModel.run`'s arguments with its rules: with
 ///   `exact=True` the exact expectations (`infrastructure="local"`,
 ///   `backend="polypus"`), otherwise each one estimated from `shots` shots;
-///   `backend=None` by infrastructure; `seed` drawn when omitted and refused on
-///   `qmio`. The seed is logged, not returned: pass one to replay.
+///   `backend=None` by infrastructure; `seed` drawn when omitted, refused on
+///   `qmio`, and below `2**63` on Aer and CUNQA. The seed is logged, not
+///   returned: pass one to replay.
 /// - **Runs** one circuit per row, in blocks of rows over one backend for the
 ///   whole call, with the GIL released; Ctrl+C stops it between blocks.
 ///

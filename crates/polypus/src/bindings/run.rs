@@ -37,7 +37,12 @@ use crate::orchestration::RunCircuitFlow;
 /// byte-for-byte, and omitting it draws a fresh OS-entropy seed so repeated
 /// runs give genuinely independent noise. Passing a `seed` with
 /// `infrastructure="qmio"` raises `ValueError` rather than silently ignoring
-/// it, since that infrastructure is real hardware and cannot be seeded.
+/// it, since that infrastructure is real hardware and cannot be seeded. Aer
+/// and CUNQA take a seed from `0` to `2**63 - 1` (Aer's `seed_simulator` is a
+/// signed 64-bit integer): a larger one raises `polypus.ConfigurationError` (a
+/// `ValueError`), while the native backend takes any 64-bit seed. A drawn
+/// seed is always below `2**63`, so with `n_qpus=1` the reported seed is the
+/// one Aer received and replays the run with Aer's own `seed_simulator`.
 ///
 /// `nodes` and `cores_per_qpu` size the SLURM allocation and are meaningful
 /// only for `infrastructure="cunqa"` (they become CUNQA's `qraise` parameters);
@@ -181,7 +186,7 @@ pub fn run_quantum_circuit<'py>(
     // Aer/CUNQA/QMIO. Gated on the resolved `BackendConfig`, not the raw
     // `backend` string, so it tracks the real dispatch rather than re-deriving
     // it from the kwargs.
-    let backend_config = prepare::backend_config(qc.py(), selection, options)?;
+    let backend_config = prepare::backend_config(qc.py(), selection, options, effective_seed)?;
     let config = prepare::execution_config(
         id.clone(),
         shots,

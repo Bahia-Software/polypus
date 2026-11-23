@@ -55,7 +55,7 @@ pub use attach::{
 };
 pub use circuit::{as_qiskit, seam_error, to_py_object, QiskitCircuit};
 pub use cunqa::{validate_walltime, CunqaBackend, InvalidWalltime, DEFAULT_WALLTIME};
-pub use error::EntropyError;
+pub use error::{EntropyError, SeedOutOfRange};
 pub use execution_config::{BackendConfig, ExecutionConfig};
 pub use local::LocalBackend;
 pub use native::{AdjointTask, NativeStatevectorBackend};

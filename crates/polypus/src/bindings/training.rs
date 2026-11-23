@@ -38,7 +38,9 @@ use crate::orchestration::TrainFlow;
 /// OS-entropy value. `External` has no `seed` field and its library owns its
 /// seed, so there the seed only fixes the shot sampling. On the native backend
 /// the same seed also drives shot sampling, so a native-backend run reproduces
-/// exactly. Returns a
+/// exactly. On Aer and CUNQA the resolved seed must be below `2**63`, the
+/// range of Aer's `seed_simulator`, or `polypus.ConfigurationError` is raised
+/// before anything runs (a drawn seed always is; C-7). Returns a
 /// [`TrainResult`] exposing `best_params`, `best_fitness`, `iterations_run`,
 /// `converged`, `fitness_history`, `final_params`, `final_fitness`, the
 /// effective `seed` and the effective `id`.
@@ -242,7 +244,8 @@ pub fn train<'py>(
     // As in `run_quantum_circuit`: the native backend's simulator resolves the
     // gate-parallel threshold, so it is calibrated lazily before it is built
     // (#351).
-    let backend_config = prepare::backend_config(qc.py(), selection, options)?;
+    let backend_config =
+        prepare::backend_config(qc.py(), selection, options, Some(effective_seed))?;
     // Suffix the caller-supplied `id` with a UUID v4 so two concurrent training
     // runs sharing the same `id` never collide on the SLURM family/allocation,
     // temp files or log streams named by ExecutionConfig::id (#75, mirroring

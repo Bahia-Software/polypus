@@ -124,7 +124,9 @@ fn bind_feature_rows<'py>(
 /// Qiskit/Aer path (the native backend and `infrastructure="qmio"` are
 /// rejected before anything runs), and Aer's shot sampling
 /// is now seeded too (contract C-7), so a `qml.train` run is fully
-/// reproducible end-to-end given the same seed.
+/// reproducible end-to-end given the same seed. Since it runs on Aer, the
+/// resolved seed must be below `2**63` (`polypus.ConfigurationError`
+/// otherwise; a drawn seed always is).
 ///
 /// As in [`train`], the `id` kwarg is a human-readable *prefix*: a UUID v4 is
 /// appended for uniqueness (mirroring [`run_quantum_circuit`]), so the returned
@@ -335,7 +337,7 @@ pub fn qml_train<'py>(
     // an Aer variant here, which never fuses. Pass `None` (no fusion opinion)
     // rather than `Some(true)` — the latter would trip the "fusion=True on a
     // non-fusing backend" rejection for a value the caller never chose.
-    let backend_config = prepare::backend_config(py, selection, options)?;
+    let backend_config = prepare::backend_config(py, selection, options, Some(effective_seed))?;
     // Suffix the caller-supplied `id` with a UUID v4 (see `train` and #75) so
     // concurrent qml.train runs sharing the same `id` never collide on the
     // SLURM family/allocation, temp files or log streams named by
@@ -517,7 +519,7 @@ pub fn qml_predict<'py>(
     let effective_seed = seed_or_entropy(seed, random_seed)?;
     let id = unique_id(&id_prefix)?;
     // predict has no `options=`; a `Registered` target brings its own.
-    let backend_config = prepare::backend_config(py, selection, None)?;
+    let backend_config = prepare::backend_config(py, selection, None, Some(effective_seed))?;
     let config = prepare::execution_config(
         id.clone(),
         shots,

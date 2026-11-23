@@ -4,6 +4,8 @@ name: Docs
 # crates, and publish them to GitHub Pages: the site at the root, rustdoc under
 # /rust/. Nothing is committed; the site is generated here and deployed as a
 # Pages artifact. Pull requests run the build only, without deploying.
+# Built from main, so /rust/ is the API of main, which can be ahead of every
+# release; the API of each release is on docs.rs (the crates' `documentation`).
 on:
   push:
     branches: [main]
@@ -22,6 +24,10 @@ on:
       - "assets/**"
       - "CHANGELOG.md"
       - ".github/workflows/docs.yml"
+      # tests/docs/test_ci_recipes.py checks these against the justfile.
+      - ".github/workflows/ci.yml"
+      - "justfile"
+      - ".pre-commit-config.yaml"
   pull_request:
     paths:
       - "docs/**"
@@ -38,6 +44,10 @@ on:
       - "assets/**"
       - "CHANGELOG.md"
       - ".github/workflows/docs.yml"
+      # tests/docs/test_ci_recipes.py checks these against the justfile.
+      - ".github/workflows/ci.yml"
+      - "justfile"
+      - ".pre-commit-config.yaml"
   workflow_dispatch:
 
 # Read-only by default. Only the deploy job gets the OIDC/pages scopes that

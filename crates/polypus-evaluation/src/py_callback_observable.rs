@@ -34,8 +34,8 @@ pub struct PyCallbackObservable {
     /// worker threads.
     cost_fn: Py<PyAny>,
     /// Optional cross-generation memo `bitstring -> value`. `RwLock` (not a bare
-    /// map) because `QmlOracle` evaluates candidates from concurrent
-    /// `spawn_blocking` tasks, so the observable must be `Sync`. Present only
+    /// map) because a [`CostObservable`] is `Sync`: the oracle that holds it is
+    /// shared across threads, so `evaluate` can run concurrently. Present only
     /// when caching is enabled; the cost function must be pure for it to be sound.
     cache: Option<RwLock<HashMap<String, f64>>>,
 }

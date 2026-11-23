@@ -12,7 +12,7 @@ use super::qng::QNG;
 use super::rotosolve::Rotosolve;
 use super::spsa::Spsa;
 use crate::infrastructure::execution_config::random_id_bytes;
-use crate::infrastructure::EntropyError;
+use crate::infrastructure::{BackendConfig, EntropyError};
 
 /// Resolve the optimizer seed for `train` / `qml_train` (contract C-7).
 ///
@@ -43,6 +43,26 @@ pub(super) fn seed_or_entropy(
         None => draw().map_err(|e| {
             crate::exceptions::backend_error_to_pyerr(crate::infrastructure::BackendError::from(e))
         }),
+    }
+}
+
+/// Reject a resolved run seed the selected backend cannot take (contract C-7,
+/// #393): `2^63` or more on Aer or CUNQA, whose simulators take a signed 64-bit
+/// seed, raises `polypus.ConfigurationError` (a `ValueError`) instead of
+/// reaching Aer masked to 63 bits. A seed drawn from OS entropy is always
+/// below `2^63`, so only an explicit one can fail; `None` (no seed, `qmio`)
+/// passes. Called by [`backend_config`](super::prepare::backend_config) for the
+/// entry points that share it, and by native QML's own preparation in
+/// `qml.rs`, before any backend is built.
+pub(super) fn check_seed_for_backend(
+    seed: Option<u64>,
+    backend_config: &BackendConfig,
+) -> PyResult<()> {
+    match seed {
+        Some(seed) => backend_config
+            .check_seed(seed)
+            .map_err(|e| crate::exceptions::configuration_error(e.to_string())),
+        None => Ok(()),
     }
 }
 
@@ -317,5 +337,32 @@ mod tests {
         assert_eq!(run(None, Some(55)), run(None, Some(55)));
         // Omitted seed ⇒ (almost surely) different outcomes.
         assert_ne!(run(None, None), run(None, None));
+    }
+
+    /// A seed of 2^63 or more is a `polypus.ConfigurationError` (a
+    /// `ValueError`) on Aer and CUNQA, never masked; below it, with no seed, or
+    /// on the native backend, it passes (C-7, #393).
+    #[test]
+    fn check_seed_for_backend_rejects_two_to_the_63_on_aer_393() {
+        use crate::infrastructure::execution_config::AER_SEED_LIMIT;
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let aer = BackendConfig::Local {
+                sim_method: "automatic".to_string(),
+                noise_model: None,
+            };
+            let err = check_seed_for_backend(Some(AER_SEED_LIMIT), &aer)
+                .expect_err("2^63 is rejected on Aer");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            let configuration_error = crate::exceptions::configuration_error_type(py).unwrap();
+            assert!(err.is_instance(py, configuration_error.as_any()));
+            let message = err.value(py).to_string();
+            assert!(message.contains("9223372036854775808"), "{message}");
+            assert!(message.contains("backend=\"aer\""), "{message}");
+            check_seed_for_backend(Some(AER_SEED_LIMIT - 1), &aer).unwrap();
+            check_seed_for_backend(None, &aer).unwrap();
+            let native = BackendConfig::LocalNative { fusion: true };
+            check_seed_for_backend(Some(u64::MAX), &native).unwrap();
+        });
     }
 }

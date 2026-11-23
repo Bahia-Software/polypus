@@ -18,6 +18,7 @@ use pyo3::prelude::*;
 use super::backend_config::{build_backend_config, validate_id, validate_shots_and_qpus};
 use super::calibration;
 use super::options::OptionsArg;
+use super::seeds::check_seed_for_backend;
 use super::targets::{self, Selection};
 use crate::exceptions::configuration_error;
 use crate::infrastructure::{
@@ -222,16 +223,20 @@ pub(super) fn reject_foreign_circuit(
 }
 
 /// The [`BackendConfig`] the run goes to: `selection` resolved with `options`
-/// and mapped by [`build_backend_config`]. When that is the native simulator,
-/// its gate-parallel threshold is calibrated here, lazily, before the backend
-/// is built (#351); no other backend reads it, so they never pay for it.
+/// and mapped by [`build_backend_config`], with the run's resolved `seed`
+/// checked against it ([`check_seed_for_backend`]: below `2^63` on Aer and
+/// CUNQA, #393). When that is the native simulator, its gate-parallel
+/// threshold is calibrated here, lazily, before the backend is built (#351);
+/// no other backend reads it, so they never pay for it.
 pub(super) fn backend_config(
     py: Python<'_>,
     selection: Selection,
     options: Option<OptionsArg>,
+    seed: Option<u64>,
 ) -> PyResult<BackendConfig> {
     let target = selection.resolve(options.map(OptionsArg::into_inner))?;
     let config = build_backend_config(target)?;
+    check_seed_for_backend(seed, &config)?;
     if matches!(config, BackendConfig::LocalNative { .. }) {
         calibration::prepare_native_threshold(py)?;
     }
