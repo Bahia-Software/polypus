@@ -214,8 +214,15 @@ fn registry() -> &'static RwLock<HashMap<String, Arc<dyn BackendFactory>>> {
 /// eliminates editing Polypus.
 pub fn register_backend(name: impl Into<String>, factory: impl BackendFactory + 'static) {
     let name = name.into();
-    let mut map = registry().write().unwrap_or_else(|p| p.into_inner());
-    if map.insert(name.clone(), Arc::new(factory)).is_some() {
+    // Logged after the write lock is released: a log sink may block (the Python
+    // bridge waits for the GIL) while a thread holding the GIL waits for this lock
+    // in `is_registered` (docs/ENGINEERING.md §9).
+    let replaced = registry()
+        .write()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(name.clone(), Arc::new(factory))
+        .is_some();
+    if replaced {
         log::debug!("backend registry: replaced existing factory for '{name}'");
     } else {
         log::debug!("backend registry: registered backend '{name}'");

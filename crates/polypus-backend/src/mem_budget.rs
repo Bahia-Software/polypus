@@ -450,10 +450,20 @@ pub fn detect_memory_limit_with(read: impl Fn(&Path) -> Option<String>) -> Optio
 
 /// [`detect_memory_limit_with`] on the real filesystem, computed once per
 /// process so the budget cannot drift between the waves of one run.
+///
+/// The thread that ran the detection logs its result after `get_or_init` has
+/// returned, never inside it: a log sink may block (the Python bridge waits for
+/// the GIL), and a thread holding the GIL may be waiting on this initialiser
+/// (`backend_compatibility` reaches [`active_budget`] without releasing it), so
+/// a record emitted inside it could deadlock the two (docs/ENGINEERING.md §9).
 fn detected_memory_limit() -> Option<u64> {
     static DETECTED: OnceLock<Option<u64>> = OnceLock::new();
-    *DETECTED.get_or_init(|| {
-        let limit = detect_memory_limit_with(|p| std::fs::read_to_string(p).ok());
+    let mut detected_here = false;
+    let limit = *DETECTED.get_or_init(|| {
+        detected_here = true;
+        detect_memory_limit_with(|p| std::fs::read_to_string(p).ok())
+    });
+    if detected_here {
         match limit {
             Some(bytes) => log::debug!(
                 "detected a memory limit of {} (budget {} after the safety reserve)",
@@ -465,8 +475,8 @@ fn detected_memory_limit() -> Option<u64> {
                 format_bytes(DEFAULT_MEM_BUDGET_BYTES)
             ),
         }
-        limit
-    })
+    }
+    limit
 }
 
 /// `true` exactly once per `flag`: the gate that makes the invalid-value warning

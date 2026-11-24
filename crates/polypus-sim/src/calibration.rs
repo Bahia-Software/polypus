@@ -69,7 +69,8 @@
 //!
 //! Diagnostics go through the `log` facade (this crate never depends on
 //! `polypus-logger`) and stay silent until the application installs a sink —
-//! from Python, `polypus.init_logger()` once per process.
+//! from Python, `polypus.init_logger()` or `polypus.log_to_python()` once per
+//! process.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -514,8 +515,8 @@ fn measure_session_threshold() -> usize {
 /// measurement**: it does not read or write the cache (see [`calibrate_and_cache`])
 /// and, with the default parameters, takes well under `install.sh`'s ~10s window.
 ///
-/// Diagnostics go through the `log` facade and need `polypus.init_logger()` to
-/// be visible.
+/// Diagnostics go through the `log` facade and need a log sink to be visible
+/// (from Python, `polypus.init_logger()` or `polypus.log_to_python()`).
 pub fn calibrate_parallel_threshold() -> CalibrationResult {
     let start = Instant::now();
     let mut thresholds: Vec<usize> = (0..CALIBRATION_SESSIONS)
@@ -565,22 +566,43 @@ fn cache_file() -> Option<PathBuf> {
 /// out of range ([`is_valid_threshold`], e.g. a tampered `0`) is dropped, so its
 /// key is a cache miss, and the next write for any key drops it from disk.
 fn read_cache_from(path: &Path) -> Option<CachedCalibration> {
-    let bytes = std::fs::read(path).ok()?;
-    let mut cached: CachedCalibration = serde_json::from_slice(&bytes).ok()?;
+    let (cached, dropped) = read_cache_quietly(path);
+    warn_dropped_entries(&dropped);
+    cached
+}
+
+/// [`read_cache_from`] without its warnings: the dropped out-of-range entries
+/// (`key`, `threshold`) come back instead, for a caller that must emit them
+/// only after leaving a one-time initialiser ([`resolution`]).
+fn read_cache_quietly(path: &Path) -> (Option<CachedCalibration>, Vec<(String, usize)>) {
+    let mut dropped = Vec::new();
+    let Some(bytes) = std::fs::read(path).ok() else {
+        return (None, dropped);
+    };
+    let Some(mut cached) = serde_json::from_slice::<CachedCalibration>(&bytes).ok() else {
+        return (None, dropped);
+    };
     if cached.schema != CACHE_SCHEMA {
-        return None;
+        return (None, dropped);
     }
     cached.entries.retain(|key, &mut threshold| {
         let valid = is_valid_threshold(threshold);
         if !valid {
-            log::warn!(
-                "ignoring out-of-range cached gate-parallel threshold {threshold} for cache \
-                 key {key:?}"
-            );
+            dropped.push((key.clone(), threshold));
         }
         valid
     });
-    Some(cached)
+    (Some(cached), dropped)
+}
+
+/// The warning for each cache entry [`read_cache_quietly`] dropped.
+fn warn_dropped_entries(dropped: &[(String, usize)]) {
+    for (key, threshold) in dropped {
+        log::warn!(
+            "ignoring out-of-range cached gate-parallel threshold {threshold} for cache \
+             key {key:?}"
+        );
+    }
 }
 
 /// Serialise `cached` to `path` **atomically**. The parent directory must
@@ -837,6 +859,11 @@ fn persist_entry_with(
         std::fs::create_dir_all(parent)?;
     }
     // Held until the end of this function; dropping it releases the lock.
+    // The records emitted while it is held (an out-of-range entry, a temp file
+    // left behind) are the exception docs/ENGINEERING.md §9 allows: only
+    // `calibrate_and_cache` waits for this lock, the `polypus` bindings call it
+    // with the GIL released, and the wait gives up after `lock_timeout`, so a
+    // sink that blocks on the GIL cannot close a cycle through it.
     let _lock = acquire_cache_lock(&lock_path_for(path), lock_timeout, clock);
     let cached = merged_cache(read_cache_from(path), key, threshold);
     write_cache_to(path, &cached)
@@ -974,62 +1001,114 @@ static RESOLUTION: OnceLock<Resolution> = OnceLock::new();
 /// surprise stall and a cache miss degrades safely to today's behaviour. The
 /// once-per-process guard mirrors the `LOGGER_INSTALLED` guard in the bindings —
 /// resolve once, never per circuit or per gate. The `log` records here are only
-/// visible with `polypus.init_logger()`; the bindings additionally surface a
-/// fallback through Python's `warnings`, which is visible by default.
+/// visible once a log sink is installed (`polypus.init_logger()` or
+/// `polypus.log_to_python()`); the bindings additionally surface a fallback
+/// through Python's `warnings`, which is visible by default.
+///
+/// The records go out after `get_or_init` has returned, never inside it: a log
+/// sink may block (the Python bridge waits for the GIL), and a thread holding
+/// the GIL may be waiting on this initialiser (the bindings'
+/// `warn_if_using_default_threshold`), so a record emitted inside it could
+/// deadlock the two (docs/ENGINEERING.md §9). Only the thread that ran the
+/// initialiser emits them, so they still appear once per process.
 fn resolution() -> Resolution {
-    *RESOLUTION.get_or_init(|| {
-        let current = rayon::current_num_threads();
-        let key = hardware_key(current);
-        match decide(read_cache(), &key) {
-            Decision::Cached(threshold) => {
-                log::debug!(
-                    "using cached gate-parallel threshold {threshold} qubit(s) for \
-                     {current} thread(s) (cache key {key:?})"
-                );
-                Resolution {
-                    threshold,
-                    fallback: None,
-                }
-            }
-            Decision::SizeUncalibrated => {
-                // Routine on a shared node or shared $HOME: other thread counts
-                // or nodes are calibrated, this one is simply new. Informational
-                // only — no warnable fallback, so the bindings raise no Python
-                // warning for it.
-                log::info!(
-                    "no gate-parallel calibration cached for {current} thread(s) on this \
-                     hardware (cache key {key:?}; other keys are calibrated); using the default \
-                     threshold {DEFAULT_PARALLEL_THRESHOLD}. Run \
-                     polypus.calibrate_parallel_threshold() to tune this one too (requires \
-                     polypus.init_logger() to be visible)."
-                );
-                Resolution {
-                    threshold: DEFAULT_PARALLEL_THRESHOLD,
-                    fallback: None,
-                }
-            }
-            Decision::Fallback(reason) => {
-                match reason {
-                    FallbackReason::HardwareChanged { cached_threads } => log::warn!(
-                        "gate-parallel calibration was made for {cached_threads} thread(s) but \
-                         this machine has {current}; using the default threshold \
-                         {DEFAULT_PARALLEL_THRESHOLD}. Recalibrate with \
-                         polypus.calibrate_parallel_threshold(force=True)."
-                    ),
-                    FallbackReason::NotCalibrated => log::warn!(
-                        "no gate-parallel calibration cached; using the default threshold \
-                         {DEFAULT_PARALLEL_THRESHOLD}. Run install.sh or \
-                         polypus.calibrate_parallel_threshold() to tune it for this machine \
-                         (requires polypus.init_logger() to be visible)."
-                    ),
-                }
-                Resolution {
-                    threshold: DEFAULT_PARALLEL_THRESHOLD,
-                    fallback: Some(reason),
-                }
-            }
+    let mut announcement = None;
+    let resolved = *RESOLUTION.get_or_init(|| {
+        let (resolved, records) = resolve();
+        announcement = Some(records);
+        resolved
+    });
+    if let Some(records) = announcement {
+        records.emit();
+    }
+    resolved
+}
+
+/// The records of one [`resolve`], emitted by [`resolution`] once it has left
+/// the one-time initialiser.
+struct ResolutionRecords {
+    /// Out-of-range cache entries the read dropped.
+    dropped: Vec<(String, usize)>,
+    /// Rayon threads in this process.
+    current: usize,
+    /// This machine's [`cache_key`].
+    key: String,
+    /// What [`decide`] chose.
+    decision: Decision,
+}
+
+impl ResolutionRecords {
+    fn emit(self) {
+        let Self {
+            dropped,
+            current,
+            key,
+            decision,
+        } = self;
+        warn_dropped_entries(&dropped);
+        match decision {
+            Decision::Cached(threshold) => log::debug!(
+                "using cached gate-parallel threshold {threshold} qubit(s) for \
+                 {current} thread(s) (cache key {key:?})"
+            ),
+            // Routine on a shared node or shared $HOME: other thread counts or
+            // nodes are calibrated, this one is simply new. Informational only —
+            // no warnable fallback, so the bindings raise no Python warning for it.
+            Decision::SizeUncalibrated => log::info!(
+                "no gate-parallel calibration cached for {current} thread(s) on this \
+                 hardware (cache key {key:?}; other keys are calibrated); using the default \
+                 threshold {DEFAULT_PARALLEL_THRESHOLD}. Run \
+                 polypus.calibrate_parallel_threshold() to tune this one too (visible only \
+                 with a log sink: polypus.init_logger() or polypus.log_to_python())."
+            ),
+            Decision::Fallback(FallbackReason::HardwareChanged { cached_threads }) => log::warn!(
+                "gate-parallel calibration was made for {cached_threads} thread(s) but \
+                 this machine has {current}; using the default threshold \
+                 {DEFAULT_PARALLEL_THRESHOLD}. Recalibrate with \
+                 polypus.calibrate_parallel_threshold(force=True)."
+            ),
+            Decision::Fallback(FallbackReason::NotCalibrated) => log::warn!(
+                "no gate-parallel calibration cached; using the default threshold \
+                 {DEFAULT_PARALLEL_THRESHOLD}. Run install.sh or \
+                 polypus.calibrate_parallel_threshold() to tune it for this machine \
+                 (visible only with a log sink: polypus.init_logger() or \
+                 polypus.log_to_python())."
+            ),
         }
-    })
+    }
+}
+
+/// Read the cache and decide the threshold, without logging: [`resolution`]
+/// runs this inside its one-time initialiser and emits the records after.
+fn resolve() -> (Resolution, ResolutionRecords) {
+    let current = rayon::current_num_threads();
+    let key = hardware_key(current);
+    let (cache, dropped) = match cache_file() {
+        Some(path) => read_cache_quietly(&path),
+        None => (None, Vec::new()),
+    };
+    let decision = decide(cache, &key);
+    let resolved = match decision {
+        Decision::Cached(threshold) => Resolution {
+            threshold,
+            fallback: None,
+        },
+        Decision::SizeUncalibrated => Resolution {
+            threshold: DEFAULT_PARALLEL_THRESHOLD,
+            fallback: None,
+        },
+        Decision::Fallback(reason) => Resolution {
+            threshold: DEFAULT_PARALLEL_THRESHOLD,
+            fallback: Some(reason),
+        },
+    };
+    let records = ResolutionRecords {
+        dropped,
+        current,
+        key,
+        decision,
+    };
+    (resolved, records)
 }
 
 /// Threshold the default [`StatevectorSimulator`](crate::StatevectorSimulator)
