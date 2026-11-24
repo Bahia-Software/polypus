@@ -41,7 +41,7 @@ use crate::layers::{
     IqpEncoder, Layer, PoolBlock, PoolLayer, RotationAxis, SimplifiedTwoDesignAnsatz,
     StronglyEntanglingAnsatz,
 };
-use crate::observables::{BitstringWeight, Pauli, ResolvedObservable, ResolvedPauliString};
+use crate::observables::{CircuitReading, Pauli, ResolvedObservable, ResolvedPauliString};
 use crate::readout::{Decision, Readout, ResolvedReadout};
 
 /// The accumulator threaded through a model's layers, in order, during
@@ -683,15 +683,14 @@ impl CompiledModel {
     }
 
     /// The single implementation behind both readers, generic over the weight
-    /// type via [`BitstringWeight`].
-    pub(crate) fn expectations_from_weighted<W: BitstringWeight>(
+    /// type via [`CircuitReading`] (a weight map, or its expectations).
+    pub(crate) fn expectations_from_weighted<R: CircuitReading>(
         &self,
-        weights: &HashMap<String, W>,
+        weights: &R,
     ) -> Result<Vec<f64>, QmlError> {
-        self.resolved_readout
-            .observables()
-            .iter()
-            .map(|observable| W::observable_expectation(observable, weights))
+        let observables = self.resolved_readout.observables();
+        (0..observables.len())
+            .map(|index| weights.observable_expectation(observables, index))
             .collect()
     }
 

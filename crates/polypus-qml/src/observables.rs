@@ -269,6 +269,61 @@ impl BitstringWeight for f64 {
     }
 }
 
+/// What one circuit's run is read as (issue #645): a weight map (finite-shot
+/// counts or exact probabilities), from which each readout observable's
+/// expectation is estimated, or the expectations already taken from such a map,
+/// in readout order (a `Vec<f64>`). The exact native path reads each circuit's
+/// map as soon as it is built and keeps only the expectations, so the higher
+/// layers ([`QmlProblem`](crate::QmlProblem) fitness, gradients and adjoint
+/// runs, the [`ExpectationJacobian`](crate::ExpectationJacobian)) take either.
+/// An expectation is computed by the same estimator from the same map either
+/// way, so the two readings give the same values bit for bit.
+pub(crate) trait CircuitReading {
+    /// `⟨observables[index]⟩` for this circuit.
+    ///
+    /// # Errors
+    ///
+    /// The estimator's errors for a map; for a vector of expectations shorter
+    /// than `index + 1` (an `index` outside `observables` too),
+    /// [`QmlError::CountsLengthMismatch`].
+    fn observable_expectation(
+        &self,
+        observables: &[ResolvedObservable],
+        index: usize,
+    ) -> Result<f64, QmlError>;
+}
+
+impl<W: BitstringWeight> CircuitReading for HashMap<String, W> {
+    fn observable_expectation(
+        &self,
+        observables: &[ResolvedObservable],
+        index: usize,
+    ) -> Result<f64, QmlError> {
+        let observable = observables
+            .get(index)
+            .ok_or(QmlError::CountsLengthMismatch {
+                expected: index + 1,
+                got: observables.len(),
+            })?;
+        W::observable_expectation(observable, self)
+    }
+}
+
+impl CircuitReading for Vec<f64> {
+    fn observable_expectation(
+        &self,
+        _observables: &[ResolvedObservable],
+        index: usize,
+    ) -> Result<f64, QmlError> {
+        self.get(index)
+            .copied()
+            .ok_or(QmlError::CountsLengthMismatch {
+                expected: index + 1,
+                got: self.len(),
+            })
+    }
+}
+
 /// Estimate `⟨Z_S⟩` from a `weights` map for a resolved Pauli string `S` — the
 /// single implementation shared by the finite-shot ([`expectation_from_counts`],
 /// `u64`) and exact ([`expectation_from_probabilities`], `f64`) estimators, which

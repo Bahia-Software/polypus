@@ -2498,8 +2498,30 @@ batching and distribution are the oracle's concern.
 - **(f) The oracle.** The `QmlOracle` scores a native problem
   (`QmlSource::Native`) through the same candidate windows as the Qiskit form:
   one finite fitness per candidate (C-5), sampled through the planner or, in
-  exact mode, from `NativeStatevectorBackend::run_circuits_exact` (C-3's exact
-  probabilities, same memory budget and windows). It is also the run's
+  exact mode, from `NativeStatevectorBackend::run_circuits_exact_with` (C-3's
+  exact probabilities, same memory budget and windows). In exact mode each
+  circuit's probability map is read as soon as it is built, by
+  `QmlProblem::read_probabilities` (`⟨O₀⟩` for a scalar loss, every readout
+  observable for the categorical one), and dropped: fitness, the shift
+  gradient and the adjoint runs come from those readings
+  (`fitness_from_expectations`, `gradient_from_expectations`,
+  `adjoint_runs_from_expectations`), so no map is held beyond the circuits in
+  flight (#645). Each reading is computed by the estimator the
+  `*_from_probabilities` readers use, from the same map, so every value is
+  theirs bit for bit; enforced by
+  `readings_of_the_maps_give_what_the_maps_give_bit_for_bit` in
+  `crates/polypus-qml/src/problem.rs` and the oracle's exact tests, which
+  compare with the map readers. The exact `qml.expval`, `qml.jacobian` and
+  `qml.vjp` read their circuits the same way (`ExpectationJacobian::jacobian_from_expectations`;
+  `exact_primitives_read_expectations_that_match_the_maps_bit_for_bit` in
+  `crates/polypus/src/bindings/qml.rs`, and, in
+  `crates/polypus-qml/tests/jacobian.rs`, every Jacobian `crate_jacobian`
+  computes and every block of `blocks_concatenate_to_the_whole_jacobian`);
+  `TrainedModel.predict(exact=True)` reads each row's decision the same way
+  (`exact_predictions_are_the_maps_decisions_bit_for_bit`).
+  `TrainedModel.run(exact=True)` and the exact kernel, which return or read
+  the probabilities themselves, keep the maps (`run_circuits_exact`). It is
+  also the run's
   `GradientOracle`, for Adam. Its exact gradient is the adjoint one ((e)):
   `θ`'s base circuits run exactly, giving the value and the chain rule, then
   one adjoint run per sample on `NativeStatevectorBackend::run_adjoint`, which

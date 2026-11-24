@@ -378,22 +378,60 @@ impl NativeStatevectorBackend {
         qcs: &[BoundCircuit],
         config: &RunParams,
     ) -> Result<Vec<HashMap<String, f64>>, BackendError> {
+        self.run_circuits_exact_with(qcs, config, Ok::<_, BackendError>)
+    }
+
+    /// [`run_circuits_exact`](Self::run_circuits_exact), handing each
+    /// circuit's map to `read` as soon as it is built, on the thread that
+    /// simulated it, and keeping only what `read` returns: the map is dropped
+    /// right after (issue #645). A caller that reduces each circuit to a few
+    /// numbers (the expectations a QML gradient combines) thus holds no map
+    /// beyond the circuits in flight, instead of one per circuit of the call.
+    ///
+    /// The values `read` sees are those `run_circuits_exact` returns, bit for
+    /// bit, and its results come back in submission order. On a failure, an
+    /// error of the first window that fails is returned (any one of that
+    /// window's errors, from the backend or from `read`: the circuits of a
+    /// window run in parallel); the rest of the window then stops as
+    /// `run_circuits_exact` does, and no later window runs.
+    ///
+    /// # Errors
+    ///
+    /// The backend's errors as for `run_circuits_exact`, converted with
+    /// `E::from`, and whatever `read` returns.
+    pub fn run_circuits_exact_with<T, E, F>(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &RunParams,
+        read: F,
+    ) -> Result<Vec<T>, E>
+    where
+        T: Send,
+        E: From<BackendError> + Send,
+        F: Fn(HashMap<String, f64>) -> Result<T, E> + Sync,
+    {
         let widest = representative_qubits(qcs);
         self.check_memory(widest)?;
         let cap = max_statevector_concurrency(widest, rayon::current_num_threads());
-        self.run_exact_with_cap(qcs, config, cap)
+        self.run_exact_with_cap(qcs, config, cap, &read)
     }
 
-    /// [`run_circuits_exact`](Self::run_circuits_exact) holding at most `cap`
-    /// statevectors at once: the windowing of
+    /// [`run_circuits_exact_with`](Self::run_circuits_exact_with) holding at
+    /// most `cap` statevectors at once: the windowing of
     /// [`run_batch_with_cap`](Self::run_batch_with_cap) without the seeds. A
     /// pure resource bound, so the result is the same for every `cap`.
-    fn run_exact_with_cap(
+    fn run_exact_with_cap<T, E, F>(
         &self,
         qcs: &[BoundCircuit],
         config: &RunParams,
         cap: usize,
-    ) -> Result<Vec<HashMap<String, f64>>, BackendError> {
+        read: &F,
+    ) -> Result<Vec<T>, E>
+    where
+        T: Send,
+        E: From<BackendError> + Send,
+        F: Fn(HashMap<String, f64>) -> Result<T, E> + Sync,
+    {
         let opts = TranspileOptions {
             level: config.opt_level,
         };
@@ -409,9 +447,9 @@ impl NativeStatevectorBackend {
         let mut out = Vec::with_capacity(qcs.len());
         for chunk in qcs.chunks(window) {
             let pt = self.gate_parallel_threshold(chunk.len(), threads);
-            let block: Vec<HashMap<String, f64>> = chunk
+            let block: Vec<T> = chunk
                 .par_iter()
-                .map(|qc| self.simulate_one_exact(qc, &opts, pt))
+                .map(|qc| read(self.simulate_one_exact(qc, &opts, pt)?))
                 .collect::<Result<_, _>>()?;
             out.extend(block);
         }
@@ -2840,15 +2878,92 @@ mod tests {
         let backend = NativeStatevectorBackend::new(0);
         let params = config_with(OptLevel::default()).run_params();
         let unbounded = backend
-            .run_exact_with_cap(&batch, &params, usize::MAX)
+            .run_exact_with_cap(&batch, &params, usize::MAX, &Ok::<_, BackendError>)
             .unwrap();
         for cap in [1, 2, 3] {
             assert_eq!(
-                backend.run_exact_with_cap(&batch, &params, cap).unwrap(),
+                backend
+                    .run_exact_with_cap(&batch, &params, cap, &Ok::<_, BackendError>)
+                    .unwrap(),
                 unbounded,
                 "cap {cap}"
             );
         }
+    }
+
+    #[test]
+    fn exact_with_reads_each_map_in_submission_order() {
+        let batch = vec![
+            BoundCircuit::Native(skewed3()),
+            BoundCircuit::Native(bell()),
+            BoundCircuit::Native(skewed3()),
+        ];
+        let backend = NativeStatevectorBackend::new(0);
+        let params = config_with(OptLevel::default()).run_params();
+        let maps = backend.run_circuits_exact(&batch, &params).unwrap();
+        // What `read` sees is what `run_circuits_exact` returns, bit for bit.
+        let seen = backend
+            .run_circuits_exact_with(&batch, &params, |map| {
+                let mut entries: Vec<(String, u64)> =
+                    map.into_iter().map(|(k, p)| (k, p.to_bits())).collect();
+                entries.sort();
+                Ok::<_, BackendError>(entries)
+            })
+            .unwrap();
+        assert_eq!(seen.len(), maps.len());
+        for (entries, map) in seen.iter().zip(&maps) {
+            assert_eq!(entries.len(), map.len());
+            for (key, bits) in entries {
+                assert_eq!(map[key].to_bits(), *bits, "{key}");
+            }
+        }
+        // Only what `read` returns is kept, in submission order.
+        let sizes = backend
+            .run_circuits_exact_with(&batch, &params, |map| Ok::<_, BackendError>(map.len()))
+            .unwrap();
+        assert_eq!(sizes, vec![8, 2, 8]);
+    }
+
+    #[test]
+    fn exact_with_returns_the_error_read_gives() {
+        #[derive(Debug, PartialEq)]
+        enum ReadError {
+            Backend(String),
+            Refused(usize),
+        }
+        impl From<BackendError> for ReadError {
+            fn from(e: BackendError) -> Self {
+                ReadError::Backend(e.to_string())
+            }
+        }
+        let batch = vec![
+            BoundCircuit::Native(bell()),
+            BoundCircuit::Native(skewed3()),
+        ];
+        let backend = NativeStatevectorBackend::new(0);
+        let params = config_with(OptLevel::default()).run_params();
+        let result = backend.run_circuits_exact_with(&batch, &params, |map| {
+            if map.len() == 8 {
+                Err(ReadError::Refused(map.len()))
+            } else {
+                Ok(map.len())
+            }
+        });
+        assert_eq!(result, Err(ReadError::Refused(8)));
+        // A backend error reaches the caller through `E::from`.
+        let measured = ParameterizedCircuit::new(2)
+            .h(0)
+            .measure(0, 0)
+            .assign_parameters(&[])
+            .unwrap();
+        let result =
+            backend.run_circuits_exact_with(&[BoundCircuit::Native(measured)], &params, |map| {
+                Ok::<_, ReadError>(map.len())
+            });
+        assert!(
+            matches!(&result, Err(ReadError::Backend(m)) if m.contains("full-register")),
+            "{result:?}"
+        );
     }
 
     #[test]

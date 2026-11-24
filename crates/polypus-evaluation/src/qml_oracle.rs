@@ -11,7 +11,6 @@ use polypus_optimizers::GradientOracle;
 use polypus_orchestration::{OracleFactory, Oracles, Resources};
 use polypus_qml::{minibatch_indices, QmlError, QmlProblem};
 use pyo3::prelude::*;
-use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
@@ -479,9 +478,9 @@ impl QmlOracle {
                     },
                     |bound, n_candidates| match exact {
                         Some(native) => {
-                            let probabilities = self.run_exact(native, bound)?;
-                            per_candidate(n_candidates, n, &probabilities, |weights| {
-                                problem.fitness_from_probabilities(weights)
+                            let readings = self.run_exact(native, &problem, bound)?;
+                            per_candidate(n_candidates, n, &readings, |readings| {
+                                problem.fitness_from_expectations(readings)
                             })
                         }
                         None => {
@@ -716,24 +715,35 @@ impl QmlOracle {
     }
 
     /// Run `bound` on the exact native backend, after the cancellation and
-    /// interrupt checks the planner would make between waves.
+    /// interrupt checks the planner would make between waves, and read each
+    /// circuit with `problem`'s [`read_probabilities`] as soon as its map is
+    /// built: only those few numbers are kept, never a map beyond the circuits
+    /// in flight (issue #645). Hand them to the `*_from_expectations` readers,
+    /// which give what the maps would, bit for bit.
+    ///
+    /// [`read_probabilities`]: QmlProblem::read_probabilities
     fn run_exact(
         &self,
         native: &NativeStatevectorBackend,
+        problem: &QmlProblem,
         bound: &[BoundCircuit],
-    ) -> Result<Vec<HashMap<String, f64>>, EvaluationError> {
+    ) -> Result<Vec<Vec<f64>>, EvaluationError> {
         if self.cancel.is_cancelled() {
             return Err(InfrastructureError::Cancelled.into());
         }
         self.cancel.poll_interrupt()?;
-        let probabilities = native.run_circuits_exact(bound, &self.config)?;
-        if probabilities.len() != bound.len() {
+        let readings = native.run_circuits_exact_with(bound, &self.config, |probabilities| {
+            problem
+                .read_probabilities(&probabilities)
+                .map_err(EvaluationError::from)
+        })?;
+        if readings.len() != bound.len() {
             return Err(EvaluationError::WrongLength {
                 expected: bound.len(),
-                got: probabilities.len(),
+                got: readings.len(),
             });
         }
-        Ok(probabilities)
+        Ok(readings)
     }
 
     /// Fallible core of [`GradientOracle::gradient_batch`] and
@@ -805,9 +815,9 @@ impl QmlOracle {
         theta: &[f64],
         base: Vec<ConcreteCircuit>,
     ) -> Result<(f64, Vec<f64>), EvaluationError> {
-        let probabilities = self.run_exact(native, &native_circuits(base))?;
-        let value = problem.fitness_from_probabilities(&probabilities)?;
-        let runs = problem.adjoint_runs(theta, &probabilities)?;
+        let readings = self.run_exact(native, problem, &native_circuits(base))?;
+        let value = problem.fitness_from_expectations(&readings)?;
+        let runs = problem.adjoint_runs_from_expectations(theta, &readings)?;
         if self.cancel.is_cancelled() {
             return Err(InfrastructureError::Cancelled.into());
         }
@@ -854,11 +864,11 @@ impl QmlOracle {
     ) -> Result<(f64, Vec<f64>), EvaluationError> {
         problem.check_shift_fallback(width)?;
         let bound = native_circuits(problem.gradient_circuits(theta)?);
-        let probabilities = self.run_exact(native, &bound)?;
+        let readings = self.run_exact(native, problem, &bound)?;
         let n = problem.num_circuits();
         Ok((
-            problem.fitness_from_probabilities(&probabilities[..n])?,
-            problem.gradient_from_probabilities(&probabilities)?,
+            problem.fitness_from_expectations(&readings[..n])?,
+            problem.gradient_from_expectations(&readings)?,
         ))
     }
 }
@@ -2113,6 +2123,21 @@ class Bound:
             .unwrap();
         assert_eq!(adjoint_value, shift_value);
         assert_close_to_the_shift(&adjoint, &shift);
+        // The shift, read circuit by circuit (#645), is what the maps give, bit
+        // for bit (`{:?}` prints every `f64` exactly, a `-0.0` included).
+        let maps = exact_probabilities(problem.gradient_circuits(theta).unwrap());
+        let n = problem.num_circuits();
+        assert_eq!(
+            format!("{shift_value:?}"),
+            format!(
+                "{:?}",
+                problem.fitness_from_probabilities(&maps[..n]).unwrap()
+            )
+        );
+        assert_eq!(
+            format!("{shift:?}"),
+            format!("{:?}", shift_gradient(&problem, theta))
+        );
         // And the oracle, whose budget holds two here, takes the adjoint.
         assert_eq!(
             oracle.value_and_gradient(theta, problem.num_params()),
