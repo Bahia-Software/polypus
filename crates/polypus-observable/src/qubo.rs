@@ -283,6 +283,14 @@ mod tests {
             0.0,
             1.0
         )));
+        // A QUBO's message names its own sum: only the Ising one speaks of an
+        // expanded QUBO (#650).
+        let own = QuboObservable::new(1, vec![(0, 1e300)], vec![], 0.0, 1.0);
+        assert!(
+            matches!(&own, Err(ObservableError::Invalid(m))
+                if m.starts_with("Σ|c|·|scale| = 1e300 exceeds") && !m.contains("expanded")),
+            "{own:?}"
+        );
         // Below: every coefficient is within the bound (about 4.9e288) on its
         // own, and only the sum exceeds it, so each case fails if its part is
         // left out of the check.

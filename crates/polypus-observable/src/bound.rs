@@ -41,13 +41,26 @@ pub(crate) fn check_weight_bound(
     coefficients: impl Iterator<Item = f64>,
     scale: f64,
 ) -> Result<(), ObservableError> {
+    check_weight_bound_of("Σ|c|·|scale|", "", coefficients, scale)
+}
+
+/// [`check_weight_bound`], naming the sum `sum` in its error and ending the
+/// error with `note`: for an observable that checks coefficients the caller
+/// did not write, such as [`IsingObservable`](crate::IsingObservable)'s
+/// expanded QUBO (issue #650).
+pub(crate) fn check_weight_bound_of(
+    sum: &str,
+    note: &str,
+    coefficients: impl Iterator<Item = f64>,
+    scale: f64,
+) -> Result<(), ObservableError> {
     let bound = coefficients.fold(0.0, |sum, c| sum + c.abs()) * scale.abs();
     if bound <= MAX_WEIGHT_BOUND {
         Ok(())
     } else {
         Err(ObservableError::Invalid(format!(
-            "Σ|c|·|scale| = {bound:e} exceeds {MAX_WEIGHT_BOUND:e}: a value or \
-             a weighted mean of counts could overflow"
+            "{sum} = {bound:e} exceeds {MAX_WEIGHT_BOUND:e}: a value or a \
+             weighted mean of counts could overflow{note}"
         )))
     }
 }
@@ -73,6 +86,22 @@ mod tests {
         assert!(check_weight_bound([b / 2.0, -b / 2.0].into_iter(), 1.0).is_ok());
         assert!(check_weight_bound([b / 2.0, -b / 2.0].into_iter(), 2.0).is_err());
         assert!(check_weight_bound(std::iter::empty(), f64::MAX).is_ok());
+    }
+
+    #[test]
+    fn the_message_names_the_sum_and_ends_with_the_note() {
+        let plain = check_weight_bound([f64::MAX].into_iter(), 1.0);
+        assert!(
+            matches!(&plain, Err(ObservableError::Invalid(m))
+                if m.starts_with("Σ|c|·|scale| = ") && m.ends_with("could overflow")),
+            "{plain:?}"
+        );
+        let named = check_weight_bound_of("the sum", " (a note)", [f64::MAX].into_iter(), 1.0);
+        assert!(
+            matches!(&named, Err(ObservableError::Invalid(m))
+                if m.starts_with("the sum = ") && m.ends_with("could overflow (a note)")),
+            "{named:?}"
+        );
     }
 
     #[test]
