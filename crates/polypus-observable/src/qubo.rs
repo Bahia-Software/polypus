@@ -275,14 +275,21 @@ mod tests {
     fn coefficient_sums_that_could_overflow_are_rejected() {
         let exceeds = |r: Result<QuboObservable, ObservableError>| matches!(&r, Err(ObservableError::Invalid(m)) if m.contains("exceeds"));
         // The example of #625, which used to evaluate to Ok(inf) on "11"
-        // (here each coefficient is above the bound on its own, too).
-        assert!(exceeds(QuboObservable::new(
-            2,
-            vec![(0, 1e308), (1, 1e308)],
-            vec![],
-            0.0,
-            1.0
-        )));
+        // (here each coefficient is above the bound on its own, too). Its
+        // Σ|c| overflows f64, which is reported before the scale multiplies
+        // it (#650): with scale 0 the product would be NaN. Repeated entries
+        // of one variable add up as given, the same way.
+        for linear in [vec![(0, 1e308), (1, 1e308)], vec![(0, 1e308), (0, 1e308)]] {
+            for scale in [1.0, 1e-300, 0.0] {
+                let result = QuboObservable::new(2, linear.clone(), vec![], 0.0, scale);
+                assert!(
+                    matches!(&result, Err(ObservableError::Invalid(m))
+                        if m == "Σ|c| overflows f64: a value or a weighted mean of \
+                                 counts could overflow"),
+                    "{result:?}"
+                );
+            }
+        }
         // A QUBO's message names its own sum: only the Ising one speaks of an
         // expanded QUBO (#650).
         let own = QuboObservable::new(1, vec![(0, 1e300)], vec![], 0.0, 1.0);
