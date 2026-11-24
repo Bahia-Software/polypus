@@ -104,6 +104,42 @@ result = polypus.run_quantum_circuit(bell, shots=1000, target=polypus.Native(), 
 
 `run_quantum_circuit` takes the same keyword-only `trace` argument as `train`, a path (`str` or `os.PathLike`) of a new file for the run's call trace (contract C-12), and follows `POLYPUS_CALL_TRACE` and `POLYPUS_CALL_TRACE_MAX_MB` as `train` does, its file in the variable's directory being named after the run's effective id, `RunResult.id`; see [Tracing the calls of a run](training.md#tracing-the-calls-of-a-run). The header line has `"flow": "run_circuit"`, `null` as `method` and `dims`, the run's `id` and its effective `seed` (`null` on `"qmio"`). The run is one `batch` line, with `"op": "execute_replicas"`, `n` equal to 1 and the run's `shots`, written after one `wave` line per call to the backend. With `n_qpus=1` that is one `run_circuits` call with every shot. With `n_qpus > 1` the shots are split into one replica per QPU, run by `run_shots_distributed` calls, and each `wave` line lists in `replicas` the shots of each replica it ran; over all the waves they add up to `shots`.
 
+## Logging
+
+Polypus's Rust core logs through Rust's `log` facade: progress, fallbacks, failures it recovers from. Nothing is emitted until a sink is installed, once per process, by one of two calls:
+
+- `polypus.init_logger(...)` writes the records with Polypus's own sink, to a file (the default) or to stdout, with its own level and format.
+- `polypus.log_to_python()` hands every record to Python's `logging`, so you configure Polypus's records like any library's.
+
+Only one of the two can be installed in a process: whichever is called second is a no-op with a `UserWarning`. Restart the interpreter or kernel to switch.
+
+```python
+import logging
+
+import polypus
+
+logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.getLogger("polypus").setLevel(logging.DEBUG)  # optimizer progress is DEBUG
+polypus.log_to_python()
+```
+
+Each record goes to the logger named after the Rust module that emitted it, under `polypus`, so `logging.getLogger("polypus")` controls them all:
+
+| Rust module | Python logger |
+|---|---|
+| `polypus_optimizers::util` | `polypus.optimizers.util` |
+| `polypus_sim::calibration` | `polypus.sim.calibration` |
+| `polypus::bindings` | `polypus.bindings` |
+| `zeromq::codec` (a dependency, with the `qmio` feature) | `polypus.zeromq.codec` |
+
+A record's `pathname` and `lineno` are the Rust source file and line, and its message arrives already formatted, so a `%` in it is kept as is. Rust's `TRACE` level is `5`, below `logging.DEBUG`; the published wheel emits nothing below `DEBUG`. `log_to_python()` configures no handler: with none on `polypus` or above it, Python's defaults apply, which print warnings and errors to stderr. The Python-side helpers in `polypus_python` log to their own `polypus_python` logger.
+
+Which levels each `polypus` logger lets through is read from Python when `log_to_python()` runs and again at the start of every call that runs Rust code with the GIL released: `train`, `run_quantum_circuit`, `statevector`, `qml.train`, `qml.predict`, `Model.fit`, `TrainedModel.predict` and `run`, `qml.expval`, `qml.jacobian`, `qml.vjp`, `qml.kernel_matrix` and `calibrate_parallel_threshold`. A level lowered while one of them runs, from another thread, takes effect from the next call on; a level raised applies at once, since each record is checked again against the live logger before it is handled.
+
+A record emitted while the interpreter cannot be reached, because it is shutting down (a run still going on a daemon thread) or in a garbage-collection pass, cannot go to Python. An `ERROR` or `WARNING` record is then written to stderr as one line, `polypus: <LEVEL> <logger name>: <message>`; anything less severe is dropped.
+
+With a build that has the `qmio` feature (not the published wheel), closing a QMIO backend can hang while `log_to_python()` is installed: the close waits for threads of the QMIO client that may be waiting to log. Use `init_logger` with QMIO.
+
 ## Errors
 
 All Polypus exceptions derive from `polypus.PolypusError`.

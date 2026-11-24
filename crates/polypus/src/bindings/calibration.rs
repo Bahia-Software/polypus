@@ -5,13 +5,13 @@
 //! rayon parallel path on *this* machine, caches it on disk keyed by the rayon
 //! thread count *and* a CPU fingerprint (so nodes sharing one `$HOME` keep
 //! separate entries; see `polypus_sim::calibration`), and returns what it
-//! decided. It mirrors `polypus.init_logger`:
+//! decided. It mirrors `polypus.init_logger` and `polypus.log_to_python`:
 //! a one-shot, process-level setup call, meant to run once — the first line of a
 //! SLURM script, or inside `install.sh` — **before** any circuits are simulated,
 //! because the per-process resolver reads the cache once and memoises it.
 //!
 //! Like every other library diagnostic, its `log::*` output stays silent until
-//! `polypus.init_logger()` installs a sink.
+//! `polypus.init_logger()` or `polypus.log_to_python()` installs a sink.
 //!
 //! ## Default-visible fallback warning
 //!
@@ -98,6 +98,10 @@ fn autocalibration_allowed(var: impl Fn(&str) -> Option<String>) -> bool {
 /// falls back to the static default. The GIL is released for the measurement,
 /// including while another thread waits for it to finish.
 fn autocalibrate_once(py: Python<'_>) {
+    // `calibrate_and_cache` logs inside this `call_once`, which docs/ENGINEERING.md
+    // §9 allows only because no thread can wait for it while holding the GIL: the
+    // `call_once` runs inside `py.detach`, so a thread that finds it in progress
+    // waits with the GIL released, and the one running it can take the GIL to log.
     py.detach(|| {
         AUTOCALIBRATION.call_once(|| {
             let env = |name: &str| std::env::var_os(name).map(|v| v.to_string_lossy().into_owned());
@@ -211,10 +215,12 @@ fn warn_if_using_default_threshold(py: Python<'_>) -> PyResult<()> {
 /// A cache that cannot be written (read-only container/CI) is **not** an error:
 /// the measured threshold is still returned with `cache_written=False`, so the
 /// call is safe to run unconditionally from an installer. Diagnostics require
-/// `polypus.init_logger()` to be visible.
+/// `polypus.init_logger()` or `polypus.log_to_python()` to be visible.
 #[pyfunction]
 #[pyo3(signature = (force = false))]
 pub fn calibrate_parallel_threshold(py: Python<'_>, force: bool) -> PyResult<Py<PyAny>> {
+    // Read Python's log levels before the GIL is released below (`python_log`).
+    super::python_log::refresh_levels(py);
     // Pure-Rust CPU work (rayon timing loops): release the GIL for it, mirroring
     // the other bindings so it cannot stall other Python threads
     // (docs/ENGINEERING.md §3).

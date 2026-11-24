@@ -17,6 +17,7 @@ pub mod external;
 pub mod logging;
 pub mod observable;
 pub mod pso;
+mod python_log;
 pub mod qml;
 pub mod qng;
 pub mod rotosolve;
@@ -31,7 +32,7 @@ use cmaes::CMAES;
 use compatibility::backend_compatibility;
 use de::DE;
 use external::External;
-use logging::init_logger;
+use logging::{init_logger, log_to_python};
 use observable::{CachedCost, Ising, Qubo, SampleCost};
 use pso::PSO;
 use qng::QNG;
@@ -1471,15 +1472,15 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// does. If something is already there, a file or a symbolic link, or the
 /// directory does not exist, nothing is created or changed and the run goes on
 /// without a trace, after one warning in the Polypus log (shown only once a
-/// logger is installed with `polypus.init_logger`). A `bytes` path, or a value
-/// that is not a path, raises `TypeError` before anything runs. The trace never
-/// changes the result or the error. Without `trace`,
-/// `POLYPUS_CALL_TRACE=<directory>` writes one trace per run there, named
-/// `<id>-<pid>-<n>.jsonl`, as for `train`, after the run's id (`RunResult.id`,
-/// cut to its first 100 characters and a hash if longer), the process id and
-/// the number of traces the variable named before in the process; the
-/// directory must exist. `POLYPUS_CALL_TRACE_MAX_MB` caps a trace, in whole
-/// MiB (512 MiB by default).
+/// logger is installed with `polypus.init_logger` or `polypus.log_to_python`).
+/// A `bytes` path, or a value that is not a path, raises `TypeError` before
+/// anything runs. The trace never changes the result or the error. Without
+/// `trace`, `POLYPUS_CALL_TRACE=<directory>` writes one trace per run there,
+/// named `<id>-<pid>-<n>.jsonl`, as for `train`, after the run's id
+/// (`RunResult.id`, cut to its first 100 characters and a hash if longer), the
+/// process id and the number of traces the variable named before in the
+/// process; the directory must exist. `POLYPUS_CALL_TRACE_MAX_MB` caps a trace,
+/// in whole MiB (512 MiB by default).
 ///
 /// `target` (keyword-only, default `None`) is a typed target, `polypus.Aer`,
 /// `Native`, `Cunqa`, `Qmio` or `Registered`, used instead of `infrastructure`,
@@ -1507,6 +1508,8 @@ pub fn run_quantum_circuit<'py>(
     trace: Option<PathBuf>,
     target: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // Read Python's log levels before the GIL is released below (`python_log`).
+    python_log::refresh_levels(qc.py());
     let start = Instant::now();
     let selection = Selection::new(
         "run_quantum_circuit",
@@ -1775,14 +1778,14 @@ pub fn run_quantum_circuit<'py>(
 /// already there, a file or a symbolic link, or the directory does not exist,
 /// nothing is created or changed and the run goes on without a trace, after
 /// one warning in the Polypus log (shown only once a logger is installed with
-/// `polypus.init_logger`). A `bytes` path, or a value that is not a path,
-/// raises `TypeError` before anything runs. The trace never changes the
-/// result or the error. Without `trace`, `POLYPUS_CALL_TRACE=<directory>`
-/// writes one trace per run there, named `<id>-<pid>-<n>.jsonl` after the
-/// run's id (`TrainResult.id`, cut to its first 100 characters and a hash if
-/// longer), the process id and the number of traces the variable named before
-/// in the process; the directory must exist. `POLYPUS_CALL_TRACE_MAX_MB`
-/// caps a trace, in whole MiB (512 MiB by default).
+/// `polypus.init_logger` or `polypus.log_to_python`). A `bytes` path, or a
+/// value that is not a path, raises `TypeError` before anything runs. The trace
+/// never changes the result or the error. Without `trace`,
+/// `POLYPUS_CALL_TRACE=<directory>` writes one trace per run there, named
+/// `<id>-<pid>-<n>.jsonl` after the run's id (`TrainResult.id`, cut to its
+/// first 100 characters and a hash if longer), the process id and the number of
+/// traces the variable named before in the process; the directory must exist.
+/// `POLYPUS_CALL_TRACE_MAX_MB` caps a trace, in whole MiB (512 MiB by default).
 ///
 /// Interruption: pressing Ctrl+C (or otherwise sending `SIGINT`) stops the
 /// optimization promptly and raises `KeyboardInterrupt` in Python, instead of
@@ -1855,6 +1858,8 @@ pub fn train<'py>(
     trace: Option<PathBuf>,
     target: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // Read Python's log levels before the GIL is released below (`python_log`).
+    python_log::refresh_levels(qc.py());
     let start = Instant::now();
     let selection = Selection::new(
         "train",
@@ -2233,6 +2238,8 @@ pub fn qml_train<'py>(
     callback: Option<Bound<'py, PyAny>>,
     target: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // Read Python's log levels before the GIL is released below (`python_log`).
+    python_log::refresh_levels(feature_map.py());
     let start = Instant::now();
     let selection = Selection::new(
         "train",
@@ -2472,6 +2479,8 @@ pub fn qml_predict<'py>(
     walltime: Option<String>,
     target: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // Read Python's log levels before the GIL is released below (`python_log`).
+    python_log::refresh_levels(feature_map.py());
     let start = Instant::now();
     let selection = Selection::new(
         "predict",
@@ -2650,6 +2659,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_quantum_circuit, m)?)?;
     m.add_function(wrap_pyfunction!(statevector, m)?)?;
     m.add_function(wrap_pyfunction!(init_logger, m)?)?;
+    m.add_function(wrap_pyfunction!(log_to_python, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_parallel_threshold, m)?)?;
     m.add_function(wrap_pyfunction!(backend_cleanup_failures, m)?)?;
     m.add_function(wrap_pyfunction!(backend_compatibility, m)?)?;

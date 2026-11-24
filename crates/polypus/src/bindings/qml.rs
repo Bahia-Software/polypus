@@ -1338,6 +1338,8 @@ impl Model {
     ) -> PyResult<Py<PyAny>> {
         let start = Instant::now();
         let py = x.py();
+        // Read Python's log levels before the GIL is released below (`python_log`).
+        super::python_log::refresh_levels(py);
         validate_shots_and_qpus(shots, n_qpus)?;
         validate_cunqa_allocation(infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
         validate_id(id)?;
@@ -1795,6 +1797,8 @@ impl TrainedModel {
         read: RowRead,
     ) -> PyResult<RowsRun> {
         let py = x.py();
+        // Read Python's log levels before the GIL is released below (`python_log`).
+        super::python_log::refresh_levels(py);
         let start = Instant::now();
         let backend = exec.check()?;
         // The labels play no part in inference.
@@ -3174,6 +3178,8 @@ fn run_primitive<P: Primitive + Send>(
     exec: Execution<'_, '_>,
     backend: &str,
 ) -> PyResult<()> {
+    // Read Python's log levels before the GIL is released below (`python_log`).
+    super::python_log::refresh_levels(py);
     let start = Instant::now();
     let (infrastructure, n_qpus, shots, exact) =
         (exec.infrastructure, exec.n_qpus, exec.shots, exec.exact);

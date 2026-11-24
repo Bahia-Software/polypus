@@ -90,6 +90,7 @@ __all__ = [
     "run_quantum_circuit",
     "statevector",
     "init_logger",
+    "log_to_python",
     "calibrate_parallel_threshold",
     "backend_cleanup_failures",
     "backend_compatibility",
@@ -694,6 +695,7 @@ def init_logger(
     thread_id: bool = False,
     module_path: bool = False,
 ) -> Optional[str]: ...
+def log_to_python() -> None: ...
 def calibrate_parallel_threshold(force: bool = False) -> _CalibrationOutcome: ...
 def backend_cleanup_failures() -> int: ...
 def backend_compatibility(

@@ -687,6 +687,31 @@ use exhaustive `match`.
 Never block the executor: wrap blocking operations in `spawn_blocking`. Don't
 hold a lock (`Mutex`/`RwLock`) across an `.await`. GIL rules: §3.
 
+**A log record may block, so none is emitted while holding a lock.** A `log`
+sink is not guaranteed to return quickly: `polypus.log_to_python()` installs one
+that attaches to the interpreter, so emitting a record waits for the GIL. If the
+emitting thread holds a lock (`Mutex`, `RwLock`, a file lock) or is inside a
+one-time initialiser (`OnceLock::get_or_init`, `Once::call_once`,
+`get_or_try_init`), and a thread holding the GIL waits for that same lock or
+initialiser, the two deadlock. The same holds for a thread that holds the GIL
+while it waits (a `join`, a channel `recv`, a `block_on`) for another thread
+that logs. So the rule, in every crate: format the record's data under the
+guard if needed, release the guard, then log, as `OracleErrorSlot::record_as`
+does. Out of a one-time initialiser, return what the record needs and let the
+thread that ran it log after `get_or_init` returns (`polypus_sim`'s
+`resolution`, `mem_budget`'s `detected_memory_limit`). The only accepted
+exception is a lock or initialiser that no thread can wait for while holding
+the GIL, and the site must say why; today there are two, both in the gate
+calibration: `AUTOCALIBRATION` in `bindings/calibration.rs` (its `call_once`
+runs inside `py.detach`) and the calibration cache's file lock (only
+`calibrate_and_cache` takes it, which the bindings call detached, and the wait
+gives up after `LOCK_TIMEOUT`). Releasing the guard first is also what keeps a
+slow sink from stalling every other thread that needs the lock. One known gap
+remains, in the `qmio` feature only: `QmioBackend::close` (a `block_on`) and the
+drop of its Tokio runtime can run with the GIL held while `zeromq`'s tasks log
+from the runtime's worker threads, so with the Python bridge installed that
+close can hang; `docs/guide/running.md` documents it.
+
 **Performance.** Don't optimize prematurely; justify any
 performance/readability trade-off. Any claimed performance improvement is
 backed by the scripts in `benchmarks/` (`run_benchmarks.py`,
