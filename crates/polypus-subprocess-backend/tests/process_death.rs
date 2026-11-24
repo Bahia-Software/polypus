@@ -24,7 +24,10 @@ use polypus_subprocess_backend::SubprocessBackend;
 
 const HOST_ROLE_ENV: &str = "POLYPUS_PROCESS_DEATH_HOST_ARM";
 
-/// Handshake, log `[worker <pid>] started` to stderr, then sleep ignoring stdin EOF.
+/// Handshake, write an unrelated line to stderr, log `[worker <pid>] started` to
+/// stderr, then sleep ignoring stdin EOF. The unrelated line stands in for a Python
+/// warning or a log line ahead of the started line: the parent's reader must skip it
+/// and keep waiting for the pid (#586).
 fn stubborn_worker_script() -> String {
     format!(
         r#"
@@ -34,6 +37,7 @@ sys.stdin.buffer.read(struct.unpack('<I', header)[0])
 out = json.dumps({{"op": "ready", "protocol": {PROTOCOL_VERSION}}}).encode()
 sys.stdout.buffer.write(struct.pack('<I', len(out)) + out)
 sys.stdout.buffer.flush()
+print("stderr noise before the started line (#586)", file=sys.stderr, flush=True)
 print(f"[worker {{os.getpid()}}] started", file=sys.stderr, flush=True)
 time.sleep(600)
 "#
@@ -83,7 +87,13 @@ fn worker_dies_with_killed_host(
         .expect("re-execute the test binary as the host");
 
     // Learn the worker's pid from its startup line on the host's stderr. The reader
-    // keeps draining afterwards so the host can never block on a full pipe.
+    // keeps draining afterwards so the host can never block on a full pipe. Any other
+    // line (a warning, the host's own panic) is forwarded to this test's stderr, so a
+    // failure here shows what the host printed; under libtest's default capture it
+    // only appears if the test fails. Without the started line the sender is dropped
+    // only when the loop ends (on EOF, or on the first line that is not valid UTF-8),
+    // after every line read so far has been forwarded, so a `Disconnected` failure
+    // comes with what the host printed up to that point.
     let stderr = host.stderr.take().expect("stderr piped");
     let (tx, rx) = mpsc::channel::<u32>();
     thread::spawn(move || {
@@ -93,14 +103,24 @@ fn worker_dies_with_killed_host(
                 .strip_prefix("[worker ")
                 .and_then(|rest| rest.split_once("] started"))
                 .and_then(|(pid, _)| pid.parse::<u32>().ok());
-            if let (Some(pid), Some(tx)) = (pid, tx.take()) {
-                let _ = tx.send(pid);
+            match pid {
+                // Only the started line may consume the sender (#586).
+                Some(pid) => {
+                    if let Some(tx) = tx.take() {
+                        // Fails only once the receiver is gone: the test already gave up
+                        // waiting and is failing on its own, so the pid has no reader.
+                        let _ = tx.send(pid);
+                    }
+                }
+                None => eprintln!("[host stderr] {line}"),
             }
         }
     });
     let worker_pid = match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(pid) => pid,
         Err(e) => {
+            // Best-effort cleanup before the panic below, which is the error that
+            // matters; the host may already be dead (the `Disconnected` case).
             let _ = host.kill();
             let _ = host.wait();
             panic!("the host never reported its worker's pid: {e}");
@@ -122,10 +142,12 @@ fn worker_dies_with_killed_host(
     let dead = is_dead(worker_pid);
     if !dead {
         // Do not leave a stray worker behind.
-        let _ = nix::sys::signal::kill(
+        if let Err(e) = nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(worker_pid as i32),
             nix::sys::signal::Signal::SIGKILL,
-        );
+        ) {
+            eprintln!("could not SIGKILL the stray worker {worker_pid}: {e}");
+        }
     }
     Some(dead)
 }
