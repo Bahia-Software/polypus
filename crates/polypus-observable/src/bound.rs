@@ -37,17 +37,44 @@ pub const MAX_WEIGHT_BOUND: f64 = f64::MAX / 36_893_488_147_419_103_232.0;
 /// `Σ |c|` over `coefficients`, summed in order, times `|scale|`; an error
 /// unless it is at most [`MAX_WEIGHT_BOUND`] (a non-finite or `NaN` input
 /// fails too).
+///
+/// Every caller rejects a non-finite coefficient first, so a `Σ |c|` that is
+/// not finite has overflowed `f64`. It is reported as such, before the scale
+/// multiplies it: with `|scale| < 1` the true product may be small, and with
+/// `scale = 0` the product is `NaN` (issue #650). An unscaled value of the
+/// observable could then overflow, so the input is rejected all the same.
 pub(crate) fn check_weight_bound(
     coefficients: impl Iterator<Item = f64>,
     scale: f64,
 ) -> Result<(), ObservableError> {
-    let bound = coefficients.fold(0.0, |sum, c| sum + c.abs()) * scale.abs();
+    check_weight_bound_of("Σ|c|", "", coefficients, scale)
+}
+
+/// [`check_weight_bound`], naming the sum `sum` (`Σ|c|`, without the scale)
+/// in its error and ending the error with `note`: for an observable that
+/// checks coefficients the caller did not write, such as
+/// [`IsingObservable`](crate::IsingObservable)'s expanded QUBO (issue #650).
+pub(crate) fn check_weight_bound_of(
+    sum: &str,
+    note: &str,
+    coefficients: impl Iterator<Item = f64>,
+    scale: f64,
+) -> Result<(), ObservableError> {
+    let total = coefficients.fold(0.0, |sum, c| sum + c.abs());
+    if !total.is_finite() {
+        return Err(ObservableError::Invalid(format!(
+            "{sum} overflows f64: a value or a weighted mean of counts could \
+             overflow{note}"
+        )));
+    }
+    let bound = total * scale.abs();
+    let sum = format!("{sum}·|scale|");
     if bound <= MAX_WEIGHT_BOUND {
         Ok(())
     } else {
         Err(ObservableError::Invalid(format!(
-            "Σ|c|·|scale| = {bound:e} exceeds {MAX_WEIGHT_BOUND:e}: a value or \
-             a weighted mean of counts could overflow"
+            "{sum} = {bound:e} exceeds {MAX_WEIGHT_BOUND:e}: a value or a \
+             weighted mean of counts could overflow{note}"
         )))
     }
 }
@@ -76,16 +103,69 @@ mod tests {
     }
 
     #[test]
-    fn non_finite_inputs_fail_with_the_bound_in_the_message() {
-        for (coefficients, scale) in [
-            (vec![f64::NAN], 1.0),
-            (vec![f64::INFINITY], 1.0),
-            (vec![1e308, 1e308], 1.0),
-            (vec![1.0], f64::NAN),
-        ] {
-            let result = check_weight_bound(coefficients.into_iter(), scale);
+    fn the_message_names_the_sum_and_ends_with_the_note() {
+        let plain = check_weight_bound([f64::MAX].into_iter(), 1.0);
+        assert!(
+            matches!(&plain, Err(ObservableError::Invalid(m))
+                if m.starts_with("Σ|c|·|scale| = ") && m.ends_with("could overflow")),
+            "{plain:?}"
+        );
+        let named = check_weight_bound_of("the sum", " (a note)", [f64::MAX].into_iter(), 1.0);
+        assert!(
+            matches!(&named, Err(ObservableError::Invalid(m))
+                if m.starts_with("the sum·|scale| = ") && m.ends_with("could overflow (a note)")),
+            "{named:?}"
+        );
+        let overflowing = check_weight_bound_of(
+            "the sum",
+            " (a note)",
+            [f64::MAX, f64::MAX].into_iter(),
+            1.0,
+        );
+        assert!(
+            matches!(&overflowing, Err(ObservableError::Invalid(m))
+                if m == "the sum overflows f64: a value or a weighted mean of counts could \
+                         overflow (a note)"),
+            "{overflowing:?}"
+        );
+    }
+
+    #[test]
+    fn a_sum_that_overflows_is_reported_before_the_scale() {
+        // Issue #650: with |scale| < 1 the product could be small, and with
+        // scale = 0 it is NaN, so the unscaled sum is what the error names.
+        for coefficients in [vec![1e308, 1e308], vec![f64::MAX, -f64::MAX]] {
+            for scale in [1.0, 1e-300, 0.0] {
+                let result = check_weight_bound(coefficients.clone().into_iter(), scale);
+                assert!(
+                    matches!(&result, Err(ObservableError::Invalid(m))
+                        if m == "Σ|c| overflows f64: a value or a weighted mean of counts \
+                                 could overflow"),
+                    "{result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_coefficient_that_is_not_finite_fails() {
+        // Every caller rejects it first, with its own message; the check
+        // still fails on its own, whatever the scale.
+        for coefficient in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for scale in [1.0, 1e-300, 0.0] {
+                assert!(check_weight_bound([coefficient].into_iter(), scale).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn a_scale_that_is_not_finite_fails_with_the_bound_in_the_message() {
+        // Every caller rejects it first; the check still fails on its own.
+        for scale in [f64::NAN, f64::INFINITY] {
+            let result = check_weight_bound([1.0].into_iter(), scale);
             assert!(
-                matches!(&result, Err(ObservableError::Invalid(m)) if m.contains("exceeds")),
+                matches!(&result, Err(ObservableError::Invalid(m))
+                    if m.starts_with("Σ|c|·|scale| = ") && m.contains(" exceeds ")),
                 "{result:?}"
             );
         }
