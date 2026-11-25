@@ -33,7 +33,9 @@ serde = ["dep:serde"] # opt-in serialization of compiled models (design doc §17
 # Hidden constructors that hand a problem or a Jacobian templates no layer
 # emits, for the tests of the crates downstream (issue #561: the gates only the
 # adjoint differentiates). Enable it from `[dev-dependencies]` only; nothing in
-# a library or wheel build may turn it on.
+# a library or wheel build may turn it on. The wheel enforces it: a const
+# assertion on `TEST_SUPPORT_ENABLED` in `crates/polypus/src/lib.rs` fails any
+# wheel build that has this feature on.
 test-support = []
 
 [lints]

@@ -456,6 +456,17 @@ boundary stays out-of-process and explicit; see
   (`info-logs` et al., forwarded to `polypus-logger`) are global to a build and
   mutually exclusive, so only the final artifact picks one: the wheel uses
   `debug-logs` (`[tool.maturin] features` in `pyproject.toml`).
+- A feature that exists only for tests (today `polypus-qml`'s
+  `test-support`) is enabled from `[dev-dependencies]` only, never from
+  `[dependencies]`. The wheel enforces it: a const assertion in
+  `crates/polypus/src/lib.rs` fails a wheel build while `test-support` is on.
+  A wheel build is one with the `extension-module` feature or the
+  `PYO3_BUILD_EXTENSION_MODULE` environment variable, which maturin exports to
+  the builds it runs (the floor in `pyproject.toml`'s `[build-system]` is a
+  release that does), also when a `--features` on the command line replaces
+  `[tool.maturin] features`. Building test targets as a wheel build
+  (`--all-targets` or `--tests` with either signal) turns the
+  dev-dependencies' features on, so it trips the same guard.
 
 ## 7. Interoperability notes (beyond contract C-2)
 

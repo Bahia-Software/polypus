@@ -143,3 +143,9 @@ pub use model::{CompiledModel, QuantumModel, TrainedModel};
 pub use observables::{ExactState, Observable, Pauli, PauliString};
 pub use problem::{minibatch_indices, QmlProblem};
 pub use readout::{Decision, Readout};
+
+/// Whether this build has the `test-support` feature, which only
+/// `[dev-dependencies]` may enable: the `polypus` crate refuses to compile the
+/// wheel while this is `true`.
+#[doc(hidden)]
+pub const TEST_SUPPORT_ENABLED: bool = cfg!(feature = "test-support");
