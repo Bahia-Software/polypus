@@ -53,8 +53,8 @@ depends on the term order, and a term can vanish below
    `ParameterizedCircuit` (Qiskit and OpenQASM templates are #533) and
    `terms` `(coefficient, PauliMask)` pairs — and groups it itself with
    `group_qubit_wise`. Grouping is how the sum is measured, not what the
-   caller trains, and the ungrouped terms stay available to the exact path of
-   #534. `OracleFactory::build` cannot fail, so **every check runs in `new`**,
+   caller trains, and the factory takes the ungrouped terms, so the exact path
+   of #534 can keep them. `OracleFactory::build` cannot fail, so **every check runs in `new`**,
    which returns a `Result`:
    - a template that already measures (a `Measure` or `MeasureAll` anywhere)
      is rejected with a clear error: the rotations are appended after the

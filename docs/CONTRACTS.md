@@ -963,11 +963,12 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   - `EvaluationOracle::evaluate_batch_with_shots(candidates, shots)` has
     `evaluate_batch`'s contract (exactly `candidates.len()` finite values, in
     order) with every circuit measured with `shots` shots. Its default calls
-    `evaluate_batch`, which is exact for an oracle without shots; `VqcOracle`
-    and `QmlOracle` put `shots` in every `CircuitTask` of the batch, every
-    training circuit of each candidate for QML, and the Planner reads them
-    from the tasks. `Arc<T>` and the walltime watch forward it. No optimizer
-    calls it.
+    `evaluate_batch`, which is exact for an oracle without shots; `VqcOracle`,
+    `QmlOracle` and `PauliSumOracle` put `shots` in every `CircuitTask` of the
+    batch, every training circuit of each candidate for QML and every
+    measurement group's circuit of each candidate for a Pauli sum, and the
+    Planner reads them from the tasks. `Arc<T>` and the walltime watch
+    forward it. No optimizer calls it.
   - Seed: the batch is the run's last call to the backend, which gives it a
     sampling stream of its own (C-7), so its shot noise is independent of
     the training's even for a candidate re-evaluated at the position it was
@@ -1030,9 +1031,13 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     shots and the expected candidates) with the error, interrupt, optimizer
     error, failing final batch, its warning and `Some(0)` tests there,
     `a_batch_with_shots_is_forwarded_untimed` in `src/walltime.rs`, the
-    `a_batch_with_shots_puts_them_in_every_task` tests of `VqcOracle` and
-    `QmlOracle` (the shots and the run's seed in every wave), the trait's
-    tests in
+    `a_batch_with_shots_puts_them_in_every_task` tests of `VqcOracle`,
+    `QmlOracle` and `PauliSumOracle` (the shots and the run's seed in every
+    wave), `a_final_shots_batch_does_not_repeat_the_training_noise` and
+    `de_trains_h2_to_within_three_sigma_of_fci` in
+    `crates/polypus-evaluation/tests/pauli_sum_h2.rs` (new noise for the
+    same candidate, and a final batch through `TrainFlow` that does not
+    repeat `best_fitness`), the trait's tests in
     `crates/polypus-optimizers/src/objective.rs`, and
     `tests/python/test_final_shots.py` (the `ValueError`s and `TypeError`s
     before the CUNQA seam, the final batch of every optimizer through both
