@@ -448,7 +448,7 @@ impl StatevectorSimulator {
         }
 
         // λ = O|ψ⟩, the second (and last) statevector; ⟨O⟩ on the way.
-        let mut lambda = psi.clone();
+        let mut lambda = psi.try_clone()?;
         let (expectation, finite) = kernels::weigh(&mut lambda.data, &weight, psi.use_parallel());
         if !finite {
             return Err(SimError::NonFiniteWeight);

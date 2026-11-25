@@ -84,6 +84,8 @@ cost = polypus.Ising(4, fields=[(0, 0.5)], couplings=[(0, 1, -1.0), (1, 2, -1.0)
 
 Both take `scale=-1.0` to turn a minimisation into a maximisation. Bit order matches Qiskit's read-out: the right-most bit is variable 0.
 
+Among other checks, construction raises `ValueError` when a coefficient, `constant` or `scale` is not finite, or when the coefficients' `Σ|c|·|scale|` exceeds `sys.float_info.max / 2**65` (about 4.9e288), the bound that keeps every value and mean finite. For `Ising` it is the sum of the QUBO it expands into, where each field `h` counts up to `3·|h|` and each coupling `J` up to `9·|J|`. `help(polypus.Qubo)` and `help(polypus.Ising)` list every error.
+
 ## Optimizers
 
 ### Differential Evolution

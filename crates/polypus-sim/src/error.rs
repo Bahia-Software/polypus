@@ -17,6 +17,19 @@ pub enum SimError {
         /// Largest supported qubit count.
         max: usize,
     },
+    /// The `2^n`-amplitude statevector could not be allocated: the system
+    /// refused the memory. Raised by [`Statevector::new`](crate::Statevector::new)
+    /// (and the adjoint gradient's second statevector) instead of aborting the
+    /// process. On Linux with memory overcommit the system may grant the
+    /// memory and the process be killed later when it is written, so this is a
+    /// last line of defence: a memory budget checked before the run is the
+    /// first.
+    AllocationFailed {
+        /// Qubits of the statevector that could not be allocated.
+        num_qubits: usize,
+        /// Bytes it needed (`16 · 2^num_qubits`).
+        bytes: u64,
+    },
     /// A gate still references a free parameter `Param(index)`. A
     /// [`ConcreteCircuit`](polypus_circuit::ConcreteCircuit) produced by
     /// `assign_parameters` is always fully bound; this can only happen for a
@@ -145,6 +158,11 @@ impl fmt::Display for SimError {
                 f,
                 "circuit requests {requested} qubits but the statevector backend supports at most {max} (a statevector needs 2^n complex amplitudes)"
             ),
+            SimError::AllocationFailed { num_qubits, bytes } => write!(
+                f,
+                "could not allocate the statevector of {num_qubits} qubits ({bytes} bytes, {gib:.1} GiB): the system refused the memory",
+                gib = *bytes as f64 / (1u64 << 30) as f64
+            ),
             SimError::UnboundParameter { index } => write!(
                 f,
                 "circuit contains an unbound free parameter (index {index}); bind all parameters before simulating"
@@ -213,6 +231,18 @@ impl std::error::Error for SimError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn allocation_failed_names_the_qubits_and_the_size() {
+        let s = SimError::AllocationFailed {
+            num_qubits: 34,
+            bytes: 16 << 34,
+        }
+        .to_string();
+        assert!(s.contains("34 qubits"), "{s}");
+        assert!(s.contains("256.0 GiB"), "{s}");
+        assert!(s.contains("refused the memory"), "{s}");
+    }
 
     /// The adjoint gradient's argument errors name the position, the gate and
     /// what is wrong with it.

@@ -5,7 +5,14 @@ use rand::TryRng;
 
 use polypus_backend::{OptLevel, OptionValue, RunParams};
 
-use crate::error::EntropyError;
+use crate::error::{EntropyError, SeedOutOfRange};
+
+/// Seeds below this limit, `2^63`, are the ones Qiskit Aer accepts: its
+/// `seed_simulator` is a signed 64-bit integer. A seed drawn from OS entropy
+/// ([`random_seed`]) is always below it, so the seed a run reports is the one
+/// Aer receives; an explicit seed at or above it is rejected on the backends
+/// that run on Aer ([`BackendConfig::check_seed`]) (contract C-7).
+pub const AER_SEED_LIMIT: u64 = 1 << 63;
 
 /// **Construction-time** execution configuration: everything the
 /// [`Infrastructure`](crate::Infrastructure) factory needs to *build* a backend,
@@ -82,11 +89,15 @@ impl ExecutionConfig {
     }
 }
 
-/// Draw a fresh 64-bit seed from OS entropy.
+/// Draw a fresh seed from OS entropy, below [`AER_SEED_LIMIT`] (63 random
+/// bits).
 ///
 /// Used as the default when no explicit seed is supplied, so an omitted seed
 /// produces genuine (independent) shot noise across runs rather than repeating a
-/// value derived from the run [`id`](ExecutionConfig::id).
+/// value derived from the run [`id`](ExecutionConfig::id). The top bit is
+/// cleared so the same value is valid on every backend: on the run's first
+/// call Aer receives exactly the seed the run manifest reports, so a one-call
+/// run replays outside Polypus too (#393).
 ///
 /// # Errors
 ///
@@ -104,7 +115,9 @@ where
     R: TryRng,
     R::Error: std::error::Error + Send + Sync + 'static,
 {
-    rng.try_next_u64().map_err(EntropyError::new)
+    rng.try_next_u64()
+        .map(|seed| seed & (AER_SEED_LIMIT - 1))
+        .map_err(EntropyError::new)
 }
 
 /// Draw the 16 random bytes of a run id's UUID v4 suffix from OS entropy.
@@ -197,6 +210,37 @@ pub enum BackendConfig {
         /// Provider-specific configuration, as documented per backend.
         options: HashMap<String, OptionValue>,
     },
+}
+
+impl BackendConfig {
+    /// Check that `seed` is one this backend can take (contract C-7).
+    ///
+    /// The backends that run on Qiskit Aer, [`Local`](BackendConfig::Local)
+    /// and [`Cunqa`](BackendConfig::Cunqa) (whose simulated QPUs are Aer), take
+    /// a seed below [`AER_SEED_LIMIT`]; a larger one would reach Aer masked to
+    /// 63 bits, so two seeds that differ only in bit 63 would give the same
+    /// counts and the reported seed would not be the one Aer used (#393). The
+    /// native backend and every [`Registered`](BackendConfig::Registered) one
+    /// take any `u64`.
+    ///
+    /// # Errors
+    ///
+    /// [`SeedOutOfRange`] for a seed of `2^63` or more on Aer or CUNQA.
+    pub fn check_seed(&self, seed: u64) -> Result<(), SeedOutOfRange> {
+        let backend = match self {
+            BackendConfig::Local { .. } => "Qiskit Aer (backend=\"aer\" or target=polypus.Aer())",
+            BackendConfig::Cunqa { .. } => {
+                "CUNQA's simulated QPUs (infrastructure=\"cunqa\" or \
+                 target=polypus.Cunqa(...)), which run on Qiskit Aer"
+            }
+            BackendConfig::LocalNative { .. } | BackendConfig::Registered { .. } => return Ok(()),
+        };
+        if seed < AER_SEED_LIMIT {
+            Ok(())
+        } else {
+            Err(SeedOutOfRange { seed, backend })
+        }
+    }
 }
 
 /// Manual [`Clone`]: the only non-`Clone` field is `BackendConfig::Local`'s
@@ -352,6 +396,82 @@ mod tests {
     #[test]
     fn healthy_entropy_source_yields_its_value() {
         assert_eq!(random_seed_from(&mut ConstRng(42)).unwrap(), 42);
+    }
+
+    /// A drawn seed is always one Aer accepts (#393): bit 63 is cleared, the
+    /// other 63 bits are the entropy source's.
+    #[test]
+    fn a_drawn_seed_is_below_two_to_the_63_393() {
+        assert_eq!(
+            random_seed_from(&mut ConstRng(u64::MAX)).unwrap(),
+            AER_SEED_LIMIT - 1
+        );
+        assert_eq!(random_seed_from(&mut ConstRng(1 << 63 | 7)).unwrap(), 7);
+        for _ in 0..64 {
+            assert!(random_seed().unwrap() < AER_SEED_LIMIT);
+        }
+    }
+
+    fn local_aer() -> BackendConfig {
+        BackendConfig::Local {
+            sim_method: "automatic".to_string(),
+            noise_model: None,
+        }
+    }
+
+    fn cunqa() -> BackendConfig {
+        BackendConfig::Cunqa {
+            sim_method: "statevector".to_string(),
+            nodes: 1,
+            cores_per_qpu: 1,
+            walltime: "00:10:00".to_string(),
+        }
+    }
+
+    /// Aer and CUNQA take a seed below 2^63 and reject `2^63` and above,
+    /// naming the backend and the limit (#393).
+    #[test]
+    fn aer_and_cunqa_reject_a_seed_of_two_to_the_63_or_more_393() {
+        for (config, label) in [
+            (
+                local_aer(),
+                "for Qiskit Aer (backend=\"aer\" or target=polypus.Aer()):",
+            ),
+            (
+                cunqa(),
+                "for CUNQA's simulated QPUs (infrastructure=\"cunqa\" or \
+                 target=polypus.Cunqa(...)), which run on Qiskit Aer:",
+            ),
+        ] {
+            assert!(config.check_seed(0).is_ok());
+            assert!(config.check_seed(AER_SEED_LIMIT - 1).is_ok());
+            for seed in [AER_SEED_LIMIT, u64::MAX] {
+                let err = config
+                    .check_seed(seed)
+                    .expect_err("2^63 and above is rejected");
+                let message = err.to_string();
+                assert!(message.contains(&seed.to_string()), "{message}");
+                assert!(message.contains(label), "{message}");
+                assert!(message.contains("9223372036854775807"), "{message}");
+            }
+        }
+    }
+
+    /// The native backend and a registered one take any `u64` (#393).
+    #[test]
+    fn native_and_registered_backends_take_any_u64_seed_393() {
+        let registered = BackendConfig::Registered {
+            name: "subprocess".to_string(),
+            options: HashMap::new(),
+        };
+        for config in [BackendConfig::LocalNative { fusion: true }, registered] {
+            for seed in [0, AER_SEED_LIMIT, u64::MAX] {
+                assert!(
+                    config.check_seed(seed).is_ok(),
+                    "{config:?} rejected {seed}"
+                );
+            }
+        }
     }
 
     #[test]

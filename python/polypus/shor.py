@@ -124,7 +124,8 @@ def factor(
     ``counting_qubits`` is between 1 and ``2 * n.bit_length()``, its default;
     fewer make each run cheaper and its counts less precise. The circuit has
     ``counting_qubits + 2 * n.bit_length() + 2`` qubits. The local simulators
-    hold 30 (``n < 128`` with the default register), but each qubit more
+    hold 30 (``n < 128`` with the default register; the native one goes up to
+    40 where the memory budget allows it), but each qubit more
     doubles the time and memory of a run: on four cores an attempt takes
     seconds for ``n < 16``, about a minute for ``n < 32``, half an hour for
     ``n < 64`` (26 qubits, 1 GiB) and, at 30 qubits, 16 GiB and many hours.

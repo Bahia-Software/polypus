@@ -20,11 +20,16 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # just runs the checks: each step calls a recipe of the root justfile, which
+  # is what `just ci` runs locally (#421). A step runs a command of its own
+  # only to install something (tests/docs/test_ci_recipes.py).
+  JUST_VERSION: "1.57.0"
 
 # Rust: every job but MSRV, fuzz and Miri uses the toolchain rust-toolchain.toml
 # pins; `rustup toolchain install` without a name installs it with the
-# components listed there. Those three set RUSTUP_TOOLCHAIN, which overrides
-# the file in every step.
+# components listed there. Those three install the toolchain the justfile
+# names and set RUSTUP_TOOLCHAIN to it, which overrides the file in every step
+# (and keys the Rust cache on it).
 #
 # Only `test` reads reference-data/ (about 87 MiB, the polypus-physics tests).
 # Every other job checks out without it (#422).
@@ -42,9 +47,13 @@ jobs:
           sparse-checkout-cone-mode: false
       - name: reference-data/ is not checked out
         run: test ! -e reference-data
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
-      - run: cargo fmt --all --check
+      - run: just fmt
 
   # Python lint + formatting (packages, tests, benchmarks, examples).
   # Config lives in [tool.ruff] in the root pyproject.toml.
@@ -63,10 +72,15 @@ jobs:
         with:
           # Pin ruff so a new release's changed default rules / formatter output
           # cannot turn CI red without a deliberate bump. Keep in sync with the
-          # pin in requirements-dev.txt. Both `ruff check` (run by the action)
-          # and the `ruff format --check` step below use this version.
+          # pin in requirements-dev.txt. The action only installs it; the
+          # recipe runs `ruff check` and `ruff format --check`.
           version: "0.16.1"
-      - run: ruff format --check
+          args: --version
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      - run: just ruff
 
   # Security advisories (RustSec), license allowlist and registry sources,
   # per deny.toml. Runs `cargo metadata` only — no build, no Python needed.
@@ -81,9 +95,13 @@ jobs:
             /*
             !/reference-data/
           sparse-checkout-cone-mode: false
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
+      - name: Install cargo-deny and just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
-          command: check
+          tool: cargo-deny@0.20.2,just@${{ env.JUST_VERSION }}
+      - run: just deny
 
   # The committed Cargo.lock pins exact dependency versions so a new upstream
   # release cannot silently drift the build (unpinned deps have turned CI red
@@ -102,10 +120,14 @@ jobs:
             /*
             !/reference-data/
           sparse-checkout-cone-mode: false
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
       - name: Verify Cargo.lock is in sync with the manifests
-        run: cargo metadata --locked --format-version 1 > /dev/null
+        run: just lockfile
 
   # Dependencies the workspace declares but never uses add build time and
   # advisory surface. cargo-machete reads the manifests and sources only; a
@@ -125,7 +147,11 @@ jobs:
         run: rustup toolchain install --no-self-update
       - name: Install cargo-machete
         run: cargo install --locked cargo-machete@0.9.2
-      - run: cargo machete
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      - run: just machete
 
   # The jobs above build against Cargo.lock, which holds the newest versions
   # at the time of the last update, never the floors that the manifests allow
@@ -137,8 +163,6 @@ jobs:
     name: Rust dependency floors
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      NIGHTLY: nightly-2026-10-22
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -150,20 +174,18 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
-      - name: Install Rust (rust-toolchain.toml, and nightly for the resolver)
-        run: |
-          rustup toolchain install --no-self-update
-          rustup toolchain install "$NIGHTLY" --profile minimal --no-self-update
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      # The recipe installs the justfile's nightly for the resolver.
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
       - name: Resolve direct dependencies to their floors
-        run: cargo "+$NIGHTLY" update -Z direct-minimal-versions
+        run: just minimal-versions-resolve
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Check (workspace, default features)
-        run: cargo check --workspace --all-targets
-      - name: Check (optional features)
-        run: |
-          cargo check -p polypus-physics --all-features --all-targets
-          cargo check -p polypus-sim --features parallel --all-targets
-          cargo check -p polypus --features qmio --all-targets
+      - name: Check (default and optional features)
+        run: just minimal-versions-check
 
   # The Python counterpart: `python-tests` installs the newest release in
   # each declared range. Here the build backend (`[build-system] requires`)
@@ -184,6 +206,10 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.10"
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
       # llvm-as checks that the QIR bitcode export is valid LLVM.
@@ -197,13 +223,14 @@ jobs:
         run: python -m pip install uv==0.13.5
       # `uv build --resolution` does not apply to build requirements, so
       # install them at their floors and build without isolation.
-      - name: Build the wheel with the lowest allowed maturin
+      - name: Install the lowest allowed maturin
         run: |
           uv pip install --system tomli==2.5.0
           python -c 'import tomli; print("\n".join(tomli.load(open("pyproject.toml", "rb"))["build-system"]["requires"]))' > "$RUNNER_TEMP/build-requirements.txt"
           uv pip install --system --resolution lowest-direct -r "$RUNNER_TEMP/build-requirements.txt"
           maturin --version
-          maturin build --release --out dist
+      - name: Build the wheel with it
+        run: just build-wheel --out dist
       # The test requirements (requirements-dev.txt) resolve together with
       # the wheel's, so their floors (pytest, qiskit-qasm3-import) are tested
       # too.
@@ -226,7 +253,7 @@ jobs:
             test_torch_quantum_layer.py
             test_typing_stubs.py::TestTorchTypes
             test_typing_stubs.py::TestStubsCoverPublicApi::test_every_exported_name_has_a_stub[polypus.torch]
-        run: pytest tests/python -rs --strict-markers
+        run: just pytest
 
   clippy:
     name: clippy
@@ -244,6 +271,10 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -251,14 +282,12 @@ jobs:
       # crate's `extension-module` feature tells PyO3 not to link libpython,
       # which breaks building the test/bench targets that --all-targets compiles.
       - name: Clippy (workspace, default features)
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: just clippy-workspace
       # Lint the optional QMIO backend (pure Rust: zeromq + serde-pickle). It now
       # lives in `polypus-infrastructure`; lint it there (its own test targets)
       # and through `polypus` (feature forwarding) for the edge conversion.
       - name: Clippy (qmio backend)
-        run: |
-          cargo clippy --locked -p polypus-infrastructure --features qmio --all-targets -- -D warnings
-          cargo clippy --locked -p polypus --features qmio --all-targets -- -D warnings
+        run: just clippy-qmio
 
   # Guard the declared MSRV (rust-version in Cargo.toml). With the committed
   # Cargo.lock and `--locked`, the exact pinned dependency versions are used, so
@@ -269,9 +298,6 @@ jobs:
     name: MSRV (1.85)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      # The MSRV, overriding rust-toolchain.toml in every step.
-      RUSTUP_TOOLCHAIN: "1.85.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -282,21 +308,23 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
-      - name: Install Rust ${{ env.RUSTUP_TOOLCHAIN }}
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      # The MSRV the justfile names, overriding rust-toolchain.toml in every
+      # step.
+      - name: Install Rust (the justfile's MSRV)
         run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
-          rustc --version
+          toolchain=$(just --evaluate msrv)
+          rustup toolchain install "$toolchain" --profile minimal --no-self-update
+          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Check (workspace, default features)
-        run: cargo check --locked --workspace --all-targets
+        run: just msrv-workspace
       # The qmio feature's own minimum: zeromq 0.7 needs Rust 1.89.
       - name: Check (qmio backend, Rust 1.89)
-        env:
-          RUSTUP_TOOLCHAIN: "1.89.0"
-        run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
-          cargo check --locked -p polypus-infrastructure --features qmio --all-targets
-          cargo check --locked -p polypus --features qmio --all-targets
+        run: just msrv-qmio
 
   # Package every crate and build it from its .crate against the others, as
   # `cargo publish` does on a release tag. A packaging error (a file outside the
@@ -323,10 +351,12 @@ jobs:
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
       - name: cargo package --workspace
-        env:
-          CARGO_INCREMENTAL: "0"
-        run: cargo package --workspace --locked
+        run: just package
 
   # Compare the public API of every published crate with its latest version on
   # crates.io (cargo-semver-checks). A breaking change needs the next minor
@@ -354,20 +384,11 @@ jobs:
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
-          tool: cargo-semver-checks@0.51.0
+          tool: cargo-semver-checks@0.51.0,just@${{ env.JUST_VERSION }}
       - name: cargo semver-checks (crates on crates.io)
-        env:
-          CARGO_INCREMENTAL: "0"
-        run: |
-          new=$(python .github/scripts/publish_crates.py --unpublished)
-          exclude=()
-          for name in $new; do
-            echo "::notice::$name is not on crates.io yet: skipped"
-            exclude+=(--exclude "$name")
-          done
-          cargo semver-checks --workspace --default-features "${exclude[@]}"
+        run: just semver
 
   test:
     name: test (Rust)
@@ -394,6 +415,10 @@ jobs:
           sudo apt-get install --yes --no-install-recommends llvm
           llvm-as --version
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
       # Every workspace member, with no hand-maintained list: a crate added to
       # the workspace is tested without touching this file. Default features,
       # so `polypus` builds without extension-module (see the clippy note).
@@ -404,58 +429,36 @@ jobs:
       # (provided by the setup-python step in this job) and skip gracefully if
       # none is found.
       - name: Test the workspace (default features)
-        run: cargo test --locked --workspace
+        run: just test-workspace
       # Pure-Rust crates: exercise every feature (includes `parallel` in the sim,
       # whose results must be bit-identical to the sequential path). The one
-      # hand-maintained list (docs/CONTRIBUTING.md): `--workspace --all-features`
-      # would enable `polypus`'s extension-module. The crates that link
-      # libpython stay out: `polypus-infrastructure` and `polypus-evaluation`
-      # (their seams touch the GIL), `polypus-orchestration` (pyo3-free, but it
-      # links libpython through polypus-infrastructure) and `polypus`.
+      # hand-maintained list is `pure_crates` in the justfile:
+      # `--workspace --all-features` would enable `polypus`'s extension-module.
       - name: Test pure-Rust crates (all features)
-        run: >
-          cargo test --locked
-          -p polypus-circuit
-          -p polypus-sim
-          -p polypus-physics
-          -p polypus-optimizers
-          -p polypus-observable
-          -p polypus-qml
-          -p polypus-backend
-          -p polypus-backend-conformance
-          -p polypus-subprocess-backend
-          --all-features
+        run: just test-features
       # The memory-safety guards (#342) must hold in the build downstream crates
       # actually get: release *without* overflow-checks (the workspace profile
       # turns them on), with the raw-pointer `parallel` kernels compiled in.
       - name: Test polypus-sim memory safety (release, no overflow-checks)
-        env:
-          CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: "false"
-        run: |
-          cargo test --locked --release -p polypus-sim --features parallel --test memory_safety
-          cargo test --locked --release -p polypus-sim --features parallel --lib kernels::
+        run: just test-memory-safety
       # `polypus-logger`'s features are mutually-exclusive log-level selectors
       # (off-logs/error-logs/.../trace-logs, each setting a `log` max_level_*
       # feature), not independent toggles — `--all-features` sets several at
       # once and the `log` crate refuses to compile. The workspace pass builds
       # it with no feature; test it with the wheel's `debug-logs` too.
       - name: Test polypus-logger (debug-logs)
-        run: cargo test --locked -p polypus-logger --features debug-logs
+        run: just test-logger
       # The optional QMIO backend lives in `polypus-infrastructure`; `polypus`
       # forwards the feature to it.
-      - name: Test polypus-infrastructure (qmio backend)
-        run: cargo test --locked -p polypus-infrastructure --features qmio
-      - name: Test polypus (qmio backend)
-        run: cargo test --locked -p polypus --features qmio
+      - name: Test the qmio backend (polypus-infrastructure and polypus)
+        run: just test-qmio
       # The two backend templates are standalone crates (their own `[workspace]`),
       # so the workspace pass above does not reach them; run each explicitly.
       # Both certify themselves against the conformance battery. The Python one spawns
       # a worker through the subprocess bridge and skips gracefully without an
       # interpreter (setup-python above provides one).
-      - name: Test the Rust backend template
-        run: cargo test --locked --manifest-path examples/rust-backend-template/Cargo.toml
-      - name: Test the Python backend template
-        run: cargo test --locked --manifest-path examples/python-backend-template/Cargo.toml
+      - name: Test the backend templates
+        run: just test-templates
 
   # The native simulator and the circuit IR on macOS and Windows (#416): the
   # calibration cache (its directory, file lock and atomic rename) and the QIR
@@ -470,10 +473,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
-    # Git Bash on Windows too, for `test` below.
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -481,19 +480,22 @@ jobs:
             /*
             !/reference-data/
           sparse-checkout-cone-mode: false
-      - name: reference-data/ is not checked out
-        run: test ! -e reference-data
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
       # All features: includes `parallel`, the calibration cache.
       - name: Test polypus-sim and polypus-circuit (all features)
-        run: cargo test --locked -p polypus-sim -p polypus-circuit --all-features
+        run: just test-portable
 
   # Sanity-check that the rustdoc still builds cleanly across the whole
   # workspace (broken intra-doc links fail via -D warnings). Catches
-  # doc-comment regressions on PRs; the actual publish to Pages lives in
-  # docs.yml, only runs on push to main, and still documents `polypus` only.
+  # doc-comment regressions on PRs. docs.yml builds the same rustdoc into the
+  # site and publishes it to Pages (under /rust/) on push to main; the API of
+  # each release is on docs.rs.
   docs:
     name: docs build
     runs-on: ubuntu-latest
@@ -512,10 +514,12 @@ jobs:
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
       - name: Build docs (no deploy)
-        run: cargo doc --locked --workspace --no-deps
-        env:
-          RUSTDOCFLAGS: "-D warnings"
+        run: just doc
 
   # Build the PyO3 extension wheel on every supported platform, at the floor
   # and latest supported Python (no abi3, so wheels are per-version), then
@@ -533,10 +537,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.10", "3.13"]
-    # Git Bash on Windows too, so `dist/*.whl` expands as on the other runners.
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -552,45 +552,23 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install maturin and pytest
         run: python -m pip install --upgrade maturin pytest
-      # The full distribution wheel — the root pyproject.toml drives maturin
-      # (the `polypus` extension plus the bundled `polypus_python` helpers).
-      # Features come from pyproject `[tool.maturin]`.
-      - name: Build wheel
-        run: maturin build --release --out dist
-      # Also pulls the runtime deps declared in pyproject.toml (qiskit,
-      # qiskit-aer), which the tests below need.
-      - name: Install the wheel
-        run: python -m pip install dist/polypus_quantum-*.whl
-      - name: Import and run the README Bell example
-        env:
-          # Importing polypus would otherwise calibrate the machine (#176).
-          POLYPUS_NO_AUTOCALIBRATE: "1"
-        run: |
-          python - <<'PY'
-          import polypus
-          print("polypus", polypus.__version__)
-          bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
-          result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
-          counts = result.counts[0]
-          print("counts:", counts)
-          assert sum(counts.values()) == 1000, counts
-          assert set(counts) == {"00", "11"}, counts
-          PY
-      # Tests that need only the wheel and its runtime deps, none of them
-      # Linux-specific: on Windows, test_autocalibrate.py checks that the
-      # calibration cache lands in %LOCALAPPDATA% (#416). POLYPUS_ALLOWED_SKIPS
-      # set and empty: any skip fails the run (tests/python/skip_guard.py).
-      - name: Run the portable Python tests
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      # The full distribution wheel (the `polypus` extension plus the bundled
+      # `polypus_python` helpers; features from pyproject `[tool.maturin]`),
+      # installed with the runtime deps it declares (qiskit, qiskit-aer), which
+      # the tests below need.
+      - name: Build and install the wheel
+        run: just wheel
+      # On Windows, test_autocalibrate.py checks that the calibration cache
+      # lands in %LOCALAPPDATA% (#416). POLYPUS_ALLOWED_SKIPS set and empty:
+      # any skip fails the run (tests/python/skip_guard.py).
+      - name: Run the README Bell example and the portable Python tests
         env:
           POLYPUS_ALLOWED_SKIPS: ""
-        run: >
-          pytest
-          tests/python/test_smoke.py
-          tests/python/test_local_run.py
-          tests/python/test_statevector.py
-          tests/python/test_calibration.py
-          tests/python/test_autocalibrate.py
-          -rs --strict-markers
+        run: just pytest-portable
 
   # ---------------------------------------------------------------------------
   # Python test suite. Mirrors install.sh and the manual README instructions:
@@ -634,6 +612,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip maturin pytest
           pip install -r requirements-dev.txt
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
       # The version tests/python/qasm3_fixtures.py names; the wheel below keeps
       # it, since it satisfies the wheel's own Qiskit requirement.
       - name: Install the Qiskit of the OpenQASM 3 fixtures
@@ -647,9 +629,7 @@ jobs:
       # execution seams via PyModule::import). Installing the wheel also pulls the
       # runtime deps declared in pyproject.toml (qiskit, qiskit-aer).
       - name: Build & install polypus-quantum (extension + bundled polypus_python)
-        run: |
-          maturin build --release --out dist
-          pip install dist/polypus_quantum-*.whl
+        run: just wheel
       # The libraries the adapters of polypus.ask_tell wrap, so the tests that
       # train through them (tests/python/test_ask_tell_adapters.py) run here
       # instead of skipping; POLYPUS_REQUIRE_EXTERNAL_LIBRARIES below makes a
@@ -669,7 +649,7 @@ jobs:
       # need optional deps like cunqa), but they must at least stay valid
       # Python — this catches syntax rot without running them.
       - name: Compile-check examples and benchmarks
-        run: python -m compileall -q examples benchmarks
+        run: just compile-examples
       # -rs lists every skipped test with its reason. The POLYPUS_REQUIRE_*
       # variables turn the skips of tests that back a contract into failures:
       # a missing llvm-as, in the fixtures leg another Qiskit, and in the
@@ -693,35 +673,26 @@ jobs:
             ${{ matrix.python-version != '3.13' && 'test_torch_quantum_layer.py' || '' }}
             ${{ matrix.python-version != '3.13' && 'test_typing_stubs.py::TestTorchTypes' || '' }}
             ${{ matrix.python-version != '3.13' && 'test_typing_stubs.py::TestStubsCoverPublicApi::test_every_exported_name_has_a_stub[polypus.torch]' || '' }}
-        run: pytest tests/python -rs --strict-markers
+        run: just pytest
       # The hand-written typing stubs (python/polypus/*.pyi) must match the
       # compiled extension just installed: stubtest fails on a renamed or
       # missing parameter, a changed default or a name the stubs do not declare.
       # mypy comes from requirements-dev.txt, where it is pinned; only the
       # latest leg runs this. The stubs use only `typing`, so they stay valid
-      # for 3.10 users.
+      # for 3.10 users. The recipe sets POLYPUS_NO_AUTOCALIBRATE: importing
+      # polypus would otherwise calibrate the machine (#176).
       - name: Check typing stubs against the extension (stubtest)
         if: matrix.python-version == '3.13'
-        env:
-          # Importing polypus would otherwise calibrate the machine (#176).
-          POLYPUS_NO_AUTOCALIBRATE: "1"
-        run: >
-          python -m mypy.stubtest polypus
-          --allowlist tests/python/stubtest_allowlist.txt
-          --mypy-config-file tests/python/stubtest_mypy.ini
+        run: just stubtest
       # The conformance battery against the Aer backend
       # (polypus-infrastructure/tests/conformance.rs) needs Qiskit Aer and the
       # wheel's polypus_python, so it is #[ignore]d in the Rust job and runs
-      # here. One OpenMP thread: Aer is fragile when it fans experiments out
-      # from a cargo-test thread.
+      # here, on one OpenMP thread (the recipe sets it).
       - name: Conformance battery against the Aer backend
         if: matrix.python-version == '3.13'
         env:
-          OMP_NUM_THREADS: "1"
           POLYPUS_REQUIRE_AER: "1"
-        run: >
-          cargo test --locked -p polypus-infrastructure --test conformance
-          -- --ignored --exact local_aer_backend_conformance --nocapture
+        run: just conformance-aer
 
   # Execute every tutorial notebook headless against this PR's own build, so a
   # broken notebook (a stale API call, a typo introduced while editing) fails
@@ -733,9 +704,6 @@ jobs:
     name: tutorials (execute notebooks)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      # Headless: no display available on the runner.
-      MPLBACKEND: Agg
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -751,13 +719,15 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install build tooling
         run: python -m pip install --upgrade pip maturin
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
       # Same pattern as the python-tests job: build the full wheel (extension
       # + bundled polypus_python) and install it, which also pulls in the
       # runtime deps declared in pyproject.toml (qiskit, qiskit-aer).
       - name: Build & install polypus-quantum (extension + bundled polypus_python)
-        run: |
-          maturin build --release --out dist
-          pip install dist/polypus_quantum-*.whl
+        run: just wheel
       # matplotlib is needed only by the tutorials' plots (the histogram in
       # 01_first_circuit and the demo's figures), not by the package itself.
       - name: Install notebook execution dependencies
@@ -766,14 +736,11 @@ jobs:
       # same CPU pin as the layer tests, which test_torch_import.py checks.
       - name: Install PyTorch (CPU)
         run: pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
-      - name: Register the python3 Jupyter kernel
+      - name: Install the python3 Jupyter kernel
         run: python -m ipykernel install --user --name python3 --display-name "Python 3"
+      # Headless (the recipe sets MPLBACKEND=Agg).
       - name: Execute every tutorial notebook
-        run: |
-          find tutorials -name '*.ipynb' -print0 | while IFS= read -r -d '' nb; do
-            echo "Executing $nb"
-            jupyter nbconvert --to notebook --execute --inplace "$nb"
-          done
+        run: just tutorials
 
   # Fuzz the untrusted OpenQASM 2.0 import surface on a short time budget, as a
   # regression guard for the DoS vectors closed in polypus-circuit (unbounded
@@ -785,10 +752,6 @@ jobs:
     name: fuzz (from_qasm2, from_qasm3)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      # A dated nightly, overriding rust-toolchain.toml in every step. Bump it
-      # deliberately, together with the miri job's.
-      RUSTUP_TOOLCHAIN: nightly-2026-10-22
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -796,20 +759,25 @@ jobs:
             /*
             !/reference-data/
           sparse-checkout-cone-mode: false
-      - name: Install Rust ${{ env.RUSTUP_TOOLCHAIN }}
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      # The justfile's dated nightly, overriding rust-toolchain.toml in every
+      # step. Bump it there, deliberately.
+      - name: Install Rust (the justfile's nightly)
         run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
-          rustc --version
+          toolchain=$(just --evaluate nightly)
+          rustup toolchain install "$toolchain" --profile minimal --no-self-update
+          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Pinned like the nightly: a newer cargo-fuzz may need a newer Rust.
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked --version 0.13.2
       # Seeds from the committed corpora (fuzz/corpus/<target>). A crash or
       # OOM fails the job; a clean 60s run per target passes.
-      - name: Run libFuzzer on from_qasm2 (60s budget)
-        run: cargo fuzz run from_qasm2 -- -max_total_time=60 -rss_limit_mb=2048
-      - name: Run libFuzzer on from_qasm3 (60s budget)
-        run: cargo fuzz run from_qasm3 -- -max_total_time=60 -rss_limit_mb=2048
+      - name: Run libFuzzer on from_qasm2 and from_qasm3 (60s budget each)
+        run: just fuzz 60
 
   # Miri over the `unsafe` in polypus-sim: the raw-pointer rayon kernels
   # (`parallel` feature) and their #342 guards. Reduced test set, since Miri is
@@ -817,18 +785,14 @@ jobs:
   # sequential on small registers) and the memory-safety suite, which runs
   # valid and invalid circuits with `parallel_threshold: 0` so every gate takes
   # the parallel path.
-  # MIRIFLAGS: Tree Borrows, because crossbeam-epoch (under rayon) trips the
-  # stricter Stacked Borrows model; isolation off, because the simulator reads
-  # the calibration cache and CPU info at construction; leaks ignored, because
-  # rayon's global pool threads outlive the test's main thread.
+  # The recipe's MIRIFLAGS: Tree Borrows, because crossbeam-epoch (under rayon)
+  # trips the stricter Stacked Borrows model; isolation off, because the
+  # simulator reads the calibration cache and CPU info at construction; leaks
+  # ignored, because rayon's global pool threads outlive the test's main thread.
   miri:
     name: miri (polypus-sim)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      MIRIFLAGS: "-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-ignore-leaks"
-      # The fuzz job's dated nightly.
-      RUSTUP_TOOLCHAIN: nightly-2026-10-22
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -836,13 +800,17 @@ jobs:
             /*
             !/reference-data/
           sparse-checkout-cone-mode: false
-      - name: Install Rust ${{ env.RUSTUP_TOOLCHAIN }} with Miri
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      # The justfile's dated nightly, overriding rust-toolchain.toml in every
+      # step. Bump it there, deliberately.
+      - name: Install Rust (the justfile's nightly, with Miri)
         run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component miri,rust-src --no-self-update
-          rustc --version
+          toolchain=$(just --evaluate nightly)
+          rustup toolchain install "$toolchain" --profile minimal --component miri,rust-src --no-self-update
+          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo miri setup
-      - name: Miri (kernel unit tests, parallel)
-        run: cargo miri test --locked -p polypus-sim --features parallel --lib "kernels::"
-      - name: Miri (memory-safety suite, parallel)
-        run: cargo miri test --locked -p polypus-sim --features parallel --test memory_safety
+      - name: Miri (kernel unit tests and memory-safety suite, parallel)
+        run: just miri

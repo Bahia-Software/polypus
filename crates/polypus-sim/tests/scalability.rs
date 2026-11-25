@@ -70,12 +70,12 @@ fn statevector_new_rejects_oversized_request_without_panic() {
 fn simulator_rejects_circuit_above_limit() {
     // Construct an oversized circuit header with no gates; run() must reject it
     // before allocating anything.
-    let circuit = ConcreteCircuit::new(40, Vec::new());
+    let circuit = ConcreteCircuit::new(MAX_QUBITS + 1, Vec::new());
     let err = StatevectorSimulator::new().run(&circuit).unwrap_err();
     assert_eq!(
         err,
         SimError::TooManyQubits {
-            requested: 40,
+            requested: MAX_QUBITS + 1,
             max: MAX_QUBITS
         }
     );

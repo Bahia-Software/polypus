@@ -304,6 +304,25 @@ fn matmul4(a: &[[C64; 4]; 4], b: &[[C64; 4]; 4]) -> [[C64; 4]; 4] {
     out
 }
 
+/// `dim` zero amplitudes for a statevector of `num_qubits` qubits, reserved
+/// with [`Vec::try_reserve_exact`] so a refused allocation is a
+/// [`SimError::AllocationFailed`] rather than an abort.
+fn zeroed_amplitudes(num_qubits: usize, dim: usize) -> Result<Vec<C64>, SimError> {
+    let mut data = Vec::new();
+    data.try_reserve_exact(dim)
+        .map_err(|_| allocation_failed(num_qubits, dim))?;
+    data.resize(dim, C64::new(0.0, 0.0));
+    Ok(data)
+}
+
+/// The [`SimError::AllocationFailed`] for `dim` amplitudes.
+fn allocation_failed(num_qubits: usize, dim: usize) -> SimError {
+    SimError::AllocationFailed {
+        num_qubits,
+        bytes: (dim as u64).saturating_mul(std::mem::size_of::<C64>() as u64),
+    }
+}
+
 impl Statevector {
     /// Allocate the `|0…0⟩` state over `num_qubits` qubits.
     ///
@@ -311,6 +330,10 @@ impl Statevector {
     ///
     /// [`SimError::TooManyQubits`] if `num_qubits > `[`MAX_QUBITS`], which also
     /// guarantees `1 << num_qubits` cannot overflow.
+    /// [`SimError::AllocationFailed`] if the system refuses the `2^n`
+    /// amplitudes, instead of aborting the process (issue #428). Whether a
+    /// statevector *should* be allocated is a memory budget's decision, made
+    /// by the caller before this.
     pub fn new(num_qubits: usize) -> Result<Self, SimError> {
         if num_qubits > MAX_QUBITS {
             return Err(SimError::TooManyQubits {
@@ -318,13 +341,27 @@ impl Statevector {
                 max: MAX_QUBITS,
             });
         }
-        let dim = 1usize << num_qubits;
-        let mut data = vec![C64::new(0.0, 0.0); dim];
+        let mut data = zeroed_amplitudes(num_qubits, 1usize << num_qubits)?;
         data[0] = C64::new(1.0, 0.0);
         Ok(Statevector {
             n: num_qubits,
             data,
             parallel_threshold: DEFAULT_PARALLEL_THRESHOLD,
+        })
+    }
+
+    /// A copy of this state, allocated fallibly like [`new`](Self::new): the
+    /// adjoint gradient's second statevector, which [`Clone`] would abort on
+    /// when the system refuses the memory.
+    pub(crate) fn try_clone(&self) -> Result<Self, SimError> {
+        let mut data = Vec::new();
+        data.try_reserve_exact(self.data.len())
+            .map_err(|_| allocation_failed(self.n, self.data.len()))?;
+        data.extend_from_slice(&self.data);
+        Ok(Statevector {
+            n: self.n,
+            data,
+            parallel_threshold: self.parallel_threshold,
         })
     }
 
@@ -793,6 +830,34 @@ impl Statevector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_allocation_is_a_typed_error_not_an_abort() {
+        // More amplitudes than any allocator can grant (the byte count exceeds
+        // `isize::MAX`): `try_reserve_exact` fails without touching memory.
+        let err = zeroed_amplitudes(62, usize::MAX / 2).unwrap_err();
+        assert_eq!(
+            err,
+            SimError::AllocationFailed {
+                num_qubits: 62,
+                bytes: u64::MAX,
+            }
+        );
+        assert!(err.to_string().contains("62 qubits"), "{err}");
+        assert!(err.to_string().contains("refused the memory"), "{err}");
+    }
+
+    #[test]
+    fn a_fallible_allocation_starts_in_the_zero_state() {
+        let sv = Statevector::new(3).unwrap();
+        assert_eq!(sv.dim(), 8);
+        assert_eq!(sv.amplitudes()[0], C64::new(1.0, 0.0));
+        assert!(sv.amplitudes()[1..]
+            .iter()
+            .all(|a| *a == C64::new(0.0, 0.0)));
+        let copy = sv.try_clone().unwrap();
+        assert_eq!(copy, sv);
+    }
 
     /// `into_amplitudes` must hand out exactly the buffer `amplitudes` borrows —
     /// it is the copy-free alternative to `amplitudes().to_vec()`, not a

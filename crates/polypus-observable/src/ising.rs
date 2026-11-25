@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use crate::bound::check_weight_bound_of;
 use crate::{CostObservable, ObservableError, QuboObservable};
 
 /// An Ising cost `f(s) = Σ_i fields[i]·z_i + Σ_(i,j) J·z_i·z_j + constant`,
@@ -16,6 +17,10 @@ pub struct IsingObservable {
     qubo: QuboObservable,
 }
 
+/// How an expansion error ends: an overflowing coefficient means the QUBO
+/// cannot be stored, even when `scale` would keep `Σ|c|·|scale|` small.
+const UNBUILDABLE: &str = ", so the expanded QUBO cannot be built";
+
 impl IsingObservable {
     /// Build an Ising cost from sparse fields and couplings.
     ///
@@ -26,7 +31,22 @@ impl IsingObservable {
     /// - `J·z_i·z_i = J` (a self-coupling folds entirely into the constant,
     ///   since `z_i² = 1`).
     ///
-    /// Validation mirrors [`QuboObservable::new`] (index range, finiteness).
+    /// Validation mirrors [`QuboObservable::new`] (index range, finiteness),
+    /// and its bound on the sum of coefficients
+    /// ([`MAX_WEIGHT_BOUND`](crate::MAX_WEIGHT_BOUND)) applies to the expanded
+    /// QUBO, whose coefficients add up to as much as 9 times the Ising ones
+    /// (a coupling `J` becomes `J`, `-2J`, `-2J` and `4J`).
+    ///
+    /// The errors speak of the caller's input (issue #650). The input's own
+    /// errors come first: `num_vars`, `constant`, `scale`, then each field
+    /// and coupling in order (index, finiteness). Then the expansion's: a
+    /// finite field or coupling whose expanded coefficient (`-2h`, `4J`)
+    /// overflows `f64` is named, then a variable whose linear coefficient
+    /// overflows while the `-2h` and `-2J` on it are added up in order, then
+    /// a constant that overflows while the fields and couplings are added to
+    /// it in order, then an expanded QUBO whose `Σ|c|` overflows `f64`
+    /// (reported before the scale multiplies it), and last a sum above the
+    /// bound, reported as the expanded QUBO's.
     pub fn new(
         num_vars: usize,
         fields: Vec<(usize, f64)>,
@@ -44,11 +64,17 @@ impl IsingObservable {
                 "constant must be finite".to_string(),
             ));
         }
+        if !scale.is_finite() {
+            return Err(ObservableError::Invalid("scale must be finite".to_string()));
+        }
 
         let mut q_constant = constant;
         let mut q_linear: Vec<(usize, f64)> =
             Vec::with_capacity(fields.len() + 2 * couplings.len());
         let mut q_quadratic: Vec<(usize, usize, f64)> = Vec::with_capacity(couplings.len());
+        // The first term whose expansion overflows, reported once every term
+        // of the input has been validated.
+        let mut overflow: Option<String> = None;
 
         for (i, h) in fields {
             if i >= num_vars {
@@ -61,8 +87,15 @@ impl IsingObservable {
                     "field coefficient for index {i} is not finite"
                 )));
             }
+            let linear = -2.0 * h;
+            if !linear.is_finite() && overflow.is_none() {
+                overflow = Some(format!(
+                    "field coefficient for index {i} = {h:e} is too large: its \
+                     expanded QUBO coefficient -2h overflows f64{UNBUILDABLE}"
+                ));
+            }
             q_constant += h;
-            q_linear.push((i, -2.0 * h));
+            q_linear.push((i, linear));
         }
 
         for (i, j, jc) in couplings {
@@ -81,13 +114,56 @@ impl IsingObservable {
                 q_constant += jc;
                 continue;
             }
+            // `4J` overflows whenever `-2J` does, so it is the one named.
+            let quadratic = 4.0 * jc;
+            if !quadratic.is_finite() && overflow.is_none() {
+                overflow = Some(format!(
+                    "coupling coefficient for ({i},{j}) = {jc:e} is too large: its \
+                     expanded QUBO coefficient 4J overflows f64{UNBUILDABLE}"
+                ));
+            }
             q_constant += jc;
             q_linear.push((i, -2.0 * jc));
             q_linear.push((j, -2.0 * jc));
-            q_quadratic.push((i, j, 4.0 * jc));
+            q_quadratic.push((i, j, quadratic));
         }
 
-        // Delegate finiteness of the derived coefficients + storage to QUBO.
+        if let Some(term) = overflow {
+            return Err(ObservableError::Invalid(term));
+        }
+        // The linear coefficients `QuboObservable::new` would store: its
+        // entries added up per variable, in the same order. Each entry is
+        // finite, but their sum can overflow (issue #650); once it does it
+        // stays non-finite, so checking the totals is enough.
+        let mut accumulated = vec![0.0f64; num_vars];
+        for &(i, c) in &q_linear {
+            accumulated[i] += c;
+        }
+        if let Some(i) = accumulated.iter().position(|c| !c.is_finite()) {
+            return Err(ObservableError::Invalid(format!(
+                "the expanded QUBO's linear coefficient for index {i} overflows f64 \
+                 while the -2h and -2J on it are added up in order{UNBUILDABLE}"
+            )));
+        }
+        if !q_constant.is_finite() {
+            // Every term is finite, so the running sum overflowed (it cannot
+            // come back from `inf`).
+            return Err(ObservableError::Invalid(format!(
+                "the expanded QUBO's constant overflows f64 while the fields and \
+                 couplings are added to it in order{UNBUILDABLE}"
+            )));
+        }
+        // The check `QuboObservable::new` runs, over the same coefficients in
+        // the same order, so the QUBO's own never fails after it.
+        check_weight_bound_of(
+            "the expanded QUBO's Σ|c|",
+            " (each field h adds up to 3·|h| to it, and each coupling J up to 9·|J|)",
+            std::iter::once(q_constant)
+                .chain(q_linear.iter().map(|&(_, c)| c))
+                .chain(q_quadratic.iter().map(|&(_, _, w)| w)),
+            scale,
+        )?;
+
         let qubo = QuboObservable::new(num_vars, q_linear, q_quadratic, q_constant, scale)?;
         Ok(Self { qubo })
     }
@@ -110,6 +186,7 @@ impl CostObservable for IsingObservable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MAX_WEIGHT_BOUND;
 
     fn counts(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
         pairs.iter().map(|(k, n)| (k.to_string(), *n)).collect()
@@ -199,10 +276,414 @@ mod tests {
     }
 
     #[test]
+    fn a_count_total_above_u64_is_an_error_not_a_panic() {
+        // f = z_0: "00" -> +1, "01" -> -1. Each count fits in a u64, but the
+        // total does not.
+        let obs = IsingObservable::new(2, vec![(0, 1.0)], vec![], 0.0, 1.0).unwrap();
+        let result = obs.expectation_batch(&[counts(&[("00", u64::MAX), ("01", 1)])]);
+        assert!(
+            matches!(&result, Err(ObservableError::Invalid(m)) if m.contains("overflows u64")),
+            "{result:?}"
+        );
+        // Exactly u64::MAX in total is still evaluated. Exact: u64::MAX - 1
+        // converts to 2⁶⁴, the numerator 2⁶⁴ - 1 rounds to 2⁶⁴, and so does the
+        // total, so the mean is 1.
+        let ev = obs
+            .expectation_batch(&[counts(&[("00", u64::MAX - 1), ("01", 1)])])
+            .unwrap();
+        assert_eq!(ev, vec![1.0]);
+    }
+
+    #[test]
+    fn the_weight_bound_applies_to_the_expanded_qubo() {
+        // h·z_0 expands to h - 2h·x_0, whose coefficients add up to 3|h|: about
+        // 3e288 is within MAX_WEIGHT_BOUND (about 4.9e288), 6e288 is not.
+        assert!(IsingObservable::new(1, vec![(0, 1e288)], vec![], 0.0, 1.0).is_ok());
+        let result = IsingObservable::new(1, vec![(0, 2e288)], vec![], 0.0, 1.0);
+        assert!(
+            matches!(&result, Err(ObservableError::Invalid(m)) if m.contains("exceeds")),
+            "{result:?}"
+        );
+        // Accepted before #625, and then evaluated to NaN or -inf: a field and
+        // a coupling on variable 0 expand to two finite linear entries,
+        // -1.6e308 and -8e307, whose sum is not.
+        // The variable is named (issue #650).
+        let result = IsingObservable::new(2, vec![(0, 8e307)], vec![(0, 1, 4e307)], 0.0, 1.0);
+        assert!(
+            matches!(&result, Err(ObservableError::Invalid(m))
+                if m.starts_with("the expanded QUBO's linear coefficient for index 0 ")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn the_weight_bound_is_inclusive_on_the_expanded_qubo() {
+        let b = MAX_WEIGHT_BOUND;
+        // f = -b/2 + (b/2)·z_0 expands to the QUBO 0 - b·x_0 (exactly: the
+        // constant is -b/2 + b/2), whose coefficients add up to exactly b.
+        let obs = IsingObservable::new(1, vec![(0, b / 2.0)], vec![], -b / 2.0, 1.0).unwrap();
+        // And it stays finite at the bound. Exact: -b times a count that
+        // rounds to 2⁶⁴, divided by the same count.
+        assert_eq!(
+            obs.expectation_batch(&[counts(&[("1", u64::MAX)])])
+                .unwrap(),
+            vec![-b]
+        );
+        // The next field above b/2 exceeds it.
+        let above = f64::from_bits((b / 2.0).to_bits() + 1);
+        let result = IsingObservable::new(1, vec![(0, above)], vec![], -b / 2.0, 1.0);
+        assert!(
+            matches!(&result, Err(ObservableError::Invalid(m)) if m.contains("exceeds")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
     fn rejects_bad_construction() {
         assert!(IsingObservable::new(0, vec![], vec![], 0.0, 1.0).is_err());
         assert!(IsingObservable::new(2, vec![(2, 1.0)], vec![], 0.0, 1.0).is_err());
         assert!(IsingObservable::new(2, vec![], vec![(0, 2, 1.0)], 0.0, 1.0).is_err());
         assert!(IsingObservable::new(2, vec![(0, f64::NAN)], vec![], 0.0, 1.0).is_err());
+    }
+
+    /// The error of an expanded QUBO whose `Σ|c|` overflows `f64`.
+    const SUM_OVERFLOWS: &str = "the expanded QUBO's Σ|c| overflows f64: a value or a \
+                                 weighted mean of counts could overflow (each field h adds \
+                                 up to 3·|h| to it, and each coupling J up to 9·|J|)";
+
+    /// The message of an `Invalid` error, or a panic naming what came back.
+    fn message(result: Result<IsingObservable, ObservableError>) -> String {
+        match result {
+            Err(ObservableError::Invalid(m)) => m,
+            other => panic!("expected ObservableError::Invalid, got {other:?}"),
+        }
+    }
+
+    // Issue #650: the expansion's errors name the caller's term, or speak of
+    // the expanded QUBO, instead of naming a QUBO coefficient.
+    #[test]
+    fn a_field_whose_expansion_overflows_is_named() {
+        // -2h overflows while h and the folded constant stay finite: the
+        // field is named, not the bound.
+        let m = message(IsingObservable::new(2, vec![(1, 1e308)], vec![], 0.0, 1.0));
+        assert_eq!(
+            m,
+            "field coefficient for index 1 = 1e308 is too large: its expanded QUBO \
+             coefficient -2h overflows f64, so the expanded QUBO cannot be built"
+        );
+        // The largest field whose -2h is finite is not named: its expanded
+        // QUBO can be built, and only its Σ|c| (3·|h|) overflows.
+        let m = message(IsingObservable::new(
+            1,
+            vec![(0, f64::MAX / 2.0)],
+            vec![],
+            0.0,
+            1.0,
+        ));
+        assert_eq!(m, SUM_OVERFLOWS);
+    }
+
+    #[test]
+    fn a_coupling_whose_expansion_overflows_is_named() {
+        // 4J overflows while -2J does not, and both do.
+        for jc in [5e307, -1e308] {
+            let m = message(IsingObservable::new(3, vec![], vec![(2, 0, jc)], 0.0, 1.0));
+            assert_eq!(
+                m,
+                format!(
+                    "coupling coefficient for (2,0) = {jc:e} is too large: its expanded \
+                     QUBO coefficient 4J overflows f64, so the expanded QUBO cannot be built"
+                )
+            );
+        }
+        // The largest coupling whose 4J is finite is not named: its expanded
+        // QUBO can be built, and only its Σ|c| (9·|J|) overflows.
+        let m = message(IsingObservable::new(
+            2,
+            vec![],
+            vec![(0, 1, f64::MAX / 4.0)],
+            0.0,
+            1.0,
+        ));
+        assert_eq!(m, SUM_OVERFLOWS);
+        // A self-coupling only adds to the constant, so it never overflows by
+        // itself.
+        assert!(message(IsingObservable::new(
+            1,
+            vec![],
+            vec![(0, 0, 1e308)],
+            0.0,
+            1.0
+        ))
+        .starts_with("the expanded QUBO's Σ|c|·|scale| = "));
+    }
+
+    #[test]
+    fn a_constant_that_overflows_once_folded_is_named() {
+        let expected = "the expanded QUBO's constant overflows f64 while the fields and \
+                        couplings are added to it in order, so the expanded QUBO cannot be \
+                        built";
+        // Through a field (whose -2h is finite), a coupling (whose 4J is
+        // finite) and a self-coupling, upwards and downwards.
+        for (fields, couplings, constant) in [
+            (vec![(0, 8e307)], vec![], 1.7e308),
+            (vec![], vec![(0, 1, 4e307)], 1.7e308),
+            (vec![], vec![(1, 1, 1e308)], 1.7e308),
+            (vec![(0, -8e307)], vec![(1, 1, -1e308)], -1e308),
+            // In order: 1.7e308 + 8e307 overflows, though the exact total,
+            // 1.7e308, is finite (as the QUBO would add it up).
+            (vec![(0, 8e307), (1, -8e307)], vec![], 1.7e308),
+        ] {
+            let m = message(IsingObservable::new(2, fields, couplings, constant, 1.0));
+            assert_eq!(m, expected);
+        }
+    }
+
+    #[test]
+    fn an_overflow_is_not_reported_as_a_sum_above_the_bound() {
+        // With |scale| < 1 (or 0) the true Σ|c|·|scale| of an overflowing
+        // expansion can be small, so its error says only that the QUBO cannot
+        // be built; it was rejected before #650 too.
+        for scale in [1e-300, 0.0] {
+            for m in [
+                message(IsingObservable::new(
+                    2,
+                    vec![],
+                    vec![(0, 1, 1e308)],
+                    0.0,
+                    scale,
+                )),
+                message(IsingObservable::new(
+                    1,
+                    vec![(0, 1e308)],
+                    vec![],
+                    0.0,
+                    scale,
+                )),
+                message(IsingObservable::new(
+                    1,
+                    vec![(0, 8e307)],
+                    vec![],
+                    1.7e308,
+                    scale,
+                )),
+                message(accumulating_on_variable_0(scale)),
+            ] {
+                assert!(m.ends_with("so the expanded QUBO cannot be built"), "{m}");
+                assert!(!m.contains("exceeds"), "{m}");
+            }
+        }
+    }
+
+    /// Three couplings on variable 0 (the reviewer's example on #653):
+    /// each `-2J = -8e307` and `4J = 1.6e308` is finite, and so is the
+    /// constant `1.2e308`, but variable 0's linear coefficient is `-2.4e308`.
+    fn accumulating_on_variable_0(scale: f64) -> Result<IsingObservable, ObservableError> {
+        IsingObservable::new(
+            4,
+            vec![],
+            vec![(0, 1, 4e307), (0, 2, 4e307), (0, 3, 4e307)],
+            0.0,
+            scale,
+        )
+    }
+
+    /// Three couplings on disjoint pairs: every coefficient of the expanded
+    /// QUBO, accumulated or not, is finite, but their `Σ|c|` (`1.2e308` +
+    /// `6·8e307` + `3·1.6e308`) is not.
+    fn overflowing_the_sum(scale: f64) -> Result<IsingObservable, ObservableError> {
+        IsingObservable::new(
+            6,
+            vec![],
+            vec![(0, 1, 4e307), (2, 3, 4e307), (4, 5, 4e307)],
+            0.0,
+            scale,
+        )
+    }
+
+    #[test]
+    fn a_linear_coefficient_that_overflows_once_accumulated_is_named() {
+        let expected = "the expanded QUBO's linear coefficient for index 0 overflows f64 \
+                        while the -2h and -2J on it are added up in order, so the expanded \
+                        QUBO cannot be built";
+        for scale in [1.0, 1e-300, 0.0, -1.0] {
+            assert_eq!(message(accumulating_on_variable_0(scale)), expected);
+        }
+        // Through fields and couplings together, downwards, on variable 2:
+        // -2·8e307 + -2·4e307 + -2·4e307 = -3.2e308.
+        let m = message(IsingObservable::new(
+            3,
+            vec![(2, 8e307)],
+            vec![(1, 2, 4e307), (2, 0, 4e307)],
+            0.0,
+            1.0,
+        ));
+        assert_eq!(m, expected.replace("index 0", "index 2"));
+        // Upwards only, on variable 1: -2·(-8e307) twice is 3.2e308, while
+        // the constant ends at -1.6e308.
+        let m = message(IsingObservable::new(
+            2,
+            vec![(1, -8e307), (1, -8e307)],
+            vec![],
+            0.0,
+            1.0,
+        ));
+        assert_eq!(m, expected.replace("index 0", "index 1"));
+        // Upwards on variable 1 (-2·(-8e307) twice) and downwards on
+        // variable 0 (-2·8e307 twice), while the constant stays finite (it
+        // swings between -8e307 and 0). The lowest index is named.
+        let m = message(IsingObservable::new(
+            2,
+            vec![(1, -8e307), (0, 8e307), (1, -8e307), (0, 8e307)],
+            vec![],
+            0.0,
+            1.0,
+        ));
+        assert_eq!(m, expected);
+        // In order: -2·8e307 twice overflows before +2·8e307 would bring the
+        // exact total back to -1.6e308. The QUBO would add it up the same way.
+        let m = message(IsingObservable::new(
+            1,
+            vec![(0, 8e307), (0, 8e307), (0, -8e307)],
+            vec![],
+            0.0,
+            1.0,
+        ));
+        assert_eq!(m, expected);
+        // An accumulated coefficient that stays finite is accepted:
+        // -2·2.5e307 twice is -1e308, and Σ|c|·|scale| = 1.5e308·1e-30 meets
+        // the bound.
+        assert!(
+            IsingObservable::new(1, vec![(0, 2.5e307), (0, 2.5e307)], vec![], 0.0, 1e-30).is_ok()
+        );
+    }
+
+    #[test]
+    fn a_sum_that_overflows_is_reported_before_the_scale() {
+        for scale in [1.0, 1e-300, 0.0, -1.0] {
+            assert_eq!(message(overflowing_the_sum(scale)), SUM_OVERFLOWS);
+        }
+    }
+
+    #[test]
+    fn the_bound_is_reported_as_the_expanded_qubo_sum() {
+        // 3·|h| = 6e288 is above MAX_WEIGHT_BOUND (about 4.9e288) though
+        // |h| = 2e288 is not.
+        let m = message(IsingObservable::new(1, vec![(0, 2e288)], vec![], 0.0, 1.0));
+        assert_eq!(
+            m,
+            format!(
+                "the expanded QUBO's Σ|c|·|scale| = 6e288 exceeds {MAX_WEIGHT_BOUND:e}: a \
+                 value or a weighted mean of counts could overflow (each field h adds up \
+                 to 3·|h| to it, and each coupling J up to 9·|J|)"
+            )
+        );
+    }
+
+    #[test]
+    fn the_input_errors_come_before_the_expansion_errors() {
+        let overflowing = vec![(0, 1e308)];
+        // A later field or coupling out of range, or not finite: the Ising
+        // messages, not the QUBO's "linear …" ones.
+        assert_eq!(
+            message(IsingObservable::new(
+                2,
+                vec![(0, 1e308), (2, 1.0)],
+                vec![],
+                0.0,
+                1.0
+            )),
+            "field index 2 out of range for 2 variables"
+        );
+        assert_eq!(
+            message(IsingObservable::new(
+                2,
+                overflowing.clone(),
+                vec![(0, 1, f64::NAN)],
+                0.0,
+                1.0
+            )),
+            "coupling coefficient for (0,1) is not finite"
+        );
+        // A scale that is not finite, which the bound check would otherwise
+        // report as an exceeded sum.
+        for scale in [f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                message(IsingObservable::new(
+                    2,
+                    overflowing.clone(),
+                    vec![],
+                    0.0,
+                    scale
+                )),
+                "scale must be finite"
+            );
+            assert_eq!(
+                message(IsingObservable::new(2, vec![], vec![], 0.0, scale)),
+                "scale must be finite"
+            );
+        }
+        // The first overflowing term is named: fields before couplings, each
+        // in order.
+        let m = message(IsingObservable::new(
+            3,
+            vec![(2, 1e308), (1, 1e308)],
+            vec![(0, 1, 1e308)],
+            0.0,
+            1.0,
+        ));
+        assert_eq!(
+            m,
+            "field coefficient for index 2 = 1e308 is too large: its expanded QUBO \
+             coefficient -2h overflows f64, so the expanded QUBO cannot be built"
+        );
+        // A term's overflow before an accumulated one: variable 0 overflows
+        // once accumulated, and the later coupling's 4J by itself.
+        let m = message(IsingObservable::new(
+            3,
+            vec![(0, 8e307), (0, 8e307)],
+            vec![(1, 2, 1e308)],
+            0.0,
+            1.0,
+        ));
+        assert!(
+            m.starts_with("coupling coefficient for (1,2) = 1e308 "),
+            "{m}"
+        );
+        // An accumulated overflow before the constant's: both overflow here.
+        let m = message(IsingObservable::new(
+            1,
+            vec![(0, 8e307), (0, 8e307)],
+            vec![],
+            1.7e308,
+            1.0,
+        ));
+        assert!(
+            m.starts_with("the expanded QUBO's linear coefficient for index 0 "),
+            "{m}"
+        );
+        // The constant's before an overflowing sum: 1.7e308 + 1.2e308 is not
+        // finite, and neither is the sum.
+        let m = message(IsingObservable::new(
+            6,
+            vec![],
+            vec![(0, 1, 4e307), (2, 3, 4e307), (4, 5, 4e307)],
+            1.7e308,
+            1.0,
+        ));
+        assert!(m.starts_with("the expanded QUBO's constant "), "{m}");
+        // A term's overflow before the constant's.
+        let m = message(IsingObservable::new(
+            2,
+            vec![(0, 8e307)],
+            vec![(0, 1, 1e308)],
+            1.7e308,
+            1.0,
+        ));
+        assert_eq!(
+            m,
+            "coupling coefficient for (0,1) = 1e308 is too large: its expanded QUBO \
+             coefficient 4J overflows f64, so the expanded QUBO cannot be built"
+        );
     }
 }

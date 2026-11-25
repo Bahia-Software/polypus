@@ -10,7 +10,8 @@
 #   - crates/polypus-optimizers : pure-Rust variational optimizers (DE, PSO, QNG, CMA-ES) decoupled
 #                              from circuits and Python via EvaluationOracle/VarianceOracle
 #   - crates/polypus-observable : pure-Rust, GIL-free cost observables (QUBO/Ising and other
-#                              diagonal costs) mapping measurement counts to expectation values
+#                              diagonal costs, Pauli-sum grouping and parity reduction) mapping
+#                              measurement counts to expectation values
 #   - crates/polypus-qml     : pure-Rust quantum machine learning (datasets, layered models,
 #                              Pauli readout, losses); produces polypus-circuit circuits (no PyO3)
 #   - crates/polypus-backend : the pyo3-free QuantumBackend contract a third party implements,
@@ -98,7 +99,7 @@ rand               = "0.10"
 # its own version, so an older `serde` can't share a lock with it.
 serde              = { version = "1.0.221", features = ["derive"] }
 serde_json         = "1.0.127"
-nix                = { version = "0.31", features = ["signal", "process"] }
+nix                = { version = "0.32", features = ["signal", "process"] }
 # PyO3 for the crates that touch Python (`polypus`, `polypus-infrastructure`,
 # `polypus-evaluation`): one pyo3 in the graph. rust-numpy releases are pinned
 # 1:1 to a pyo3 minor, so bump `numpy` together with `pyo3`. Features (e.g.

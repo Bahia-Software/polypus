@@ -8,15 +8,21 @@
 //! [`SimError::NonFiniteAmplitude`]. The returned *error variant alone* therefore
 //! says whether the loop reached the end of the circuit — `Cancelled` proves it
 //! stopped early, `NonFiniteAmplitude` proves it did not — so nothing here
-//! asserts on wall-clock time, which would be flaky on a loaded CI runner and
+//! assumes how long a run takes, which would be flaky on a loaded CI runner and
 //! would have to be re-tuned for the ~40x gap between the debug and release
-//! profiles. What the circuits *are* sized for is duration: long enough that the
-//! throttle's checkpoints come due while the loop is still running, with a wide
-//! enough margin to hold on a much faster machine (the sizes below are ~10x and
-//! ~30x the checkpoint interval in release, ~40x that in debug).
+//! profiles (and more under coverage instrumentation). The one assertion that
+//! involves the clock, the throttle bound, compares the hook calls with the
+//! run's *measured* duration rather than with a fraction of the gate count, so
+//! a slow run allows exactly as many more calls as the throttle would make; see
+//! [`MIN_HOOK_INTERVAL`]. What the circuits *are* sized for is duration: long
+//! enough that the throttle's checkpoints come due while the loop is still
+//! running, with a wide enough margin to hold on a much faster machine (the
+//! sizes below are ~10x and ~30x the checkpoint interval in release, ~40x that
+//! in debug).
 
 use polypus_circuit::{ConcreteCircuit, GateInstruction as G, GateParam::Fixed};
 use polypus_sim::{AngleRef, SimError, Simulator, StatevectorSimulator, MAX_QUBITS};
+use std::time::{Duration, Instant};
 
 /// Qubits for the long circuits. High enough that a single gate is expensive
 /// (16k amplitudes), so a modest gate count buys a run of a few hundred
@@ -30,6 +36,15 @@ const LONG: usize = 60_000;
 /// Gates for a circuit that must outlive *at least one* checkpoint and then be
 /// run to completion, so it is kept as short as that allows.
 const SHORT: usize = 3_000;
+
+/// The shortest wall-clock gap the simulator leaves between two hook calls:
+/// `CANCELLATION_CHECK_INTERVAL` in `src/simulator.rs`, mirrored here because
+/// it is private. A unit test there pins that constant to this value, so the
+/// two cannot drift apart unnoticed. The throttle only ever *raises* the gap (for an expensive
+/// hook), and times the first call from its first clock read, which is after
+/// the run starts — so a run that lasted `elapsed` called the hook at most
+/// `elapsed / MIN_HOOK_INTERVAL` times, however slow the machine.
+const MIN_HOOK_INTERVAL: Duration = Duration::from_millis(25);
 
 /// A simulator pinned to the sequential kernels (`parallel_threshold` above any
 /// qubit count used here), so these tests take the same path — and last the same
@@ -111,6 +126,7 @@ fn the_hook_is_polled_until_it_asks_to_stop() {
 fn a_hook_that_never_cancels_lets_the_run_finish() {
     let circuit = nan_terminated_circuit(SHORT);
     let mut calls = 0usize;
+    let started = Instant::now();
     let err = {
         let mut never = || {
             calls += 1;
@@ -120,17 +136,24 @@ fn a_hook_that_never_cancels_lets_the_run_finish() {
             .run_cancellable(&circuit, Some(&mut never))
             .unwrap_err()
     };
+    let elapsed = started.elapsed();
     // Reached the poisoned final gate: a hook answering "no" must not cut the
     // circuit short.
     assert_eq!(err, SimError::NonFiniteAmplitude);
     // The checkpoints did fire (otherwise the test above proves nothing) …
     assert!(calls >= 1, "the hook was never polled");
-    // … but nowhere near once per gate: that is the throttle doing its job, and
-    // the whole reason an expensive hook (the `polypus` crate's reacquires the
-    // GIL) cannot slow a simulation down.
+    // … but no more often than the interval allows: that is the throttle doing
+    // its job, and the whole reason an expensive hook (the `polypus` crate's
+    // reacquires the GIL) cannot slow a simulation down. The bound comes from
+    // the measured duration, not the gate count, so it holds on a runner of any
+    // speed — and it is exact, not padded: with the interval removed the hook
+    // is called every few gates, ~30x over this bound in a debug build.
+    let allowed = elapsed.as_nanos() / MIN_HOOK_INTERVAL.as_nanos();
     assert!(
-        calls < SHORT / 10,
-        "hook polled {calls} times for {SHORT} gates — the throttle is not working"
+        calls as u128 <= allowed,
+        "hook polled {calls} times in {elapsed:?} for {SHORT} gates, at most \
+         {allowed} allowed at one call per {MIN_HOOK_INTERVAL:?} — the throttle \
+         is not working"
     );
 }
 
