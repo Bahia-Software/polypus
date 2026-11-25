@@ -24,6 +24,7 @@ use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 /// Seed for the circuit at global position `index` of a backend seeded with
 /// `base_seed` ([`polypus_backend::stream_seed`], contract C-7).
@@ -367,18 +368,39 @@ impl NativeStatevectorBackend {
     ///   measures individual qubits is [`BackendError::UnsupportedCircuit`]:
     ///   its distribution would have to be marginalised over the unmeasured
     ///   qubits.
-    /// - **Bounded memory.** The same statevector budget as `run_circuits`: a
-    ///   widest circuit that cannot fit even alone is refused
+    /// - **Bounded memory** (issues #215, #628). A widest circuit whose
+    ///   statevector cannot fit even alone is refused
     ///   ([`BackendError::InsufficientMemory`]) before anything runs, and the
     ///   batch runs in windows of at most as many circuits as fit at once. Each
     ///   result map holds up to `2^n` entries, so the output, unlike counts,
-    ///   grows with the width of the circuits rather than with the shots.
+    ///   grows with the width of the circuits rather than with the shots: the
+    ///   maps of the whole batch (the hash table and its keys' buffers) count
+    ///   against the budget beside the statevectors in flight. A circuit's map
+    ///   is sized from its non-zero states before it is built, and one that
+    ///   would not fit is [`BackendError::InsufficientMemoryForResult`] instead
+    ///   of being allocated; before refusing, the batch drops to one circuit
+    ///   at a time, so a refusal means the maps and one statevector exceed the
+    ///   budget, on any number of threads. A sparse output (a GHZ state has two
+    ///   entries) is cheap at any width. Under the blind fallback budget (no
+    ///   limit detected) no map is refused, as no statevector is.
     pub fn run_circuits_exact(
         &self,
         qcs: &[BoundCircuit],
         config: &RunParams,
     ) -> Result<Vec<HashMap<String, f64>>, BackendError> {
-        self.run_circuits_exact_with(qcs, config, Ok::<_, BackendError>)
+        self.run_circuits_exact_against(qcs, config, active_budget())
+    }
+
+    /// [`run_circuits_exact`](Self::run_circuits_exact) against an explicit
+    /// `budget`, so the refusals are testable without touching the process
+    /// environment.
+    fn run_circuits_exact_against(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &RunParams,
+        budget: MemBudget,
+    ) -> Result<Vec<HashMap<String, f64>>, BackendError> {
+        self.run_exact_reading(qcs, config, budget, MapLife::Kept, &Ok::<_, BackendError>)
     }
 
     /// [`run_circuits_exact`](Self::run_circuits_exact), handing each
@@ -395,6 +417,12 @@ impl NativeStatevectorBackend {
     /// window run in parallel); the rest of the window then stops as
     /// `run_circuits_exact` does, and no later window runs.
     ///
+    /// Memory (issue #628): a map counts against the budget, beside the
+    /// statevectors in flight, only while it is built and read, so a refusal
+    /// ([`BackendError::InsufficientMemoryForResult`], after dropping to one
+    /// circuit at a time) means one circuit's map and statevector exceed the
+    /// budget. What `read` returns is not counted: keep it small.
+    ///
     /// # Errors
     ///
     /// The backend's errors as for `run_circuits_exact`, converted with
@@ -410,21 +438,20 @@ impl NativeStatevectorBackend {
         E: From<BackendError> + Send,
         F: Fn(HashMap<String, f64>) -> Result<T, E> + Sync,
     {
-        let widest = representative_qubits(qcs);
-        self.check_memory(widest)?;
-        let cap = max_statevector_concurrency(widest, rayon::current_num_threads());
-        self.run_exact_with_cap(qcs, config, cap, &read)
+        self.run_exact_reading(qcs, config, active_budget(), MapLife::Read, &read)
     }
 
-    /// [`run_circuits_exact_with`](Self::run_circuits_exact_with) holding at
-    /// most `cap` statevectors at once: the windowing of
-    /// [`run_batch_with_cap`](Self::run_batch_with_cap) without the seeds. A
-    /// pure resource bound, so the result is the same for every `cap`.
-    fn run_exact_with_cap<T, E, F>(
+    /// The memory check and windowing shared by
+    /// [`run_circuits_exact`](Self::run_circuits_exact) (`life` =
+    /// [`MapLife::Kept`]) and
+    /// [`run_circuits_exact_with`](Self::run_circuits_exact_with)
+    /// ([`MapLife::Read`]), against an explicit `budget`.
+    fn run_exact_reading<T, E, F>(
         &self,
         qcs: &[BoundCircuit],
         config: &RunParams,
-        cap: usize,
+        budget: MemBudget,
+        life: MapLife,
         read: &F,
     ) -> Result<Vec<T>, E>
     where
@@ -432,37 +459,246 @@ impl NativeStatevectorBackend {
         E: From<BackendError> + Send,
         F: Fn(HashMap<String, f64>) -> Result<T, E> + Sync,
     {
+        let plan = self.exact_plan(qcs, budget, true, life == MapLife::Read)?;
+        self.run_exact_with_cap(qcs, config, plan, &|qc, opts, pt, allowance| {
+            let (map, reserved) = self
+                .simulate_one_exact(qc, opts, pt, allowance)
+                .map_err(Stop::from_backend)?;
+            let value = read(map).map_err(Stop::Other);
+            if let (MapLife::Read, Some(allowance)) = (life, allowance) {
+                allowance.release(reserved);
+            }
+            value
+        })
+        .map(|(values, _)| values)
+    }
+
+    /// [`run_circuits_exact_with`](Self::run_circuits_exact_with) without
+    /// the maps (issue #628): `read` gets each circuit's amplitudes and the
+    /// width its counts are keyed at, as soon as it is simulated, on the
+    /// thread that simulated it, and only what it returns is kept. The map
+    /// `run_circuits_exact` would build from the same amplitudes holds each
+    /// state's `|amplitude|²` (`norm_sqr`) under its `width`-bit key, the
+    /// zero ones left out; `polypus_qml::ExactState` reads the amplitudes as
+    /// that map, bit for bit. Nothing beyond the statevectors in flight is
+    /// held, so this path needs only the statevector budget: what the exact
+    /// QML gradients and primitives run.
+    ///
+    /// Order and errors as for `run_circuits_exact_with`.
+    ///
+    /// # Errors
+    ///
+    /// The backend's errors as for `run_circuits_exact`, converted with
+    /// `E::from`, and whatever `read` returns.
+    pub fn run_circuits_exact_on_states<T, E, F>(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &RunParams,
+        read: F,
+    ) -> Result<Vec<T>, E>
+    where
+        T: Send,
+        E: From<BackendError> + Send,
+        F: Fn(&[C64], usize) -> Result<T, E> + Sync,
+    {
+        self.run_states_against(qcs, config, active_budget(), &read)
+    }
+
+    /// [`run_circuits_exact_on_states`](Self::run_circuits_exact_on_states)
+    /// against an explicit `budget`.
+    fn run_states_against<T, E, F>(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &RunParams,
+        budget: MemBudget,
+        read: &F,
+    ) -> Result<Vec<T>, E>
+    where
+        T: Send,
+        E: From<BackendError> + Send,
+        F: Fn(&[C64], usize) -> Result<T, E> + Sync,
+    {
+        let plan = self.exact_plan(qcs, budget, false, false)?;
+        self.run_exact_with_cap(qcs, config, plan, &|qc, opts, pt, _| {
+            let (state, width) = self
+                .simulate_one_state(qc, opts, pt)
+                .map_err(Stop::from_backend)?;
+            read(state.amplitudes(), width).map_err(Stop::Other)
+        })
+        .map(|(values, _)| values)
+    }
+
+    /// The statevector check of an exact batch, then how it runs: as many
+    /// statevectors of its widest width at once as `budget` holds, and, when
+    /// it builds `maps` under a known budget, an allowance for them, counting
+    /// each map on its own when they are read one by one (`per_circuit`).
+    fn exact_plan(
+        &self,
+        qcs: &[BoundCircuit],
+        budget: MemBudget,
+        maps: bool,
+        per_circuit: bool,
+    ) -> Result<ExactPlan, BackendError> {
+        let widest = representative_qubits(qcs);
+        self.check_memory_against(widest, budget)?;
+        Ok(ExactPlan {
+            cap: concurrency_under(budget, widest, rayon::current_num_threads()),
+            widest,
+            budget,
+            maps,
+            per_circuit,
+        })
+    }
+
+    /// [`run_exact_reading`](Self::run_exact_reading) holding at most
+    /// `plan.cap` statevectors of `plan.widest` qubits at once: the windowing
+    /// of [`run_batch_with_cap`](Self::run_batch_with_cap) without the seeds.
+    /// A pure resource bound, so a result is the same for every cap. Also
+    /// says whether the batch had to drop to one circuit at a time.
+    ///
+    /// The result maps count against `plan.budget` beside the statevectors in
+    /// flight (see [`ResultAllowance`]): until the batch returns when they are
+    /// [`MapLife::Kept`], only while each is built and read when
+    /// [`MapLife::Read`]. Room taken by statevectors is room the maps lack, so
+    /// the circuits of a window whose maps did not fit beside its statevectors
+    /// are run again one at a time (the others' results are kept), and so is
+    /// the rest of the batch. A batch is therefore refused exactly when its
+    /// maps (the kept ones, or the largest read one) and one statevector
+    /// exceed the budget, on any number of threads. Any other error is the one
+    /// of the earliest circuit that failed, so a batch reports the same error
+    /// whatever the scheduling.
+    fn run_exact_with_cap<T, E, G>(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &RunParams,
+        plan: ExactPlan,
+        one: &G,
+    ) -> Result<(Vec<T>, bool), E>
+    where
+        T: Send,
+        E: From<BackendError> + Send,
+        G: Fn(
+                &BoundCircuit,
+                &TranspileOptions,
+                usize,
+                Option<&ResultAllowance>,
+            ) -> Result<T, Stop<E>>
+            + Sync,
+    {
         let opts = TranspileOptions {
             level: config.opt_level,
         };
         let threads = rayon::current_num_threads();
-        let cap = cap.max(1);
-        // Same fast path as the sampled batch: when every thread's statevector
-        // fits, rayon already bounds the circuits in flight.
-        let window = if cap >= threads {
-            qcs.len().max(1)
-        } else {
-            cap
-        };
+        let mut cap = plan.cap.max(1);
+        let mut throttled = false;
+        let allowance = (plan.maps && plan.budget.source != BudgetSource::Fallback)
+            .then(|| ResultAllowance::new(qcs.len(), plan.widest, plan.budget, plan.per_circuit));
         let mut out = Vec::with_capacity(qcs.len());
-        for chunk in qcs.chunks(window) {
+        let mut offset = 0;
+        while offset < qcs.len() {
+            // Same fast path as the sampled batch: when every thread's
+            // statevector fits, rayon already bounds the circuits in flight.
+            let window = if cap >= threads {
+                qcs.len() - offset
+            } else {
+                cap
+            };
+            let chunk = &qcs[offset..(offset + window).min(qcs.len())];
+            let in_flight = chunk.len().min(threads).max(1);
+            if let Some(allowance) = allowance.as_ref() {
+                allowance.begin_window(in_flight);
+            }
             let pt = self.gate_parallel_threshold(chunk.len(), threads);
-            let block: Vec<T> = chunk
+            let results: Vec<Result<T, Stop<E>>> = chunk
                 .par_iter()
-                .map(|qc| read(self.simulate_one_exact(qc, &opts, pt)?))
-                .collect::<Result<_, _>>()?;
-            out.extend(block);
+                .map(|qc| one(qc, &opts, pt, allowance.as_ref()))
+                .collect();
+            let mut values = Vec::with_capacity(results.len());
+            let mut refused = Vec::new();
+            for (index, result) in results.into_iter().enumerate() {
+                match result {
+                    Ok(value) => values.push(Some(value)),
+                    Err(Stop::Other(err)) => return Err(err),
+                    Err(Stop::Refused(err)) if in_flight == 1 => {
+                        log::error!("native backend refused an exact result: {err}");
+                        return Err(E::from(err));
+                    }
+                    Err(Stop::Refused(_)) => {
+                        // A refusal reserves nothing: run it again below.
+                        refused.push(index);
+                        values.push(None);
+                    }
+                }
+            }
+            if !refused.is_empty() {
+                log::warn!(
+                    "exact probabilities of {} circuits do not fit beside {in_flight} \
+                     statevectors in the memory budget; running them one at a time",
+                    qcs.len()
+                );
+                throttled = true;
+                cap = 1;
+                if let Some(allowance) = allowance.as_ref() {
+                    allowance.begin_window(1);
+                }
+                let pt = self.gate_parallel_threshold(1, threads);
+                for index in refused {
+                    match one(&chunk[index], &opts, pt, allowance.as_ref()) {
+                        Ok(value) => values[index] = Some(value),
+                        Err(Stop::Other(err)) => return Err(err),
+                        Err(Stop::Refused(err)) => {
+                            log::error!("native backend refused an exact result: {err}");
+                            return Err(E::from(err));
+                        }
+                    }
+                }
+            }
+            offset += chunk.len();
+            out.extend(values.into_iter().flatten());
         }
-        Ok(out)
+        Ok((out, throttled))
     }
 
-    /// Exact probabilities of one bound circuit, keyed as its counts would be.
+    /// Exact probabilities of one bound circuit, keyed as its counts would be,
+    /// with what `allowance` (when given) reserved for its map. The map is
+    /// built straight from the amplitudes, with no `2^n` probabilities vector
+    /// beside the statevector, and sized from the non-zero states first, so
+    /// `allowance` refuses it before it is allocated.
     fn simulate_one_exact(
         &self,
         circuit: &BoundCircuit,
         opts: &TranspileOptions,
         parallel_threshold: usize,
-    ) -> Result<HashMap<String, f64>, BackendError> {
+        allowance: Option<&ResultAllowance>,
+    ) -> Result<(HashMap<String, f64>, Reservation), BackendError> {
+        let (sv, width) = self.simulate_one_state(circuit, opts, parallel_threshold)?;
+        // `norm_sqr` is what `Statevector::probabilities` computes, so the
+        // values are the same bit for bit; reading the amplitudes twice costs
+        // no allocation.
+        let amplitudes = sv.amplitudes();
+        let entries = amplitudes.iter().filter(|a| a.norm_sqr() != 0.0).count();
+        let reserved = match allowance {
+            Some(allowance) => allowance.reserve(entries, width)?,
+            None => Reservation::default(),
+        };
+        let mut map = HashMap::with_capacity(entries);
+        for (state, amplitude) in amplitudes.iter().enumerate() {
+            let p = amplitude.norm_sqr();
+            if p != 0.0 {
+                map.insert(bitstring(state, width), p);
+            }
+        }
+        Ok((map, reserved))
+    }
+
+    /// The statevector of one bound circuit for the exact path, and the width
+    /// its counts are keyed at. Only a full-register read-out is accepted.
+    fn simulate_one_state(
+        &self,
+        circuit: &BoundCircuit,
+        opts: &TranspileOptions,
+        parallel_threshold: usize,
+    ) -> Result<(Statevector, usize), BackendError> {
         let source = self.concrete_circuit(circuit, opts)?;
         let concrete = source.circuit.as_ref();
         if concrete
@@ -486,13 +722,7 @@ impl NativeStatevectorBackend {
             BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
         })?;
         let width = counts_width(concrete, source.declared_clbits);
-        Ok(sv
-            .probabilities()
-            .into_iter()
-            .enumerate()
-            .filter(|&(_, p)| p != 0.0)
-            .map(|(state, p)| (bitstring(state, width), p))
-            .collect())
+        Ok((sv, width))
     }
 
     /// Whether an adjoint gradient of `num_qubits`-qubit circuits fits in the
@@ -1048,6 +1278,229 @@ fn fidelity_cap(
         ));
     }
     Ok(fit)
+}
+
+/// How many `num_qubits`-qubit statevectors may be simulated at once under
+/// `budget` on `threads` threads: `max(1, min(threads, budget / (16 · 2^n)))`,
+/// what [`max_statevector_concurrency`] computes for the active budget.
+fn concurrency_under(budget: MemBudget, num_qubits: usize, threads: usize) -> usize {
+    let statevector = statevector_bytes(num_qubits);
+    let by_budget = usize::try_from((budget.bytes / statevector).max(1)).unwrap_or(usize::MAX);
+    threads.max(1).min(by_budget)
+}
+
+/// Bytes of one `num_qubits`-qubit statevector (`16 · 2^n`), saturated to
+/// `u64::MAX`.
+fn statevector_bytes(num_qubits: usize) -> u64 {
+    u32::try_from(num_qubits)
+        .ok()
+        .and_then(|n| 1u64.checked_shl(n))
+        .and_then(|amplitudes| amplitudes.checked_mul(16))
+        .unwrap_or(u64::MAX)
+}
+
+/// Control bytes a hash table allocates beyond one per bucket: one group (16
+/// with SSE2 on x86-64, 8 with NEON on aarch64 or the portable group; the
+/// larger is counted).
+const EXACT_MAP_GROUP_BYTES: u64 = 16;
+
+/// What the allocator adds to a block it hands out (glibc's chunk header, and
+/// its rounding to 16): counted once for the table, and per key.
+const ALLOCATOR_OVERHEAD_BYTES: u64 = 16;
+
+/// Bytes the exact path counts for one result map of `entries` keys of
+/// `width` characters, as [`simulate_one_exact`] builds it with
+/// `HashMap::with_capacity(entries)` (issue #628). An upper bound on the bytes
+/// requested from the allocator, with glibc's small-chunk rounding; a table
+/// large enough to be mapped directly is rounded to whole pages on top, a few
+/// KiB at most, negligible beside the table:
+///
+/// - the table: a power of two of buckets, at least 8 and at least `8/7` of
+///   `entries` (the load factor), each a `(String, f64)` plus a control byte,
+///   one group of control bytes, and the allocator's overhead;
+/// - each key's heap buffer: `width` bytes rounded up to 16, plus the
+///   allocator's overhead, and never under 32 (glibc's smallest chunk).
+///
+/// For 2^16 dense entries of 16-character keys that is about 6.1 MiB beside
+/// the statevector's 1 MiB. Saturates to `u64::MAX`.
+///
+/// [`simulate_one_exact`]: NativeStatevectorBackend::simulate_one_exact
+fn exact_map_bytes(entries: u64, width: usize) -> u64 {
+    if entries == 0 {
+        return 0;
+    }
+    let buckets = entries
+        .saturating_mul(8)
+        .div_ceil(7)
+        .max(8)
+        .checked_next_power_of_two()
+        .unwrap_or(u64::MAX);
+    let bucket = std::mem::size_of::<(String, f64)>() as u64 + 1;
+    let table = buckets
+        .saturating_mul(bucket)
+        .saturating_add(EXACT_MAP_GROUP_BYTES)
+        .saturating_add(ALLOCATOR_OVERHEAD_BYTES);
+    let key = u64::try_from(width)
+        .unwrap_or(u64::MAX)
+        .div_ceil(16)
+        .saturating_mul(16)
+        .saturating_add(ALLOCATOR_OVERHEAD_BYTES)
+        .max(32);
+    table.saturating_add(entries.saturating_mul(key))
+}
+
+/// How long a result map of an exact batch lives, and so how long it counts
+/// against the memory budget: until the batch returns (`run_circuits_exact`
+/// returns the maps), or only while it is built and read
+/// (`run_circuits_exact_with` keeps what its reader returns, issue #645).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MapLife {
+    Kept,
+    Read,
+}
+
+/// How an exact batch runs: at most `cap` statevectors of `widest` qubits
+/// at once, under `budget`, building a map per circuit or not (`maps`), and
+/// whether a refusal concerns one circuit's map (`per_circuit`: the maps are
+/// read one by one) or the batch's.
+#[derive(Clone, Copy)]
+struct ExactPlan {
+    cap: usize,
+    widest: usize,
+    budget: MemBudget,
+    maps: bool,
+    per_circuit: bool,
+}
+
+/// Why one circuit of an exact window stopped: its map did not fit (the
+/// window may then run again one circuit at a time), or anything else.
+enum Stop<E> {
+    Refused(BackendError),
+    Other(E),
+}
+
+impl<E: From<BackendError>> Stop<E> {
+    fn from_backend(err: BackendError) -> Self {
+        match err {
+            BackendError::InsufficientMemoryForResult(_) => Stop::Refused(err),
+            other => Stop::Other(E::from(other)),
+        }
+    }
+}
+
+/// The memory the result maps of one exact batch may take (issue #628): what
+/// the budget leaves beside the statevectors in flight. Every circuit reserves
+/// its map's [`exact_map_bytes`] before building it, and a map that would not
+/// fit is refused instead, reserving nothing. A kept map's reservation stays
+/// until the batch returns; a read one's is [`release`](Self::release)d once
+/// it is read. Kept reservations only grow, so whether a batch of kept maps is
+/// refused does not depend on the order its circuits finish in.
+struct ResultAllowance {
+    /// What is reserved now, and the statevectors of the current window. A
+    /// lock rather than atomics: it is taken twice per circuit at most, and
+    /// the fields move together.
+    state: Mutex<Reserved>,
+    circuits: usize,
+    num_qubits: usize,
+    statevector_bytes: u64,
+    budget: MemBudget,
+    /// The maps are read one by one, so a refusal concerns one circuit's.
+    per_circuit: bool,
+}
+
+/// The bytes and map entries reserved now, and how many statevectors the
+/// current window holds at once.
+#[derive(Clone, Copy)]
+struct Reserved {
+    bytes: u64,
+    entries: u64,
+    statevectors: usize,
+}
+
+/// What one map reserved, to [`release`](ResultAllowance::release) once it is
+/// read.
+#[derive(Clone, Copy, Debug, Default)]
+struct Reservation {
+    bytes: u64,
+    entries: u64,
+}
+
+impl ResultAllowance {
+    /// The allowance of a batch of `circuits` whose widest is `num_qubits`
+    /// qubits, under a known (non-fallback) `budget`; `per_circuit` when the
+    /// maps are read one by one rather than kept.
+    fn new(circuits: usize, num_qubits: usize, budget: MemBudget, per_circuit: bool) -> Self {
+        Self {
+            state: Mutex::new(Reserved {
+                bytes: 0,
+                entries: 0,
+                statevectors: 1,
+            }),
+            circuits,
+            num_qubits,
+            statevector_bytes: statevector_bytes(num_qubits),
+            budget,
+            per_circuit,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Reserved> {
+        // A panic elsewhere cannot leave the fields half-updated.
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Start a window holding `statevectors` statevectors at once.
+    fn begin_window(&self, statevectors: usize) {
+        self.lock().statevectors = statevectors;
+    }
+
+    /// Release a map's `reservation` once it is read and dropped.
+    fn release(&self, reservation: Reservation) {
+        let mut state = self.lock();
+        state.bytes = state.bytes.saturating_sub(reservation.bytes);
+        state.entries = state.entries.saturating_sub(reservation.entries);
+    }
+
+    /// Reserve a map of `entries` keys of `width` characters, or refuse it
+    /// with [`BackendError::InsufficientMemoryForResult`], reserving nothing,
+    /// when it would not fit beside what is reserved and the window's
+    /// statevectors.
+    fn reserve(&self, entries: usize, width: usize) -> Result<Reservation, BackendError> {
+        let entries = u64::try_from(entries).unwrap_or(u64::MAX);
+        let bytes = exact_map_bytes(entries, width);
+        let mut state = self.lock();
+        let total = state.bytes.saturating_add(bytes);
+        let held = (state.statevectors as u64).saturating_mul(self.statevector_bytes);
+        if total <= self.budget.bytes.saturating_sub(held) {
+            state.bytes = total;
+            state.entries = state.entries.saturating_add(entries);
+            return Ok(Reservation { bytes, entries });
+        }
+        let states = state.entries.saturating_add(entries);
+        let statevectors = state.statevectors;
+        drop(state);
+        let result = if self.per_circuit {
+            format!("the exact probabilities of a circuit ({entries} basis states)")
+        } else if self.circuits == 1 {
+            format!("the exact probabilities of a circuit ({states} basis states)")
+        } else {
+            format!(
+                "the exact probabilities of a {}-circuit batch (at least {states} basis states)",
+                self.circuits
+            )
+        };
+        Err(BackendError::InsufficientMemoryForResult(
+            InsufficientMemoryForResult {
+                result,
+                result_bytes: total,
+                num_qubits: self.num_qubits,
+                statevectors,
+                statevector_bytes: self.statevector_bytes,
+                budget_bytes: self.budget.bytes,
+                source: self.budget.source,
+            },
+        ))
+    }
 }
 
 /// `|⟨a|b⟩|²`, the inner product summed sequentially in basis-state order (so
@@ -2877,14 +3330,15 @@ mod tests {
             .collect();
         let backend = NativeStatevectorBackend::new(0);
         let params = config_with(OptLevel::default()).run_params();
-        let unbounded = backend
-            .run_exact_with_cap(&batch, &params, usize::MAX, &Ok::<_, BackendError>)
-            .unwrap();
+        // A known budget, so the result maps are reserved on every route.
+        let budget = MemBudget {
+            bytes: 1 << 30,
+            source: BudgetSource::Explicit,
+        };
+        let unbounded = kept_with_cap(&backend, &batch, &params, usize::MAX, 3, budget).unwrap();
         for cap in [1, 2, 3] {
             assert_eq!(
-                backend
-                    .run_exact_with_cap(&batch, &params, cap, &Ok::<_, BackendError>)
-                    .unwrap(),
+                kept_with_cap(&backend, &batch, &params, cap, 3, budget).unwrap(),
                 unbounded,
                 "cap {cap}"
             );
@@ -2964,6 +3418,442 @@ mod tests {
             matches!(&result, Err(ReadError::Backend(m)) if m.contains("full-register")),
             "{result:?}"
         );
+    }
+
+    // ── Exact probabilities: the result maps' memory (issue #628) ─────────────
+
+    /// `n` qubits in uniform superposition: all `2^n` states are non-zero.
+    fn dense(n: usize) -> BoundCircuit {
+        let circuit = (0..n).fold(ParameterizedCircuit::new(n), |c, q| c.h(q));
+        BoundCircuit::Native(circuit.measure_all().assign_parameters(&[]).unwrap())
+    }
+
+    /// An `n`-qubit GHZ state: two non-zero states at any width.
+    fn ghz(n: usize) -> BoundCircuit {
+        let circuit = (1..n).fold(ParameterizedCircuit::new(n).h(0), |c, q| c.cx(q - 1, q));
+        BoundCircuit::Native(circuit.measure_all().assign_parameters(&[]).unwrap())
+    }
+
+    fn explicit(bytes: u64) -> MemBudget {
+        MemBudget {
+            bytes,
+            source: BudgetSource::Explicit,
+        }
+    }
+
+    /// `run_circuits_exact`'s windowing with an explicit `cap`, `widest`
+    /// width and `budget`, the maps kept, and whether it dropped to one
+    /// circuit at a time.
+    fn kept_throttled(
+        backend: &NativeStatevectorBackend,
+        qcs: &[BoundCircuit],
+        params: &RunParams,
+        cap: usize,
+        widest: usize,
+        budget: MemBudget,
+    ) -> Result<(Vec<HashMap<String, f64>>, bool), BackendError> {
+        let plan = ExactPlan {
+            cap,
+            widest,
+            budget,
+            maps: true,
+            per_circuit: false,
+        };
+        backend.run_exact_with_cap(qcs, params, plan, &|qc, opts, pt, allowance| {
+            let (map, _) = backend
+                .simulate_one_exact(qc, opts, pt, allowance)
+                .map_err(Stop::from_backend)?;
+            Ok(map)
+        })
+    }
+
+    /// [`kept_throttled`] without the flag.
+    fn kept_with_cap(
+        backend: &NativeStatevectorBackend,
+        qcs: &[BoundCircuit],
+        params: &RunParams,
+        cap: usize,
+        widest: usize,
+        budget: MemBudget,
+    ) -> Result<Vec<HashMap<String, f64>>, BackendError> {
+        kept_throttled(backend, qcs, params, cap, widest, budget).map(|(maps, _)| maps)
+    }
+
+    /// `run_circuits_exact_with` against an explicit `budget`, each map read
+    /// into its size.
+    fn read_against(qcs: &[BoundCircuit], budget: MemBudget) -> Result<Vec<usize>, BackendError> {
+        NativeStatevectorBackend::new(0).run_exact_reading(
+            qcs,
+            &config_with(OptLevel::default()).run_params(),
+            budget,
+            MapLife::Read,
+            &|map: HashMap<String, f64>| Ok::<_, BackendError>(map.len()),
+        )
+    }
+
+    fn exact_against(
+        qcs: &[BoundCircuit],
+        budget: MemBudget,
+    ) -> Result<Vec<HashMap<String, f64>>, BackendError> {
+        NativeStatevectorBackend::new(0).run_circuits_exact_against(
+            qcs,
+            &config_with(OptLevel::default()).run_params(),
+            budget,
+        )
+    }
+
+    /// The buckets of a std `HashMap` (hashbrown) of usable `capacity`: one
+    /// less than the buckets below 8, 7/8 of them from 8 up.
+    fn buckets_of(capacity: usize) -> u64 {
+        let buckets = if capacity < 7 {
+            capacity + 1
+        } else {
+            capacity * 8 / 7
+        };
+        buckets.next_power_of_two() as u64
+    }
+
+    #[test]
+    fn exact_map_bytes_bound_the_maps_the_exact_path_builds() {
+        for width in [1, 3, 16, 40] {
+            for entries in [1usize, 2, 3, 7, 8, 100, 1 << 12, 1 << 16] {
+                if width < 20 && entries > 1 << width {
+                    continue; // more entries than `width` bits can key
+                }
+                // Built as `simulate_one_exact` builds it.
+                let mut map = HashMap::with_capacity(entries);
+                for state in 0..entries {
+                    map.insert(bitstring(state, width), 0.5);
+                }
+                assert_eq!(map.len(), entries);
+                let table = buckets_of(map.capacity())
+                    * (std::mem::size_of::<(String, f64)>() as u64 + 1)
+                    + EXACT_MAP_GROUP_BYTES;
+                let keys: u64 = map.keys().map(|key| key.capacity() as u64).sum();
+                let held = table + keys;
+                let model = exact_map_bytes(map.len() as u64, width);
+                assert!(model >= held, "{entries} x {width}: {model} < {held}");
+                // Conservative, not wildly so, where it can refuse anything: a
+                // map of a few entries is a few hundred bytes either way.
+                if entries >= 100 {
+                    assert!(
+                        model <= 2 * held,
+                        "{entries} x {width}: {model} > 2 x {held}"
+                    );
+                }
+                // Each key holds `width` bytes, or a `Vec`'s minimum of 8 for a
+                // shorter key: no growth beyond what the model rounds up to.
+                assert!(map.keys().all(|key| key.capacity() == width.max(8)));
+            }
+        }
+        assert_eq!(exact_map_bytes(0, 16), 0);
+        assert_eq!(exact_map_bytes(u64::MAX, 16), u64::MAX);
+    }
+
+    #[test]
+    fn exact_values_are_the_statevector_probabilities_bit_for_bit() {
+        let circuit = skewed3();
+        let sv = StatevectorSimulator::default().run(&circuit).unwrap();
+        let expected: HashMap<String, f64> = sv
+            .probabilities()
+            .into_iter()
+            .enumerate()
+            .filter(|&(_, p)| p != 0.0)
+            .map(|(state, p)| (bitstring(state, 3), p))
+            .collect();
+        let got = exact_against(&[BoundCircuit::Native(circuit)], explicit(1 << 30)).unwrap();
+        assert_eq!(got[0].len(), expected.len());
+        for (key, p) in &expected {
+            assert_eq!(got[0][key].to_bits(), p.to_bits(), "{key}");
+        }
+    }
+
+    #[test]
+    fn exact_dense_result_that_does_not_fit_is_refused_and_one_that_fits_runs() {
+        let statevector = 16u64 << 16;
+        let map = exact_map_bytes(1 << 16, 16);
+        // The statevector fits, the map beside it does not: before #628 this
+        // passed the check and was left to the OOM-killer.
+        match exact_against(&[dense(16)], explicit(statevector + map - 1)) {
+            Err(BackendError::InsufficientMemoryForResult(e)) => {
+                assert_eq!(e.result_bytes, map);
+                assert_eq!((e.num_qubits, e.statevectors), (16, 1));
+                assert_eq!(e.statevector_bytes, statevector);
+                assert!(e.result.contains("65536 basis states"), "{}", e.result);
+            }
+            other => panic!("expected InsufficientMemoryForResult, got {other:?}"),
+        }
+        // Exactly enough runs, with every state.
+        let probs = exact_against(&[dense(16)], explicit(statevector + map)).unwrap();
+        assert_eq!(probs[0].len(), 1 << 16);
+    }
+
+    #[test]
+    fn exact_sparse_result_is_cheap_at_the_same_width() {
+        let budget = explicit((16u64 << 16) + exact_map_bytes(2, 16));
+        let probs = exact_against(&[ghz(16)], budget).unwrap();
+        assert_eq!(probs[0].len(), 2);
+        assert!(exact_against(&[dense(16)], budget).is_err());
+    }
+
+    #[test]
+    fn exact_maps_of_a_batch_count_together() {
+        let statevector = 16u64 << 12;
+        let map = exact_map_bytes(1 << 12, 12);
+        let batch = [dense(12), dense(12)];
+        // Either map fits beside a statevector alone; both together do not, on
+        // any number of threads (the batch drops to one circuit at a time
+        // before it is refused).
+        let budget = explicit(statevector + 2 * map - 1);
+        assert!(exact_against(&batch[..1], budget).is_ok());
+        match exact_against(&batch, budget) {
+            Err(BackendError::InsufficientMemoryForResult(e)) => {
+                assert_eq!(e.result_bytes, 2 * map);
+                assert_eq!(e.statevectors, 1);
+                assert!(e.result.contains("2-circuit batch"), "{}", e.result);
+            }
+            other => panic!("expected InsufficientMemoryForResult, got {other:?}"),
+        }
+        let probs = exact_against(&batch, explicit(statevector + 2 * map)).unwrap();
+        assert_eq!(probs.len(), 2);
+    }
+
+    #[test]
+    fn exact_batch_runs_one_at_a_time_when_its_statevectors_leave_no_room() {
+        // A budget that is an exact multiple of the statevector (as 32G or 64G
+        // are at 30 qubits) packs two statevectors and leaves the maps nothing;
+        // the batch must still run, holding one statevector at a time, and
+        // give what it gives with room to spare.
+        let statevector = 16u64 << 16;
+        let batch: Vec<BoundCircuit> = (0..5).map(|_| ghz(16)).collect();
+        let tight = exact_against(&batch, explicit(2 * statevector)).unwrap();
+        let roomy = exact_against(&batch, explicit(1 << 30)).unwrap();
+        assert_eq!(tight, roomy);
+        assert!(tight.iter().all(|probs| probs.len() == 2));
+    }
+
+    #[test]
+    fn a_window_reserves_its_maps_beside_all_of_its_statevectors() {
+        let statevector = 16u64 << 10;
+        let map = exact_map_bytes(1 << 10, 10);
+        // Room for both maps beside one statevector, not beside two (a dense
+        // 10-qubit map is larger than its statevector, so one map fits either way).
+        let allowance = ResultAllowance::new(3, 10, explicit(statevector + 2 * map), false);
+        // Two statevectors in flight: one map fits beside them, a second does
+        // not, and its refusal reserves nothing.
+        allowance.begin_window(2);
+        allowance.reserve(1 << 10, 10).unwrap();
+        match allowance.reserve(1 << 10, 10) {
+            Err(BackendError::InsufficientMemoryForResult(e)) => {
+                assert_eq!((e.statevectors, e.result_bytes), (2, 2 * map));
+                assert!(e.result.contains("3-circuit batch"), "{}", e.result);
+            }
+            other => panic!("expected InsufficientMemoryForResult, got {other:?}"),
+        }
+        // One statevector at a time, the refused map fits beside the first.
+        allowance.begin_window(1);
+        allowance.reserve(1 << 10, 10).unwrap();
+        // Read one by one, a refusal names one circuit's map.
+        let read = ResultAllowance::new(3, 10, explicit(statevector), true);
+        match read.reserve(1 << 10, 10) {
+            Err(BackendError::InsufficientMemoryForResult(e)) => {
+                assert!(
+                    e.result.contains("of a circuit (1024 basis states)"),
+                    "{}",
+                    e.result
+                );
+            }
+            other => panic!("expected InsufficientMemoryForResult, got {other:?}"),
+        }
+    }
+
+    /// A window of `cap` circuits reserves its maps beside all `cap` of its
+    /// statevectors: maps that fit beside one statevector but not beside two
+    /// make a window of two drop to one circuit at a time, and nothing
+    /// drops with room for both. Needs two threads to have two in flight.
+    #[test]
+    fn a_window_counts_every_statevector_it_holds() {
+        if rayon::current_num_threads() < 2 {
+            return;
+        }
+        let statevector = 16u64 << 10;
+        let map = exact_map_bytes(1 << 10, 10);
+        let batch: Vec<BoundCircuit> = (0..4).map(|_| dense(10)).collect();
+        let backend = NativeStatevectorBackend::new(0);
+        let params = config_with(OptLevel::default()).run_params();
+        let run = |bytes| kept_throttled(&backend, &batch, &params, 2, 10, explicit(bytes));
+        let (one_at_a_time, throttled) = run(statevector + 4 * map).unwrap();
+        assert!(throttled, "4 maps beside 2 statevectors do not fit");
+        let (two_at_a_time, throttled) = run(2 * statevector + 4 * map).unwrap();
+        assert!(!throttled, "4 maps beside 2 statevectors fit");
+        assert_eq!(one_at_a_time, two_at_a_time);
+    }
+
+    #[test]
+    fn exact_windows_that_bind_count_their_statevectors() {
+        // Five dense 10-qubit circuits in windows of two (the cap binds):
+        // two statevectors and all five maps fit, or the batch drops to one
+        // statevector, and only maps plus one statevector decide a refusal.
+        let statevector = 16u64 << 10;
+        let map = exact_map_bytes(1 << 10, 10);
+        let batch: Vec<BoundCircuit> = (0..5).map(|_| dense(10)).collect();
+        let backend = NativeStatevectorBackend::new(0);
+        let params = config_with(OptLevel::default()).run_params();
+        let run = |bytes| kept_with_cap(&backend, &batch, &params, 2, 10, explicit(bytes));
+        let expected = run(1 << 30).unwrap();
+        assert_eq!(run(2 * statevector + 5 * map).unwrap(), expected);
+        assert_eq!(run(statevector + 5 * map).unwrap(), expected);
+        match run(statevector + 5 * map - 1) {
+            Err(BackendError::InsufficientMemoryForResult(e)) => {
+                assert_eq!((e.statevectors, e.result_bytes), (1, 5 * map));
+            }
+            other => panic!("expected InsufficientMemoryForResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exact_maps_are_not_refused_under_the_fallback_budget() {
+        let fallback = MemBudget {
+            bytes: 16u64 << 16,
+            source: BudgetSource::Fallback,
+        };
+        let probs = exact_against(&[dense(16)], fallback).unwrap();
+        assert_eq!(probs[0].len(), 1 << 16);
+    }
+
+    #[test]
+    fn a_read_map_counts_only_while_it_is_read() {
+        // Three dense 12-qubit circuits: kept, their maps and a statevector do
+        // not fit; read one at a time (issue #645), each map is released once
+        // read, so one map beside one statevector is all they need.
+        let statevector = 16u64 << 12;
+        let map = exact_map_bytes(1 << 12, 12);
+        let batch = [dense(12), dense(12), dense(12)];
+        let budget = explicit(statevector + map);
+        assert!(matches!(
+            exact_against(&batch, budget),
+            Err(BackendError::InsufficientMemoryForResult(_))
+        ));
+        assert_eq!(read_against(&batch, budget).unwrap(), vec![1 << 12; 3]);
+        // One map that does not fit beside its statevector is refused all the
+        // same, after dropping to one circuit at a time.
+        match read_against(&batch, explicit(statevector + map - 1)) {
+            Err(BackendError::InsufficientMemoryForResult(e)) => {
+                assert_eq!((e.statevectors, e.result_bytes), (1, map));
+            }
+            other => panic!("expected InsufficientMemoryForResult, got {other:?}"),
+        }
+    }
+
+    /// `run_circuits_exact_on_states` against an explicit `budget`, each state
+    /// read into the map `run_circuits_exact` builds from it.
+    fn states_against(
+        qcs: &[BoundCircuit],
+        budget: MemBudget,
+    ) -> Result<Vec<HashMap<String, f64>>, BackendError> {
+        NativeStatevectorBackend::new(0).run_states_against(
+            qcs,
+            &config_with(OptLevel::default()).run_params(),
+            budget,
+            &|amplitudes: &[C64], width: usize| {
+                Ok::<_, BackendError>(
+                    amplitudes
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, a)| a.norm_sqr() != 0.0)
+                        .map(|(state, a)| (bitstring(state, width), a.norm_sqr()))
+                        .collect(),
+                )
+            },
+        )
+    }
+
+    /// #628: the states path hands the reader what the maps are built from,
+    /// in order, and needs only the statevector budget: dense outputs whose
+    /// maps would not fit run, one statevector at a time if need be.
+    #[test]
+    fn states_are_what_the_maps_are_built_from_and_need_no_map_budget() {
+        let batch = vec![
+            BoundCircuit::Native(skewed3()),
+            BoundCircuit::Native(bell()),
+            dense(4),
+        ];
+        let roomy = explicit(1 << 30);
+        let maps = exact_against(&batch, roomy).unwrap();
+        let from_states = states_against(&batch, roomy).unwrap();
+        assert_eq!(from_states.len(), maps.len());
+        for (state, map) in from_states.iter().zip(&maps) {
+            assert_eq!(state.len(), map.len());
+            for (key, p) in map {
+                assert_eq!(state[key].to_bits(), p.to_bits(), "{key}");
+            }
+        }
+        // Three dense 12-qubit circuits under exactly one statevector: the
+        // kept maps are refused, the states run.
+        let statevector = 16u64 << 12;
+        let dense_batch = [dense(12), dense(12), dense(12)];
+        assert!(exact_against(&dense_batch, explicit(statevector)).is_err());
+        let read = NativeStatevectorBackend::new(0)
+            .run_states_against(
+                &dense_batch,
+                &config_with(OptLevel::default()).run_params(),
+                explicit(statevector),
+                &|amplitudes: &[C64], width: usize| {
+                    Ok::<_, BackendError>((amplitudes.len(), width))
+                },
+            )
+            .unwrap();
+        assert_eq!(read, vec![(1 << 12, 12); 3]);
+        // Less than one statevector is still refused before anything runs.
+        assert!(matches!(
+            states_against(&dense_batch, explicit(statevector - 1)),
+            Err(BackendError::InsufficientMemory(_))
+        ));
+    }
+
+    /// Of the circuits of a window that fail, the earliest one's error is
+    /// returned, whatever order they finish in.
+    #[test]
+    fn the_earliest_failing_circuit_gives_the_error() {
+        let measured = || {
+            BoundCircuit::Native(
+                ParameterizedCircuit::new(2)
+                    .h(0)
+                    .measure(0, 0)
+                    .assign_parameters(&[])
+                    .unwrap(),
+            )
+        };
+        let unparsable = || BoundCircuit::Qasm2("OPENQASM 2.0;\nnot a program;\n".to_string());
+        let backend = NativeStatevectorBackend::new(0);
+        let params = config_with(OptLevel::default()).run_params();
+        let first = |batch: &[BoundCircuit]| {
+            std::mem::discriminant(&backend.run_circuits_exact(batch, &params).unwrap_err())
+        };
+        let unsupported = first(&[measured()]);
+        let parse = first(&[unparsable()]);
+        assert_ne!(unsupported, parse);
+        for _ in 0..20 {
+            let forward = [measured(), dense(8), unparsable()];
+            let backward = [unparsable(), dense(8), measured()];
+            assert_eq!(first(&forward), unsupported);
+            assert_eq!(first(&backward), parse);
+        }
+    }
+
+    #[test]
+    fn a_released_reservation_frees_its_room() {
+        let statevector = 16u64 << 10;
+        let map = exact_map_bytes(1 << 10, 10);
+        let allowance = ResultAllowance::new(2, 10, explicit(statevector + map), true);
+        allowance.begin_window(1);
+        let first = allowance.reserve(1 << 10, 10).unwrap();
+        assert_eq!((first.bytes, first.entries), (map, 1 << 10));
+        // A refusal reserves nothing...
+        assert!(allowance.reserve(1 << 10, 10).is_err());
+        // ...and once the first map is released, the second fits.
+        allowance.release(first);
+        allowance.reserve(1 << 10, 10).unwrap();
     }
 
     #[test]

@@ -39,7 +39,7 @@ use crate::dataset::Dataset;
 use crate::error::{AdjointOnlyGate, QmlError, ValidationError};
 use crate::loss::{categorical_cross_entropy, categorical_cross_entropy_gradient, Loss};
 use crate::model::{CompiledModel, InputGate};
-use crate::observables::CircuitReading;
+use crate::observables::{CircuitReading, ExactState};
 use crate::readout::Decision;
 use crate::rng::{shuffle, SplitMix64};
 
@@ -790,9 +790,30 @@ impl QmlProblem {
         &self,
         probabilities: &HashMap<String, f64>,
     ) -> Result<Vec<f64>, QmlError> {
+        self.read_with(probabilities)
+    }
+
+    /// [`read_probabilities`](Self::read_probabilities) read straight from
+    /// the circuit's state, with no map of its probabilities (issue #628): the
+    /// same reading, bit for bit, and the same errors. What the exact native
+    /// oracle reads, so a gradient holds one statevector per circuit in
+    /// flight and nothing more.
+    ///
+    /// # Errors
+    ///
+    /// As [`read_probabilities`](Self::read_probabilities) for the map the
+    /// state stands for.
+    pub fn read_state<F: Fn(usize) -> f64>(
+        &self,
+        state: &ExactState<F>,
+    ) -> Result<Vec<f64>, QmlError> {
+        self.read_with(state)
+    }
+
+    fn read_with<R: CircuitReading>(&self, reading: &R) -> Result<Vec<f64>, QmlError> {
         let observables = self.model.resolved_readout().observables();
         (0..self.reading_width())
-            .map(|index| probabilities.observable_expectation(observables, index))
+            .map(|index| reading.observable_expectation(observables, index))
             .collect()
     }
 
@@ -3348,11 +3369,11 @@ mod tests {
     /// native path keeps it instead of the map, gives the fitness, gradient
     /// and adjoint runs the maps give, bit for bit, for scalar and categorical
     /// losses (`{:?}` prints every `f64` exactly, a `-0.0` included).
-    #[test]
-    fn readings_of_the_maps_give_what_the_maps_give_bit_for_bit() {
+    /// The catalogue, a categorical problem, and a scalar loss over a readout
+    /// of several observables (which reads `⟨O₀⟩` only).
+    fn reading_problems() -> Vec<QmlProblem> {
         let mut problems = catalogue();
         problems.push(categorical_two_class_problem());
-        // A scalar loss over a readout of several observables reads `⟨O₀⟩`.
         let z = |q: usize| {
             Observable::new(vec![(1.0, PauliString::new(vec![(q, Pauli::Z)]).unwrap())]).unwrap()
         };
@@ -3363,6 +3384,12 @@ mod tests {
         let rows: Vec<Vec<f64>> = vec![vec![0.4, 1.1, 0.7, 2.0], vec![1.3, 0.2, 2.2, 0.9]];
         let ds = Dataset::from_rows(&rows, &[0.5, -0.3]).unwrap();
         problems.push(QmlProblem::new(two.compile(4).unwrap(), ds, Loss::SquaredError).unwrap());
+        problems
+    }
+
+    #[test]
+    fn readings_of_the_maps_give_what_the_maps_give_bit_for_bit() {
+        let problems = reading_problems();
         for (i, problem) in problems.iter().enumerate() {
             let theta: Vec<f64> = (0..problem.num_params())
                 .map(|k| 0.3 - 0.17 * k as f64)
@@ -3399,6 +3426,90 @@ mod tests {
                 "problem {i}"
             );
         }
+    }
+
+    /// A circuit's amplitudes and the map the native backend builds from
+    /// them: keyed `width` bits wide, the zero-probability states left out.
+    fn state_and_map(
+        circuit: &ConcreteCircuit,
+        width: usize,
+    ) -> (Vec<polypus_sim::C64>, HashMap<String, f64>) {
+        use polypus_sim::{Simulator, StatevectorSimulator};
+        let sv = StatevectorSimulator::new().run(circuit).unwrap();
+        let map = sv
+            .amplitudes()
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.norm_sqr() != 0.0)
+            .map(|(state, a)| (format!("{state:0width$b}"), a.norm_sqr()))
+            .collect();
+        (sv.amplitudes().to_vec(), map)
+    }
+
+    /// #628: a circuit read straight from its state, with no map, gives what
+    /// its map gives, bit for bit: the problem's reading, the model's
+    /// expectations and its prediction (`{:?}` prints every `f64` exactly).
+    #[test]
+    fn states_read_as_their_maps_do_bit_for_bit() {
+        for (i, problem) in reading_problems().iter().enumerate() {
+            let theta: Vec<f64> = (0..problem.num_params())
+                .map(|k| 0.3 - 0.17 * k as f64)
+                .collect();
+            for circuit in problem.gradient_circuits(&theta).unwrap() {
+                let width = circuit.num_qubits();
+                let (amplitudes, map) = state_and_map(&circuit, width);
+                let state = ExactState::new(amplitudes.len(), width, |s| amplitudes[s].norm_sqr());
+                let model = &problem.model;
+                assert_eq!(
+                    format!("{:?}", problem.read_state(&state)),
+                    format!("{:?}", problem.read_probabilities(&map)),
+                    "problem {i}"
+                );
+                assert_eq!(
+                    format!("{:?}", model.expectations_from_state(&state)),
+                    format!("{:?}", model.expectations_from_probabilities(&map)),
+                    "problem {i}"
+                );
+                assert_eq!(
+                    format!("{:?}", model.predict_from_state(&state)),
+                    format!("{:?}", model.predict_from_probabilities(&map)),
+                    "problem {i}"
+                );
+            }
+        }
+    }
+
+    /// The state reader raises the map reader's errors: no state of non-zero
+    /// probability is `EmptyCounts`, a readout position past the key width
+    /// `CountsWidthMismatch`, with the same fields.
+    #[test]
+    fn states_raise_the_errors_their_maps_raise() {
+        let problem = &catalogue()[0]; // reads Z on qubits 0..=3
+        let empty = ExactState::new(16, 4, |_| 0.0);
+        assert_eq!(
+            problem.read_state(&empty).unwrap_err(),
+            problem.read_probabilities(&HashMap::new()).unwrap_err()
+        );
+        let narrow = ExactState::new(4, 2, |s| if s == 0 { 1.0 } else { 0.0 });
+        let narrow_map = HashMap::from([("00".to_string(), 1.0)]);
+        assert_eq!(
+            problem.read_state(&narrow).unwrap_err(),
+            problem.read_probabilities(&narrow_map).unwrap_err()
+        );
+        assert!(matches!(
+            problem.read_state(&narrow).unwrap_err(),
+            QmlError::CountsWidthMismatch {
+                expected: 3,
+                got: 2
+            }
+        ));
+        // Both at once: a map with no entry is empty before its width is
+        // looked at, and so is a state with no non-zero probability.
+        let empty_and_narrow = ExactState::new(4, 2, |_| 0.0);
+        assert_eq!(
+            problem.read_state(&empty_and_narrow).unwrap_err(),
+            QmlError::EmptyCounts
+        );
     }
 
     #[test]

@@ -30,10 +30,10 @@ use pyo3::types::{PyBool, PyDict, PyList, PyModule, PyTuple, PyType};
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 use polypus_qml::{
     AngleEncoder, CompiledModel, ConvBlock, ConvLayer, Decision, Entanglement, Entangler,
-    ExpectationJacobian, FeatureMap, FeatureStates, FidelityKernel, HardwareEfficientAnsatz,
-    IqpEncoder, JacobianWrt, KeepRule, Layer, Loss, Observable, Pairing, Pauli, PauliString,
-    PoolBlock, PoolLayer, QmlError, QmlProblem, QuantumModel, Readout, RotationAxis,
-    SimplifiedTwoDesignAnsatz, StronglyEntanglingAnsatz, ValidationError,
+    ExactState, ExpectationJacobian, FeatureMap, FeatureStates, FidelityKernel,
+    HardwareEfficientAnsatz, IqpEncoder, JacobianWrt, KeepRule, Layer, Loss, Observable, Pairing,
+    Pauli, PauliString, PoolBlock, PoolLayer, QmlError, QmlProblem, QuantumModel, Readout,
+    RotationAxis, SimplifiedTwoDesignAnsatz, StronglyEntanglingAnsatz, ValidationError,
 };
 
 use super::callback::validate_callback;
@@ -1701,8 +1701,8 @@ struct RowsRun {
 enum RowResults {
     Counts(Vec<Counts>),
     Exact(Vec<HashMap<String, f64>>),
-    /// `predict(exact=True)`'s decisions, each row's map read as soon as it
-    /// was built ([`exact_predictions`], issue #645).
+    /// `predict(exact=True)`'s decisions, each row read straight from its
+    /// statevector ([`exact_predictions`], issues #645, #628).
     Predictions(Vec<f64>),
 }
 
@@ -1737,19 +1737,20 @@ impl ExactRowError {
     }
 }
 
-/// `compiled`'s exact decision for each of `circuits`, in order: each row's
-/// probability map is read as soon as it is built and dropped, so no map is
-/// held beyond the rows in flight (issue #645). The same values, bit for bit,
-/// as `predict_from_probabilities` over `run_circuits_exact`'s maps.
+/// `compiled`'s exact decision for each of `circuits`, in order, each row read
+/// straight from its statevector (issues #645, #628): no map of its
+/// probabilities is built, and only the decision is kept. The same values, bit
+/// for bit, as `predict_from_probabilities` over `run_circuits_exact`'s maps.
 fn exact_predictions(
     native: &NativeStatevectorBackend,
     params: &RunParams,
     compiled: &CompiledModel,
     circuits: &[BoundCircuit],
 ) -> Result<Vec<f64>, ExactRowError> {
-    native.run_circuits_exact_with(circuits, params, |probabilities| {
+    native.run_circuits_exact_on_states(circuits, params, |amplitudes, width| {
+        let state = ExactState::new(amplitudes.len(), width, |s| amplitudes[s].norm_sqr());
         compiled
-            .predict_from_probabilities(&probabilities)
+            .predict_from_state(&state)
             .map_err(ExactRowError::Qml)
     })
 }
@@ -2035,13 +2036,17 @@ impl TrainedModel {
             )
             .map(Py::into_any),
             RowResults::Exact(probabilities) => {
+                // Each row's map is consumed as its dict is built, so the Rust
+                // maps and their Python copies are not all alive at once: the
+                // peak is about the larger of the two, not their sum (#628).
+                // The copies themselves are not counted against the budget.
                 let list = PyList::empty(py);
-                for row in &probabilities {
+                for row in probabilities {
                     let dict = PyDict::new(py);
-                    let mut keys: Vec<&String> = row.keys().collect();
-                    keys.sort();
-                    for key in keys {
-                        dict.set_item(key, row[key])?;
+                    let mut entries: Vec<(String, f64)> = row.into_iter().collect();
+                    entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                    for (key, p) in entries {
+                        dict.set_item(key, p)?;
                     }
                     list.append(dict)?;
                 }
@@ -2184,8 +2189,8 @@ fn parse_wrt(wrt: &str) -> PyResult<JacobianWrt> {
 enum BlockResults {
     Counts(Vec<Counts>),
     Exact(Vec<HashMap<String, f64>>),
-    /// On the exact path, each circuit's readout expectations, read from its
-    /// map as soon as it was built ([`Primitive::exact_readout`], issue #645).
+    /// On the exact path, each circuit's readout expectations, read straight
+    /// from its statevector ([`Primitive::exact_readout`], issues #645, #628).
     Expectations(Vec<Vec<f64>>),
 }
 
@@ -2232,8 +2237,9 @@ impl BlockRunner {
     }
 
     /// Run `circuits`. On the exact path with a `readout`, each circuit is
-    /// read into that model's expectations as soon as its map is built, and
-    /// only those are kept (issue #645); without one, the maps are returned.
+    /// read into that model's expectations straight from its statevector, with
+    /// no map built, and only those are kept (issues #645, #628); without one,
+    /// the maps are returned.
     fn run(
         &self,
         circuits: Vec<BoundCircuit>,
@@ -2256,9 +2262,11 @@ impl BlockRunner {
                 .map_err(PrimitiveError::Infrastructure),
             BlockRunner::Exact { native, params } => match readout {
                 Some(model) => native
-                    .run_circuits_exact_with(&circuits, params, |probabilities| {
+                    .run_circuits_exact_on_states(&circuits, params, |amplitudes, width| {
+                        let state =
+                            ExactState::new(amplitudes.len(), width, |s| amplitudes[s].norm_sqr());
                         model
-                            .expectations_from_probabilities(&probabilities)
+                            .expectations_from_state(&state)
                             .map_err(PrimitiveError::Qml)
                     })
                     .map(BlockResults::Expectations),
@@ -2338,9 +2346,10 @@ trait Primitive {
     /// Read the results of [`circuits`](Self::circuits)`(samples)`.
     fn read(&mut self, samples: Range<usize>, results: BlockResults) -> Result<(), PrimitiveError>;
     /// The model whose readout expectations are all this primitive reads from
-    /// a circuit on the exact path: each circuit is then read as soon as its
-    /// map is built and the map dropped ([`BlockResults::Expectations`], issue
-    /// #645). `None` (the default) hands [`read`](Self::read) the maps.
+    /// a circuit on the exact path: each circuit is then read straight from
+    /// its statevector, with no map built ([`BlockResults::Expectations`],
+    /// issues #645, #628). `None` (the default) hands [`read`](Self::read) the
+    /// maps.
     fn exact_readout(&self) -> Option<&CompiledModel> {
         None
     }
