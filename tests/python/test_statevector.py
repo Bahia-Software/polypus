@@ -360,7 +360,7 @@ def test_fusion_false_matches_fusion_true_and_qiskit():
 
 # ``polypus_sim::MAX_QUBITS``. Not exposed to Python (the constant belongs to the
 # simulator, not to the seam), so it is mirrored here — keep both in sync.
-_MAX_QUBITS = 30
+_MAX_QUBITS = 40
 
 
 def test_qubit_ceiling_is_documented_at_the_seam():
@@ -374,10 +374,11 @@ def test_qubit_ceiling_is_documented_at_the_seam():
     )
 
 
-# Comfortably above the ceiling: 31 is the first rejected value, 40 would need
-# 16 TiB and 64 exceeds addressable memory entirely — an unguarded run would not
-# merely be slow, it would take the interpreter down with it.
-@pytest.mark.parametrize("num_qubits", [_MAX_QUBITS + 1, 40, 64])
+# Above the ceiling: 41 is the first rejected value (32 TiB) and 64 exceeds
+# addressable memory entirely — an unguarded run would not merely be slow, it
+# would take the interpreter down with it. Between 31 and 40 qubits the memory
+# budget decides instead (issue #428, see test_memory_budget.py).
+@pytest.mark.parametrize("num_qubits", [_MAX_QUBITS + 1, 64])
 def test_rejects_circuits_above_the_qubit_ceiling(num_qubits):
     """`statevector` must refuse a circuit larger than the backend's ceiling
     with a `ValueError` (contract C-1's failure mode), raised *before* the

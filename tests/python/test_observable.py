@@ -8,6 +8,9 @@ full FFI path: the Qubo/Ising pyclasses, the ``expectation_function`` dispatch
 native rayon aggregation — asserting the native and callback paths agree.
 """
 
+import math
+import sys
+
 import polypus
 import pytest
 
@@ -118,6 +121,87 @@ class TestObservableConstruction:
     def test_non_finite_coefficient_raises_value_error(self):
         with pytest.raises(ValueError):
             polypus.Qubo(1, linear=[(0, float("nan"))])
+
+
+# The bound the class docstrings state (#625, #641): sys.float_info.max / 2**65,
+# exact in binary floating point (dividing by a power of two only changes the
+# exponent).
+_BOUND = sys.float_info.max / 2**65
+
+
+class TestCoefficientBound:
+    def test_the_documented_bound_is_inclusive(self):
+        # Exactly at the bound is accepted, the next float above it is not, so
+        # the number in the docstrings is the one enforced.
+        polypus.Qubo(1, linear=[(0, _BOUND)])
+        polypus.Qubo(1, linear=[(0, -_BOUND)], scale=-1.0)
+        with pytest.raises(ValueError, match="exceeds"):
+            polypus.Qubo(1, linear=[(0, math.nextafter(_BOUND, math.inf))])
+        assert 4.8e288 < _BOUND < 4.9e288
+
+    def test_qubo_sums_every_part_times_the_scale(self):
+        # Each part is within the bound; only the sum exceeds it.
+        third = _BOUND / 3
+        for kwargs in (
+            dict(linear=[(0, 2 * third), (1, 2 * third)]),
+            dict(linear=[(0, 2 * third)], quadratic=[(0, 1, 2 * third)]),
+            dict(linear=[(0, 2 * third)], constant=2 * third),
+            dict(linear=[(0, _BOUND)], scale=1.5),
+        ):
+            with pytest.raises(ValueError, match="exceeds"):
+                polypus.Qubo(2, **kwargs)
+        polypus.Qubo(2, linear=[(0, _BOUND)], scale=0.5)
+
+    def test_from_matrix_checks_the_folded_coefficients(self):
+        third = _BOUND / 3
+        with pytest.raises(ValueError, match="exceeds"):
+            polypus.Qubo.from_matrix([[2 * third, 0.0], [0.0, 2 * third]])
+        # Q_01 + Q_10 is one quadratic weight.
+        with pytest.raises(ValueError, match="exceeds"):
+            polypus.Qubo.from_matrix([[2 * third, third], [third, 0.0]])
+        polypus.Qubo.from_matrix([[third, 0.0], [0.0, third]])
+        with pytest.raises(ValueError):
+            polypus.Qubo.from_matrix([[1.0, 2.0]])
+
+    def test_ising_is_checked_on_its_expanded_qubo(self):
+        # h·z_0 = h - 2h·x_0 adds 3·|h| to the sum: 3e288 is within the bound,
+        # 6e288 is not, though |h| = 2e288 is below it.
+        polypus.Ising(1, fields=[(0, 1e288)])
+        with pytest.raises(ValueError, match="exceeds"):
+            polypus.Ising(1, fields=[(0, 2e288)])
+        # A coupling adds 9·|J|: J, -2J, -2J and 4J.
+        polypus.Ising(2, couplings=[(0, 1, 5e287)])
+        with pytest.raises(ValueError, match="exceeds"):
+            polypus.Ising(2, couplings=[(0, 1, 6e287)])
+        # A finite coupling whose 4J overflows float.
+        with pytest.raises(ValueError):
+            polypus.Ising(2, couplings=[(0, 1, 1e308)])
+
+    @pytest.mark.parametrize("cls", [polypus.Qubo, polypus.Ising])
+    def test_the_class_docstring_documents_the_errors(self, cls):
+        # PyO3 does not expose the constructor's own doc comment
+        # (`cls.__new__.__doc__` is the generic one), so the errors must be in
+        # the class docstring, which help() shows (#641).
+        doc = cls.__doc__
+        for phrase in (
+            "ValueError",
+            "sys.float_info.max / 2**65",
+            "about 4.9e288",
+            "polypus.EvaluationError",
+        ):
+            assert phrase in doc, f"{cls.__name__}.__doc__ lacks {phrase!r}"
+        assert "[`" not in doc, "a rustdoc link reads literally in Python"
+
+    def test_from_matrix_documents_its_errors(self):
+        doc = polypus.Qubo.from_matrix.__doc__
+        for phrase in ("ValueError", "not square", "bound"):
+            assert phrase in doc, f"Qubo.from_matrix.__doc__ lacks {phrase!r}"
+
+    def test_qubo_bound_sums_repeated_entries_as_given(self):
+        # As its docstring says: the entries are summed before they
+        # accumulate, so two that cancel still count twice.
+        with pytest.raises(ValueError, match="exceeds"):
+            polypus.Qubo(1, linear=[(0, _BOUND), (0, -_BOUND)])
 
 
 class TestDispatchErrors:

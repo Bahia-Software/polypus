@@ -1,6 +1,6 @@
 # cargo-deny configuration for Polypus.
 #
-# Run with:  cargo deny check
+# Run with:  just deny   (cargo deny --all-features check, as CI does)
 # Schema note: cargo-deny's config format drifts between releases. This targets
 # a recent (v0.16+/v2) schema. If your version rejects a key, run
 # `cargo deny --version` and remove/adjust the offending field.

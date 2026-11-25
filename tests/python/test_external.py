@@ -146,6 +146,31 @@ def _record(monkeypatch):
     return sizes
 
 
+def _calls_per_batch(sizes, batches):
+    """Group the seam calls' ``sizes`` into consecutive runs, one per expected
+    batch size in ``batches``, and return how many calls each batch took.
+
+    The QML oracle hands a batch to the seam in windows of
+    ``available_parallelism() × 2`` candidates, so on a host with few CPUs one
+    batch can take several calls (#475). What must hold whatever the window is
+    that the calls follow the batches in order and no call straddles two of
+    them: the sizes split into consecutive runs summing exactly to each batch.
+    Fails the test otherwise."""
+    calls, i = [], 0
+    for want in batches:
+        got, start = 0, i
+        while got < want and i < len(sizes):
+            got += sizes[i]
+            i += 1
+        assert got == want, (
+            f"seam calls {sizes} do not split into batches {batches}: "
+            f"a call straddles the batch of {want} circuits"
+        )
+        calls.append(i - start)
+    assert i == len(sizes), f"seam calls {sizes} go beyond batches {batches}"
+    return calls
+
+
 class _Stop(Exception):
     """Raised by the recorder to end the run at the CUNQA seam."""
 
@@ -339,7 +364,9 @@ class TestBatches:
         result = run(_external(optimizer, 100))
         asked = [len(batch) for batch in optimizer.asked]
         assert asked == [3, 1, 4, 3]
-        assert sizes == [circuits * n for n in asked]
+        # One batch per ask, in order; on a host with few CPUs the QML oracle
+        # may send one in several calls, never two in one.
+        _calls_per_batch(sizes, [circuits * n for n in asked])
         # tell gets every row asked, in order, and one value per row.
         assert [candidates for candidates, _ in optimizer.told] == optimizer.asked
         for candidates, values in optimizer.told:

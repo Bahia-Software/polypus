@@ -369,8 +369,9 @@ pub type BoxedError = Box<dyn Error + Send + 'static>;
 /// oracle records it here (type-erased) and yields a finite sentinel;
 /// [`dispatch_optimizer`] takes it after `optimize` returns, and the `polypus`
 /// edge downcasts and re-raises it (contract C-5 keeps oracle outputs finite
-/// regardless). `Clone` shares one slot across an oracle's worker threads (the
-/// QML oracle hands a clone to each `spawn_blocking` task).
+/// regardless). `Clone` shares one slot between everything that records into it:
+/// the factory hands a clone to each oracle it builds, and an oracle shared
+/// across threads records from whichever thread fails.
 #[derive(Clone, Default)]
 pub struct OracleErrorSlot(Arc<Mutex<Option<BoxedError>>>);
 
@@ -837,8 +838,8 @@ mod tests {
 
     #[test]
     fn clone_shares_the_same_slot() {
-        // The QML oracle hands a clone to each worker thread; they must all see
-        // (and write to) the same underlying slot.
+        // Every oracle a factory builds holds a clone; they must all see (and
+        // write to) the same underlying slot.
         let slot = OracleErrorSlot::new();
         let handed_out = slot.clone();
         handed_out.record(boxed("x"), RUN_ID);

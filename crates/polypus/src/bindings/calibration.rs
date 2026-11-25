@@ -198,7 +198,9 @@ fn warn_if_using_default_threshold(py: Python<'_>) -> PyResult<()> {
 /// `POLYPUS_NO_AUTOCALIBRATE`.
 ///
 /// Returns a `dict` describing the outcome:
-/// * `threshold` (int) — qubit count at/above which gates go parallel;
+/// * `threshold` (int) — qubit count at/above which gates go parallel; `31`
+///   means *never* (parallelism paid at no probed size; the value is kept from
+///   when the qubit ceiling was 30, so caches keep their meaning, issue #428);
 /// * `num_threads` (int) — rayon threads detected (one half of the cache key,
 ///   alongside the CPU fingerprint, which is not returned);
 /// * `duration_secs` (float) — measurement time (`0.0` when reused);

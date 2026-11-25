@@ -243,7 +243,7 @@ The [tutorials](https://github.com/Bahia-Software/polypus-tutorials), in English
 | [Memory budget](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/memory.md) | `POLYPUS_MEM_BUDGET`, cgroup detection, `InsufficientMemoryError` |
 | [Performance](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/performance.md) | Batched simulation, GIL-free binding, gate-parallel auto-calibration |
 
-The [documentation site](https://bahia-software.github.io/polypus/) hosts the [user and developer guides](https://bahia-software.github.io/polypus/) and the changelog; the Rust API of every crate is under [`rust/`](https://bahia-software.github.io/polypus/rust/polypus/).
+The [documentation site](https://bahia-software.github.io/polypus/) hosts the [user and developer guides](https://bahia-software.github.io/polypus/) and the changelog; the Rust API of each release is on [docs.rs](https://docs.rs/polypus), and that of `main`, not yet released, under the site's [`rust/`](https://bahia-software.github.io/polypus/rust/polypus/).
 
 ## Architecture
 
@@ -262,7 +262,7 @@ Polypus is a Cargo workspace of 14 crates, all published on [crates.io](https://
 | [`polypus-circuit`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-circuit) | Circuit representation, composition, templates (QFT, Shor's order finding), text and SVG drawings, OpenQASM 2 and 3, QIR |
 | [`polypus-sim`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-sim) | Statevector simulator |
 | [`polypus-optimizers`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-optimizers) | DE (classic, SHADE, L-SHADE), PSO, QNG, CMA-ES, Adam (or momentum), SPSA and Rotosolve, and a bridge to ask/tell optimizers |
-| [`polypus-observable`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-observable) | QUBO and Ising cost observables |
+| [`polypus-observable`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-observable) | QUBO and Ising cost observables, and Pauli-sum measurement (qubit-wise grouping and a parity reducer) |
 | [`polypus-qml`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-qml) | Quantum machine learning models: datasets, layers, readout and losses |
 | [`polypus-physics`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-physics) | Monte Carlo transport, Pauli-sum Hamiltonians (Jordan–Wigner and parity mappings, tapering, exact diagonalization) and molecular Hamiltonians (H₂, STO-3G) |
 | [`polypus-backend`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-backend) | The `QuantumBackend` trait that backends implement and the `Planner` that sizes circuit waves |

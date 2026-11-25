@@ -376,7 +376,7 @@ class TestDtypeAndDevice:
 
 def _derived(seed, step, role):
     sequence = np.random.SeedSequence([seed, step, role])
-    return int(sequence.generate_state(1, dtype=np.uint64)[0])
+    return int(sequence.generate_state(1, dtype=np.uint64)[0]) & (2**63 - 1)
 
 
 class TestSeeds:
@@ -414,7 +414,8 @@ class TestSeeds:
         ]
         seeds = [c["seed"] for c in forward.calls + backward.calls]
         assert len(set(seeds)) == len(seeds)
-        assert all(0 <= s < 2**64 for s in seeds)
+        # Below 2**63, the range Aer takes (#393).
+        assert all(0 <= s < 2**63 for s in seeds)
 
     def test_neighbouring_seeds_do_not_share_streams(self, monkeypatch):
         # With `seed + step`, step n + 1 of seed s would be step n of seed s + 1.
@@ -423,6 +424,23 @@ class TestSeeds:
         seeds = [c["seed"] for c in forward.calls]
         assert not set(seeds[:3]) & set(seeds[3:])
         assert not torch.equal(outputs[11][1][0], outputs[12][0][0])
+
+    def test_a_seeded_layer_runs_and_replays_on_aer_393(self):
+        """Seed 0 derives a value with bit 63 set at its first forward pass; it
+        must reach Aer below 2**63 instead of being refused (#393)."""
+        unmasked = np.random.SeedSequence([0, 0, 0]).generate_state(1, dtype=np.uint64)
+        assert int(unmasked[0]) >= 2**63
+
+        def layer():
+            model = models()["reuploading"]
+            return QuantumLayer(
+                model, initial_params=point(model), shots=SHOTS, seed=0, backend="aer"
+            )
+
+        first, second = self._steps(layer()), self._steps(layer())
+        for a, b in zip(first, second):
+            for u, v in zip(a, b):
+                assert torch.equal(u, v)
 
     def test_without_a_seed_the_backend_draws_each_one(self, monkeypatch):
         forward, backward = Spy(monkeypatch, "expval"), Spy(monkeypatch, "vjp")
