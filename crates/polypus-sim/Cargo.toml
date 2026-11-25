@@ -51,3 +51,9 @@ proptest = { workspace = true }
 
 [lints]
 workspace = true
+
+# Times the gate kernels by window size (issue #593); it drives rayon directly,
+# so it builds only with the parallel kernels.
+[[example]]
+name              = "window_threshold"
+required-features = ["parallel"]
