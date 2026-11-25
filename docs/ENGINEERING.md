@@ -22,7 +22,7 @@ with PyO3 Python bindings. The Cargo workspace has fourteen crates (the `fuzz/` 
 |---|---|---|
 | `polypus-circuit` | Circuit IR + OpenQASM 2.0 and OpenQASM 3 import/export + QIR export | No |
 | `polypus-sim` | Statevector simulator (GIL-free; optional rayon via the `parallel` feature) | No |
-| `polypus-physics` | Physics: classical Monte Carlo transport + quantum Hamiltonians as multi-qubit Pauli sums (fermion-to-qubit mappings, tapering, exact diagonalization, also within one electron sector) + molecular integrals, H₂ and the FCIDUMP reader (`chemistry`); pure Rust | No |
+| `polypus-physics` | Physics: classical Monte Carlo transport + quantum Hamiltonians as multi-qubit Pauli sums (fermion-to-qubit mappings, Z-type Z₂-symmetry tapering, exact diagonalization, also within one electron sector) + molecular integrals, H₂ and the FCIDUMP reader (`chemistry`); pure Rust | No |
 | `polypus-optimizers` | Variational optimizers (DE, PSO, QNG, CMA-ES, Adam, SPSA, Rotosolve) behind evaluation and gradient oracles, and `AlgorithmExternal`, the bridge that runs an `AskTell` optimizer (Optuna, Nevergrad, pycma through the Python bindings) | No |
 | `polypus-observable` | Cost observables reducing measurement counts to a cost: Qubo / Ising, and Pauli sums (qubit-wise-commuting grouping with basis rotations, and a parity reducer); pure math | No |
 | `polypus-qml` | Quantum machine learning: datasets, layered variational models (encoders, ansatz, convolution, pooling), Pauli readout and losses; produces `polypus-circuit` circuits and turns counts into fitness, never executes them | No |

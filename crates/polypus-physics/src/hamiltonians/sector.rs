@@ -59,7 +59,7 @@ fn binomial(n: usize, k: usize) -> Option<usize> {
 
 /// Every `k`-bit mask with exactly `ones` bits set, ascending (Gosper's hack).
 /// The caller guarantees `ones <= k` and `k < usize::BITS`.
-fn combinations(k: usize, ones: usize) -> Vec<usize> {
+pub(super) fn combinations(k: usize, ones: usize) -> Vec<usize> {
     if ones == 0 {
         return vec![0];
     }

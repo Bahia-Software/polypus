@@ -9,6 +9,7 @@
 //! | [`sector`] | Exact eigenvalues of a [`FermionHamiltonian`] within one electron sector `(N↑, N↓)` |
 //! | [`mapping`] | Jordan–Wigner and parity mappings ([`QubitMapping`]) |
 //! | [`taper`] | Removing qubits with a fixed `Z` value |
+//! | [`symmetry`] | Finding the Z-type `Z₂` symmetries of a qubit Hamiltonian and tapering them off ([`Tapering`]) |
 //! | [`photon_polarization`] | Single-photon polarization Hamiltonian |
 //!
 //! Nothing here is specific to chemistry: molecular integrals live in
@@ -21,15 +22,17 @@ pub mod mapping;
 pub mod pauli;
 pub mod photon_polarization;
 pub mod sector;
+pub mod symmetry;
 pub mod taper;
 
-pub use exact::{DenseMatrix, MAX_DENSE_QUBITS, SYMMETRY_TOLERANCE};
+pub use exact::{DenseMatrix, MAX_DENSE_QUBITS, RESTRICTION_TOLERANCE, SYMMETRY_TOLERANCE};
 pub use fermion::{
     FermionHamiltonian, FermionOperator, FermionTerm, Ladder, INTEGRAL_SYMMETRY_TOLERANCE,
 };
 pub use mapping::{QubitMapping, HERMITICITY_TOLERANCE};
 pub use pauli::{PauliAxis, PauliString, PauliSum, PauliTerm, Phase};
 pub use sector::{sector_dimension, MAX_SECTOR_DIMENSION};
+pub use symmetry::{Tapering, RESIDUE_TOLERANCE};
 pub use taper::parity_reduction_qubits;
 
 /// Trait for any physical system that can express its quantum Hamiltonian as a

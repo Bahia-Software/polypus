@@ -7,7 +7,9 @@
 //! without `reference-data/` must still compile it.
 
 use polypus_physics::chemistry::{Fcidump, H2Encoding, H2Molecule};
-use polypus_physics::hamiltonians::FermionHamiltonian;
+use polypus_physics::hamiltonians::{
+    FermionHamiltonian, PauliAxis, PauliSum, QubitMapping, Tapering,
+};
 
 /// A file of `reference-data/fcidump-sto3g/`.
 fn reference(file: &str) -> String {
@@ -150,4 +152,155 @@ fn beh2_near_equilibrium_matches_pyscf_fci() {
 #[test]
 fn beh2_stretched_matches_pyscf_fci() {
     check_sector_fci("beh2", "2.6", 6, 1225);
+}
+
+/// The diagonal element `⟨b|H|b⟩` of a qubit sum: the terms with no `X` or
+/// `Y`, each `c · (−1)^k` for `k` of its `Z` qubits set in `b`.
+fn diagonal_element(sum: &PauliSum, b: usize) -> f64 {
+    sum.terms()
+        .iter()
+        .filter(|t| t.string.ops().iter().all(|&(_, axis)| axis == PauliAxis::Z))
+        .map(|t| {
+            let ones = t
+                .string
+                .ops()
+                .iter()
+                .filter(|&&(q, _)| b >> q & 1 == 1)
+                .count();
+            if ones % 2 == 0 {
+                t.coefficient
+            } else {
+                -t.coefficient
+            }
+        })
+        .sum()
+}
+
+/// Issue #535's second criterion, after tapering: the Hamiltonian tapered
+/// by all its Z-type symmetries (values of the Hartree–Fock determinant),
+/// restricted to the electron sector, still has the PySCF FCI energy, in
+/// both encodings; the Hartree–Fock determinant mapped to the tapered space
+/// still has the Hartree–Fock energy.
+fn check_tapered_fci(molecule: &str, geometry: &str, removed: usize, tapered_dimension: usize) {
+    let file = read(molecule, geometry);
+    let (n_up, n_down) = file.sector();
+    let k = file.num_orbitals();
+    let (hf, fci) = energies(molecule, geometry);
+    for mapping in [QubitMapping::JordanWigner, QubitMapping::Parity] {
+        let (tapering, tapered) =
+            Tapering::for_sector(file.hamiltonian(), mapping, n_up, n_down).expect("a tapering");
+        assert_eq!(
+            tapering.removed_qubits().len(),
+            removed,
+            "{molecule} at {geometry} Å, {mapping:?}"
+        );
+        assert_eq!(tapered.num_qubits(), 2 * k - removed);
+        if mapping == QubitMapping::Parity {
+            // At least the two qubits the parity reduction fixes.
+            let qubits = tapering.removed_qubits();
+            assert!(
+                qubits.contains(&(k - 1)) && qubits.contains(&(2 * k - 1)),
+                "{qubits:?}"
+            );
+        }
+        let basis = tapering
+            .sector_basis(mapping, n_up, n_down)
+            .expect("a sector");
+        assert_eq!(
+            basis.len(),
+            tapered_dimension,
+            "{molecule} at {geometry} Å, {mapping:?}"
+        );
+        let energy = tapered
+            .restricted_eigenvalues(&basis)
+            .expect("an invariant sector")[0];
+        assert!(
+            (energy - fci).abs() <= 1e-6,
+            "{molecule} at {geometry} Å, {mapping:?}: tapered {energy} vs PySCF {fci}"
+        );
+        // Beyond the issue's 1e-6, as before tapering: measured about 1e-13.
+        assert!(
+            (energy - fci).abs() <= 1e-9,
+            "{molecule} at {geometry} Å, {mapping:?}: tapered {energy} vs PySCF {fci}"
+        );
+        let occupation = ((1 << n_up) - 1) | (((1 << n_down) - 1) << k);
+        let reference = mapping
+            .encode_occupation(occupation, 2 * k)
+            .expect("an occupation");
+        let hartree_fock = tapering
+            .tapered_basis_state(reference)
+            .expect("the reference is in the tapered space");
+        let closed_shell = diagonal_element(&tapered, hartree_fock);
+        assert!(
+            (closed_shell - hf).abs() <= 1e-10,
+            "{molecule} at {geometry} Å, {mapping:?}: HF {closed_shell} vs {hf}"
+        );
+    }
+}
+
+#[test]
+fn lih_near_equilibrium_keeps_its_fci_energy_after_tapering() {
+    check_tapered_fci("lih", "1.595", 4, 69);
+}
+
+#[test]
+fn lih_stretched_keeps_its_fci_energy_after_tapering() {
+    check_tapered_fci("lih", "3.0", 4, 69);
+}
+
+#[test]
+fn beh2_near_equilibrium_keeps_its_fci_energy_after_tapering() {
+    check_tapered_fci("beh2", "1.326", 5, 169);
+}
+
+#[test]
+fn beh2_stretched_keeps_its_fci_energy_after_tapering() {
+    check_tapered_fci("beh2", "2.6", 5, 169);
+}
+
+/// Open-shell sectors of LiH after tapering: the restricted spectra of every
+/// value combination, together, are the sector's spectrum before tapering
+/// (a spin swap in the sector basis or the reference would break it).
+#[test]
+fn lih_open_shell_sectors_split_into_their_value_blocks() {
+    let file = read("lih", "1.595");
+    let h = file.hamiltonian();
+    for mapping in [QubitMapping::JordanWigner, QubitMapping::Parity] {
+        let sum = h
+            .to_fermion_operator()
+            .to_qubits(mapping)
+            .expect("a qubit Hamiltonian")
+            .without_residues()
+            .expect("residues dropped");
+        let symmetries = sum.z_symmetries().expect("symmetries");
+        let k = symmetries.len();
+        for (n_up, n_down) in [(2, 1), (1, 2), (3, 1)] {
+            let mut together = Vec::new();
+            for combination in 0..1usize << k {
+                let values: Vec<i8> = (0..k)
+                    .map(|i| if combination >> i & 1 == 0 { 1 } else { -1 })
+                    .collect();
+                let tapering =
+                    Tapering::with_values(sum.num_qubits(), &symmetries, &values).expect("valid");
+                let tapered = tapering.apply(&sum).expect("tapered");
+                let basis = tapering
+                    .sector_basis(mapping, n_up, n_down)
+                    .expect("a sector");
+                together.extend(tapered.restricted_eigenvalues(&basis).expect("invariant"));
+            }
+            together.sort_by(f64::total_cmp);
+            let sector = h.sector_eigenvalues(n_up, n_down).expect("a sector");
+            assert_eq!(
+                together.len(),
+                sector.len(),
+                "({n_up}, {n_down}) {mapping:?}"
+            );
+            for (a, b) in together.iter().zip(&sector) {
+                assert!(
+                    (a - b).abs() <= 1e-10,
+                    "({n_up}, {n_down}) {mapping:?}: {a} vs {b}"
+                );
+            }
+        }
+    }
 }
