@@ -7,7 +7,11 @@ use std::fmt;
 ///
 /// This crate has no dependency on `polypus-circuit`, so there is
 /// deliberately **no** `From<CircuitError>` conversion here.
+///
+/// `#[non_exhaustive]`: new variants are not breaking changes, so a `match`
+/// on it outside this crate needs a wildcard arm.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum PhysicsError {
     /// Energy is zero or negative where a positive value is required.
     NonPositiveEnergy {
@@ -93,6 +97,21 @@ pub enum PhysicsError {
         /// Human-readable description of the problem.
         message: String,
     },
+    /// An FCIDUMP file cannot be read: malformed header or integral line,
+    /// an index out of range, an unsupported variant (unrestricted or
+    /// complex integrals), or an impossible electron count.
+    InvalidFcidump {
+        /// The 1-based line the problem is on, when it is on one line.
+        line: Option<usize>,
+        /// Human-readable description of the problem.
+        message: String,
+    },
+    /// An electron sector `(N↑, N↓)` does not exist for the system: more
+    /// electrons of one spin than spatial orbitals.
+    InvalidSector {
+        /// Human-readable description of the problem.
+        message: String,
+    },
 }
 
 impl fmt::Display for PhysicsError {
@@ -145,6 +164,17 @@ impl fmt::Display for PhysicsError {
             }
             PhysicsError::InvalidIntegrals { message } => {
                 write!(f, "invalid molecular integrals: {message}")
+            }
+            PhysicsError::InvalidFcidump {
+                line: Some(line),
+                message,
+            } => write!(f, "invalid FCIDUMP, line {line}: {message}"),
+            PhysicsError::InvalidFcidump {
+                line: None,
+                message,
+            } => write!(f, "invalid FCIDUMP: {message}"),
+            PhysicsError::InvalidSector { message } => {
+                write!(f, "invalid electron sector: {message}")
             }
         }
     }
