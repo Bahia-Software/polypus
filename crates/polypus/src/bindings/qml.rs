@@ -30,19 +30,19 @@ use pyo3::types::{PyBool, PyDict, PyList, PyModule, PyTuple, PyType};
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 use polypus_qml::{
     AngleEncoder, CompiledModel, ConvBlock, ConvLayer, Decision, Entanglement, Entangler,
-    ExpectationJacobian, FeatureMap, FeatureStates, FidelityKernel, HardwareEfficientAnsatz,
-    IqpEncoder, JacobianWrt, KeepRule, Layer, Loss, Observable, Pairing, Pauli, PauliString,
-    PoolBlock, PoolLayer, QmlError, QmlProblem, QuantumModel, Readout, RotationAxis,
-    SimplifiedTwoDesignAnsatz, StronglyEntanglingAnsatz, ValidationError,
+    ExactState, ExpectationJacobian, FeatureMap, FeatureStates, FidelityKernel,
+    HardwareEfficientAnsatz, IqpEncoder, JacobianWrt, KeepRule, Layer, Loss, Observable, Pairing,
+    Pauli, PauliString, PoolBlock, PoolLayer, QmlError, QmlProblem, QuantumModel, Readout,
+    RotationAxis, SimplifiedTwoDesignAnsatz, StronglyEntanglingAnsatz, ValidationError,
 };
 
 use super::callback::validate_callback;
 use super::circuit::Circuit;
 use super::{
-    config_from_strings, counts_to_pylist, extract_labels, finish_optimization,
-    interruptible_token, is_rotosolve, log_training_start, method_from_pyclass, method_seed,
-    resolve_optimizer_seed, seed_or_entropy, training_observer, unique_id,
-    validate_cunqa_allocation, validate_final_shots, validate_id, validate_method,
+    check_seed_for_backend, config_from_strings, counts_to_pylist, extract_labels,
+    finish_optimization, interruptible_token, is_rotosolve, log_training_start,
+    method_from_pyclass, method_seed, resolve_optimizer_seed, seed_or_entropy, training_observer,
+    unique_id, validate_cunqa_allocation, validate_final_shots, validate_id, validate_method,
     validate_shots_and_qpus, OptionsArg, RunResult,
 };
 use crate::evaluation::{
@@ -1005,8 +1005,8 @@ impl PyReadout {
 /// Training or test samples for a native model, in the `x_train` slot of
 /// `qml.train` (then without `y_train`) or the `x` slot of `qml.predict`.
 ///
-/// `Dataset(x, y=None)` validates the rows (non-empty, equal length, finite)
-/// and, if given, one finite label per row. Without `y` the dataset is
+/// `Dataset(x, y=None)` validates the rows (non-empty, at least one feature,
+/// equal length, finite) and, if given, one finite label per row. Without `y` the dataset is
 /// *unlabeled* (plan F4): it trains only with `loss="expectation"`, and the mark
 /// survives a split. Labels are `float`s; class indices for
 /// `"categorical_cross_entropy"` are whole numbers.
@@ -1306,8 +1306,9 @@ impl Model {
     /// - **Execution** takes the arguments of `polypus.train`. `backend=None`
     ///   is the native simulator on `infrastructure="local"` and Aer otherwise
     ///   (CUNQA's QPUs run Aer); an explicit `backend` wins. `seed` drives the
-    ///   optimizer, the shots and the minibatches (C-7), and `id` is a prefix to
-    ///   which a UUID is appended (C-9).
+    ///   optimizer, the shots and the minibatches (C-7); on Aer and CUNQA it
+    ///   must be below `2**63` (`polypus.ConfigurationError` otherwise, #393).
+    ///   `id` is a prefix to which a UUID is appended (C-9).
     ///
     /// Every check runs before a backend exists and raises
     /// `polypus.ConfigurationError` (a `ValueError`), except a value of the
@@ -1416,6 +1417,7 @@ impl Model {
             None,
             options.map(OptionsArg::into_inner),
         )?;
+        check_seed_for_backend(Some(effective_seed), &backend_config)?;
         let effective_id = unique_id(id)?;
         let config = Arc::new(ExecutionConfig {
             id: effective_id.clone(),
@@ -1681,6 +1683,7 @@ impl<'a> Execution<'a, '_> {
             None,
             self.options.map(OptionsArg::into_inner),
         )?;
+        check_seed_for_backend(seed, &backend_config)?;
         Ok(ExecutionConfig {
             id: unique_id(id_prefix)?,
             shots: self.shots,
@@ -1707,6 +1710,58 @@ struct RowsRun {
 enum RowResults {
     Counts(Vec<Counts>),
     Exact(Vec<HashMap<String, f64>>),
+    /// `predict(exact=True)`'s decisions, each row read straight from its
+    /// statevector ([`exact_predictions`], issues #645, #628).
+    Predictions(Vec<f64>),
+}
+
+/// What [`TrainedModel::run_rows`] keeps of an exact run: the maps
+/// (`run(exact=True)` returns them) or only each row's decision
+/// (`predict(exact=True)`).
+#[derive(Clone, Copy)]
+enum RowRead {
+    Results,
+    Predictions,
+}
+
+/// Why an exact inference run stopped: the backend, or reading a row.
+#[derive(Debug)]
+enum ExactRowError {
+    Backend(BackendError),
+    Qml(QmlError),
+}
+
+impl From<BackendError> for ExactRowError {
+    fn from(e: BackendError) -> Self {
+        ExactRowError::Backend(e)
+    }
+}
+
+impl ExactRowError {
+    fn into_py_err(self) -> PyErr {
+        match self {
+            ExactRowError::Backend(e) => crate::exceptions::backend_error_to_pyerr(e),
+            ExactRowError::Qml(e) => qml_to_py_err(e),
+        }
+    }
+}
+
+/// `compiled`'s exact decision for each of `circuits`, in order, each row read
+/// straight from its statevector (issues #645, #628): no map of its
+/// probabilities is built, and only the decision is kept. The same values, bit
+/// for bit, as `predict_from_probabilities` over `run_circuits_exact`'s maps.
+fn exact_predictions(
+    native: &NativeStatevectorBackend,
+    params: &RunParams,
+    compiled: &CompiledModel,
+    circuits: &[BoundCircuit],
+) -> Result<Vec<f64>, ExactRowError> {
+    native.run_circuits_exact_on_states(circuits, params, |amplitudes, width| {
+        let state = ExactState::new(amplitudes.len(), width, |s| amplitudes[s].norm_sqr());
+        compiled
+            .predict_from_state(&state)
+            .map_err(ExactRowError::Qml)
+    })
 }
 
 /// A `polypus-qml` [`QmlError`] from reading a result as a `ValueError`: at
@@ -1739,9 +1794,16 @@ pub struct TrainedModel {
 impl TrainedModel {
     /// Bind every row of `x` to the parameters and run the circuits: sampled
     /// through the scheduler, or, with `exact`, as exact probabilities on the
-    /// native simulator. Every check runs before a backend exists and raises
-    /// `polypus.ConfigurationError`.
-    fn run_rows(&self, x: &Bound<'_, PyAny>, exec: Execution<'_, '_>) -> PyResult<RowsRun> {
+    /// native simulator, kept as they are (`read` = [`RowRead::Results`]) or
+    /// read into each row's decision as soon as it is computed
+    /// ([`RowRead::Predictions`], issue #645). Every check runs before a
+    /// backend exists and raises `polypus.ConfigurationError`.
+    fn run_rows(
+        &self,
+        x: &Bound<'_, PyAny>,
+        exec: Execution<'_, '_>,
+        read: RowRead,
+    ) -> PyResult<RowsRun> {
         let py = x.py();
         let start = Instant::now();
         let backend = exec.check()?;
@@ -1771,9 +1833,16 @@ impl TrainedModel {
         let results = if exact {
             let native = NativeStatevectorBackend::new(seed.unwrap_or_default());
             let params = config.run_params();
-            py.detach(|| native.run_circuits_exact(&circuits, &params))
-                .map(RowResults::Exact)
-                .map_err(crate::exceptions::backend_error_to_pyerr)?
+            match read {
+                RowRead::Results => py
+                    .detach(|| native.run_circuits_exact(&circuits, &params))
+                    .map(RowResults::Exact)
+                    .map_err(crate::exceptions::backend_error_to_pyerr)?,
+                RowRead::Predictions => py
+                    .detach(|| exact_predictions(&native, &params, &compiled, &circuits))
+                    .map(RowResults::Predictions)
+                    .map_err(ExactRowError::into_py_err)?,
+            }
         } else {
             // One run, GIL released, the rows in waves of the backend's
             // concurrency; Ctrl+C is honoured between waves.
@@ -1888,8 +1957,11 @@ impl TrainedModel {
                 seed,
                 exact,
             },
+            RowRead::Predictions,
         )?;
-        let values = match &run.results {
+        // `RowRead::Predictions` reads exact rows into `Predictions`, so an
+        // `Exact` result does not reach here; read it the same way regardless.
+        let values = match run.results {
             RowResults::Counts(counts) => counts
                 .iter()
                 .map(|counts| run.compiled.predict_from_counts(counts))
@@ -1898,6 +1970,7 @@ impl TrainedModel {
                 .iter()
                 .map(|p| run.compiled.predict_from_probabilities(p))
                 .collect::<Result<Vec<_>, _>>(),
+            RowResults::Predictions(values) => Ok(values),
         }
         .map_err(qml_to_py_err)?;
         let py = x.py();
@@ -1955,6 +2028,7 @@ impl TrainedModel {
                 seed,
                 exact,
             },
+            RowRead::Results,
         )?;
         let py = x.py();
         match run.results {
@@ -1971,13 +2045,17 @@ impl TrainedModel {
             )
             .map(Py::into_any),
             RowResults::Exact(probabilities) => {
+                // Each row's map is consumed as its dict is built, so the Rust
+                // maps and their Python copies are not all alive at once: the
+                // peak is about the larger of the two, not their sum (#628).
+                // The copies themselves are not counted against the budget.
                 let list = PyList::empty(py);
-                for row in &probabilities {
+                for row in probabilities {
                     let dict = PyDict::new(py);
-                    let mut keys: Vec<&String> = row.keys().collect();
-                    keys.sort();
-                    for key in keys {
-                        dict.set_item(key, row[key])?;
+                    let mut entries: Vec<(String, f64)> = row.into_iter().collect();
+                    entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                    for (key, p) in entries {
+                        dict.set_item(key, p)?;
                     }
                     list.append(dict)?;
                 }
@@ -1992,6 +2070,9 @@ impl TrainedModel {
                 )
                 .map(Py::into_any)
             }
+            RowResults::Predictions(_) => Err(PyRuntimeError::new_err(
+                "internal error: run() read its rows as decisions",
+            )),
         }
     }
 
@@ -2117,6 +2198,9 @@ fn parse_wrt(wrt: &str) -> PyResult<JacobianWrt> {
 enum BlockResults {
     Counts(Vec<Counts>),
     Exact(Vec<HashMap<String, f64>>),
+    /// On the exact path, each circuit's readout expectations, read straight
+    /// from its statevector ([`Primitive::exact_readout`], issues #645, #628).
+    Expectations(Vec<Vec<f64>>),
 }
 
 /// What runs every block of one primitive call: one backend behind one
@@ -2161,11 +2245,16 @@ impl BlockRunner {
         }
     }
 
+    /// Run `circuits`. On the exact path with a `readout`, each circuit is
+    /// read into that model's expectations straight from its statevector, with
+    /// no map built, and only those are kept (issues #645, #628); without one,
+    /// the maps are returned.
     fn run(
         &self,
         circuits: Vec<BoundCircuit>,
         cancel: &CancelToken,
-    ) -> Result<BlockResults, InfrastructureError> {
+        readout: Option<&CompiledModel>,
+    ) -> Result<BlockResults, PrimitiveError> {
         match self {
             BlockRunner::Sampled {
                 scheduler, shots, ..
@@ -2178,11 +2267,23 @@ impl BlockRunner {
                     },
                     cancel,
                 )
-                .map(BlockResults::Counts),
-            BlockRunner::Exact { native, params } => native
-                .run_circuits_exact(&circuits, params)
-                .map(BlockResults::Exact)
-                .map_err(InfrastructureError::Backend),
+                .map(BlockResults::Counts)
+                .map_err(PrimitiveError::Infrastructure),
+            BlockRunner::Exact { native, params } => match readout {
+                Some(model) => native
+                    .run_circuits_exact_on_states(&circuits, params, |amplitudes, width| {
+                        let state =
+                            ExactState::new(amplitudes.len(), width, |s| amplitudes[s].norm_sqr());
+                        model
+                            .expectations_from_state(&state)
+                            .map_err(PrimitiveError::Qml)
+                    })
+                    .map(BlockResults::Expectations),
+                None => native
+                    .run_circuits_exact(&circuits, params)
+                    .map(BlockResults::Exact)
+                    .map_err(PrimitiveError::from),
+            },
         }
     }
 
@@ -2207,6 +2308,12 @@ enum PrimitiveError {
 impl From<QmlError> for PrimitiveError {
     fn from(e: QmlError) -> Self {
         PrimitiveError::Qml(e)
+    }
+}
+
+impl From<BackendError> for PrimitiveError {
+    fn from(e: BackendError) -> Self {
+        PrimitiveError::Infrastructure(InfrastructureError::Backend(e))
     }
 }
 
@@ -2247,6 +2354,14 @@ trait Primitive {
     fn circuits(&self, samples: Range<usize>) -> Result<Vec<ConcreteCircuit>, PrimitiveError>;
     /// Read the results of [`circuits`](Self::circuits)`(samples)`.
     fn read(&mut self, samples: Range<usize>, results: BlockResults) -> Result<(), PrimitiveError>;
+    /// The model whose readout expectations are all this primitive reads from
+    /// a circuit on the exact path: each circuit is then read straight from
+    /// its statevector, with no map built ([`BlockResults::Expectations`],
+    /// issues #645, #628). `None` (the default) hands [`read`](Self::read) the
+    /// maps.
+    fn exact_readout(&self) -> Option<&CompiledModel> {
+        None
+    }
     /// Run the block `samples` on the exact native backend by another route
     /// than [`circuits`](Self::circuits), reading its results as it goes, or
     /// `None` to run the circuits (the default). The Jacobian's route is the
@@ -2327,9 +2442,7 @@ fn run_blocks_on(
             .into_iter()
             .map(BoundCircuit::Native)
             .collect();
-        let results = runner
-            .run(circuits, cancel)
-            .map_err(PrimitiveError::Infrastructure)?;
+        let results = runner.run(circuits, cancel, primitive.exact_readout())?;
         primitive.read(start..end, results)?;
         start = end;
     }
@@ -2383,6 +2496,7 @@ impl Primitive for Expval {
         let got = match &results {
             BlockResults::Counts(counts) => counts.len(),
             BlockResults::Exact(probabilities) => probabilities.len(),
+            BlockResults::Expectations(readings) => readings.len(),
         };
         if got != samples.len() {
             return Err(QmlError::CountsLengthMismatch {
@@ -2406,8 +2520,25 @@ impl Primitive for Expval {
                     );
                 }
             }
+            BlockResults::Expectations(readings) => {
+                let expected = self.compiled.num_observables();
+                for reading in readings {
+                    if reading.len() != expected {
+                        return Err(QmlError::CountsLengthMismatch {
+                            expected,
+                            got: reading.len(),
+                        }
+                        .into());
+                    }
+                    self.values.extend(reading);
+                }
+            }
         }
         Ok(())
+    }
+
+    fn exact_readout(&self) -> Option<&CompiledModel> {
+        Some(&self.compiled)
     }
 }
 
@@ -2449,9 +2580,14 @@ impl Primitive for JacobianRun {
             BlockResults::Exact(probabilities) => {
                 block.jacobian_from_probabilities(probabilities)?
             }
+            BlockResults::Expectations(readings) => block.jacobian_from_expectations(readings)?,
         };
         self.keep(jacobian);
         Ok(())
+    }
+
+    fn exact_readout(&self) -> Option<&CompiledModel> {
+        Some(self.plan.model())
     }
 
     /// The exact Jacobian by adjoint differentiation (#503): one run per sample
@@ -2794,10 +2930,15 @@ impl Primitive for VjpRun {
             BlockResults::Exact(probabilities) => {
                 block.jacobian_from_probabilities(probabilities)?
             }
+            BlockResults::Expectations(readings) => block.jacobian_from_expectations(readings)?,
         };
         let vjp = jacobian.vjp(cotangent)?;
         self.keep(vjp);
         Ok(())
+    }
+
+    fn exact_readout(&self) -> Option<&CompiledModel> {
+        Some(self.plan.model())
     }
 
     /// The exact product by adjoint differentiation (#559): one run per sample
@@ -2878,6 +3019,11 @@ impl Primitive for KernelRun {
         let got = match &results {
             BlockResults::Counts(counts) => counts.len(),
             BlockResults::Exact(probabilities) => probabilities.len(),
+            BlockResults::Expectations(_) => {
+                return Err(PrimitiveError::Internal(
+                    "the kernel reads probabilities, not expectations".to_string(),
+                ))
+            }
         };
         if got != samples.len() {
             return Err(QmlError::CountsLengthMismatch {
@@ -2895,6 +3041,11 @@ impl Primitive for KernelRun {
                 .iter()
                 .map(|probabilities| self.kernel.fidelity_from_probabilities(probabilities))
                 .collect::<Result<Vec<_>, _>>()?,
+            BlockResults::Expectations(_) => {
+                return Err(PrimitiveError::Internal(
+                    "the kernel reads probabilities, not expectations".to_string(),
+                ))
+            }
         };
         let matrix = match &mut self.matrix {
             Some(matrix) => matrix,
@@ -3112,8 +3263,9 @@ fn shape_to_py_err(e: ShapeError) -> PyErr {
 /// - **Execution** takes `TrainedModel.run`'s arguments with its rules: with
 ///   `exact=True` the exact expectations (`infrastructure="local"`,
 ///   `backend="polypus"`), otherwise each one estimated from `shots` shots;
-///   `backend=None` by infrastructure; `seed` drawn when omitted and refused on
-///   `qmio`. The seed is logged, not returned: pass one to replay.
+///   `backend=None` by infrastructure; `seed` drawn when omitted, refused on
+///   `qmio`, and below `2**63` on Aer and CUNQA. The seed is logged, not
+///   returned: pass one to replay.
 /// - **Runs** one circuit per row, in blocks of rows over one backend for the
 ///   whole call, with the GIL released; Ctrl+C stops it between blocks.
 ///
@@ -3489,7 +3641,8 @@ fn kernel_encoder<'py>(encoder: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Encod
 
 /// The rows of `x` (rows or a `Dataset`, whose labels are not used) for
 /// `qml.kernel_matrix`, checked as `qml.expval` checks its rows (empty,
-/// ragged, non-finite), each a `polypus.ConfigurationError` naming `name`.
+/// zero-width, ragged, non-finite), each a `polypus.ConfigurationError`
+/// naming `name`.
 fn kernel_rows(x: &Bound<'_, PyAny>, name: &str) -> PyResult<polypus_qml::Dataset> {
     if let Ok(dataset) = x.cast::<PyDataset>() {
         return Ok(dataset.try_borrow()?.inner.clone());
@@ -4353,6 +4506,102 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    /// #645: on the exact path, `qml.expval` and the shifted circuits of
+    /// `qml.jacobian` and `qml.vjp` are read into the model's expectations as
+    /// each circuit's map is built, so the runner hands them expectations, not
+    /// maps; what they keep is what reading the maps gives, bit for bit
+    /// (`{:?}` prints every `f64` exactly, a `-0.0` included).
+    #[test]
+    fn exact_primitives_read_expectations_that_match_the_maps_bit_for_bit() {
+        fn read_both_ways<P: Primitive>(mut by_readings: P, mut by_maps: P) -> (P, P) {
+            let runner = BlockRunner::Exact {
+                native: NativeStatevectorBackend::new(0),
+                params: run_params(0, 1),
+            };
+            let cancel = CancelToken::default();
+            let all = 0..by_maps.num_samples();
+            let circuits = |primitive: &P| -> Vec<BoundCircuit> {
+                primitive
+                    .circuits(all.clone())
+                    .unwrap()
+                    .into_iter()
+                    .map(BoundCircuit::Native)
+                    .collect()
+            };
+            assert!(by_readings.exact_readout().is_some());
+            let readings = runner
+                .run(circuits(&by_readings), &cancel, by_readings.exact_readout())
+                .unwrap();
+            assert!(matches!(readings, BlockResults::Expectations(_)));
+            by_readings.read(all.clone(), readings).unwrap();
+            let maps = runner.run(circuits(&by_maps), &cancel, None).unwrap();
+            assert!(matches!(maps, BlockResults::Exact(_)));
+            by_maps.read(all, maps).unwrap();
+            (by_readings, by_maps)
+        }
+        let exactly = |a: &[f64], b: &[f64]| assert_eq!(format!("{a:?}"), format!("{b:?}"));
+
+        let (a, b) = read_both_ways(expval_run(), expval_run());
+        assert!(!a.values.is_empty());
+        exactly(&a.values, &b.values);
+        let compiled = model_with_observables(2);
+        let v = cotangent(5, 2);
+        for wrt in [JacobianWrt::Params, JacobianWrt::Inputs, JacobianWrt::Both] {
+            let (a, b) = read_both_ways(jacobian_run(wrt), jacobian_run(wrt));
+            assert!(!(a.by_params.is_empty() && a.by_inputs.is_empty()));
+            exactly(&a.by_params, &b.by_params);
+            exactly(&a.by_inputs, &b.by_inputs);
+            let (a, b) = read_both_ways(
+                vjp_run(&compiled, wrt, v.clone()),
+                vjp_run(&compiled, wrt, v.clone()),
+            );
+            assert!(!(a.by_params.is_empty() && a.by_inputs.is_empty()));
+            exactly(&a.by_params, &b.by_params);
+            exactly(&a.by_inputs, &b.by_inputs);
+        }
+    }
+
+    /// #645: `predict(exact=True)` reads each row's decision as its map is
+    /// built; the decisions are what the maps give, bit for bit.
+    /// With a raw readout the decision is `⟨O₀⟩` itself, so "bit for bit"
+    /// compares real values, not class indices.
+    #[test]
+    fn exact_predictions_are_the_maps_decisions_bit_for_bit() {
+        let (argmax, rows, _) = primitive_model_and_rows();
+        for compiled in [argmax, model_with_observables(1)] {
+            let theta: Vec<f64> = (0..compiled.num_params())
+                .map(|p| -0.7 + 0.13 * p as f64)
+                .collect();
+            let circuits: Vec<BoundCircuit> = rows
+                .iter()
+                .map(|row| BoundCircuit::Native(compiled.bind(row, &theta).unwrap()))
+                .collect();
+            let native = NativeStatevectorBackend::new(0);
+            let params = run_params(0, 1);
+            let read = exact_predictions(&native, &params, &compiled, &circuits).unwrap();
+            let from_maps: Vec<f64> = native
+                .run_circuits_exact(&circuits, &params)
+                .unwrap()
+                .iter()
+                .map(|map| compiled.predict_from_probabilities(map).unwrap())
+                .collect();
+            assert_eq!(read.len(), rows.len());
+            assert_eq!(format!("{read:?}"), format!("{from_maps:?}"));
+        }
+    }
+
+    /// The kernel reads probabilities: it keeps the maps, and refuses
+    /// expectations as a bookkeeping error rather than misreading them.
+    #[test]
+    fn the_kernel_keeps_reading_maps_on_the_exact_path() {
+        let mut run = kernel_run(true);
+        assert!(run.exact_readout().is_none());
+        assert!(matches!(
+            run.read(0..1, BlockResults::Expectations(vec![vec![1.0]])),
+            Err(PrimitiveError::Internal(_))
+        ));
     }
 
     /// A native backend that counts the calls it receives and its closes.

@@ -8,8 +8,10 @@
 //!
 //! Two flavours exist:
 //!
-//! - **Declarative, native** ([`QuboObservable`], [`IsingObservable`]): the user
-//!   describes the cost as *data* (a QUBO / Ising form), and evaluation is pure
+//! - **Declarative, native** ([`QuboObservable`], [`IsingObservable`], and
+//!   [`ParityObservable`] for `Z` strings of any weight): the user
+//!   describes the cost as *data* (a QUBO / Ising form, or weighted `Z`
+//!   strings), and evaluation is pure
 //!   Rust. This is a general primitive — MaxCut, TSP, portfolio, Hamming weight,
 //!   and any diagonal (computational-basis) cost reduce to it — without
 //!   hardcoding a specific problem.
@@ -17,17 +19,46 @@
 //!   wraps a user Python function but calls it once per *unique* bitstring in a
 //!   single GIL section, then aggregates in Rust.
 //!
-//! ## Relationship to `polypus-physics::PauliSum`
+//! ## Pauli sums (issue #530)
 //!
-//! This is the *diagonal, counts-based* cost analogue of the physics crate's
-//! `PauliSum`, a Hermitian operator made of multi-qubit Pauli strings
-//! (`Z0 Z1`, `X0 X1 Y2 Y3`). They are separate: every evaluator here reduces
-//! the counts of one circuit measured in the computational basis, so it can
-//! only express diagonal (`Z`-only) costs, while a general `PauliSum` needs one
-//! basis-rotated circuit per group of qubit-wise commuting terms. Measuring a
-//! `PauliSum` (grouping, parity reduction, the oracle that runs one circuit per
-//! group) is planned in issues #530 and #424; until then the two types are not
-//! coupled.
+//! A general Hamiltonian, such as `polypus-physics`' `PauliSum`, is a sum of
+//! multi-qubit Pauli strings (`Z0 Z1`, `X0 X1 Y2 Y3`), not a diagonal cost.
+//! Hardware measures every qubit in the `Z` basis, so a term with `X` or `Y`
+//! factors is measured by rotating those qubits first (`H` for `X`; `S†` then
+//! `H` for `Y`; see [`BasisRotation`]), after which the term reads as a
+//! product of `Z`s on the same qubits. Terms that agree on the Pauli of every
+//! qubit they share (*qubit-wise commuting*) share one rotation, hence one
+//! circuit: [`group_qubit_wise`] partitions a sum into such groups, and each
+//! group's [`ParityObservable`] turns that circuit's counts into the group's
+//! contribution. The energy is [`Grouping::constant`] plus the sum of the
+//! groups' values. Running one circuit per group is the oracle's job
+//! (issue #424).
+//!
+//! Design decisions, recorded here as issue #530 asks:
+//!
+//! 1. **Own bitmask type, not `polypus-physics`' `PauliSum`.** A
+//!    [`PauliMask`] stores a string as two `u64` masks (`X → (1, 0)`,
+//!    `Z → (0, 1)`, `Y → (1, 1)` per qubit), so qubit-wise commutation and
+//!    parity are a few bit operations. The price is a limit of
+//!    [`MAX_QUBITS`] = 64 qubits. This crate does not depend on
+//!    `polypus-physics`; converting a `PauliSum` term by term is the caller's
+//!    job (the oracle of #424), and the physics crate is a test-only
+//!    dependency here.
+//! 2. **Not unified with `polypus-qml`'s Pauli types.** `polypus-qml`'s
+//!    `PauliString` names *logical* positions of a model, resolved to physical
+//!    qubits when the model is compiled; the types here act on physical
+//!    qubits. What the two crates share is the algorithms: `polypus-qml`'s
+//!    `DiagonalObservable` is the same parity reduction, and its readout
+//!    grouping applies the same greedy first-fit idea to whole observables
+//!    (rejecting more than one group for now), so it can call these once its
+//!    indices are physical (issue #620).
+//! 3. **Identity terms are a constant, not a group.** Their value is the same
+//!    in every state, so no shots are spent on them: [`group_qubit_wise`] sums
+//!    them into [`Grouping::constant`]. A [`ParityObservable`] still accepts a
+//!    mask-0 term (always `+c`), as `polypus-qml`'s `DiagonalObservable` does.
+//!
+//! Qubit `i` is bit `i` of a mask, and the counts keys follow the convention
+//! below.
 //!
 //! ## Bit-ordering convention
 //!
@@ -40,12 +71,19 @@
 
 use std::collections::HashMap;
 
+mod bound;
 mod error;
 mod ising;
+mod pauli;
 mod qubo;
 
+pub use bound::MAX_WEIGHT_BOUND;
 pub use error::ObservableError;
 pub use ising::IsingObservable;
+pub use pauli::{
+    group_qubit_wise, BasisRotation, Grouping, MeasurementGroup, ParityObservable, Pauli,
+    PauliMask, MAX_QUBITS,
+};
 pub use qubo::QuboObservable;
 
 /// Where a reducer can run: `Portable` reducers are pure Rust and can run
@@ -67,8 +105,7 @@ pub enum ReducerLocality {
 /// value per candidate, in the same order.
 ///
 /// Implementations are `Send + Sync` so a single `Arc<dyn CostObservable>` can be
-/// shared across an oracle's worker threads (e.g. the QML oracle's
-/// `spawn_blocking` tasks) and evaluated concurrently.
+/// held by an oracle that is shared across threads, and evaluated concurrently.
 pub trait CostObservable: Send + Sync {
     /// Evaluate every candidate's counts. Returns one value per candidate, or the
     /// first error encountered.
@@ -87,7 +124,7 @@ pub trait CostObservable: Send + Sync {
     ) -> Result<Vec<f64>, ObservableError>;
 
     /// Where this reducer may run. Defaults to [`ReducerLocality::Portable`]
-    /// (the native `Qubo`/`Ising` evaluators are pure Rust); the Python-callback
+    /// (the native `Qubo`/`Ising`/`Parity` evaluators are pure Rust); the Python-callback
     /// observable overrides it to [`ReducerLocality::Local`].
     fn locality(&self) -> ReducerLocality {
         ReducerLocality::Portable

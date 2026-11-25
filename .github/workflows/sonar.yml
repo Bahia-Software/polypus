@@ -50,7 +50,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends llvm
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cargo-llvm-cov@0.9.1
       - name: Test with coverage
@@ -118,7 +118,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: llvm-cov
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cargo-llvm-cov@0.9.1
       - name: Install dev dependencies
@@ -178,13 +178,14 @@ jobs:
     env:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
     steps:
-      # Full history: blame data for new-code detection.
+      # Full history: blame data for new-code detection. This job keeps a full
+      # clone, reference-data/ included: with `sparse-checkout` set,
+      # actions/checkout also passes `--filter=blob:none`, so only HEAD's blobs
+      # are local. On pushes to main Sonar blames each changed file against its
+      # previous version with JGit, which cannot lazy-fetch a missing blob
+      # from the promisor remote, and the scan dies with MissingObjectException.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          sparse-checkout: |
-            /*
-            !/reference-data/
-          sparse-checkout-cone-mode: false
           fetch-depth: 0
       # The Rust analyzer needs cargo on PATH.
       - name: Install Rust (rust-toolchain.toml)

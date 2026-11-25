@@ -44,6 +44,11 @@ use crate::readout::Decision;
 pub enum ValidationError {
     /// A dataset was constructed with no samples.
     EmptyDataset,
+    /// A dataset's samples have no features (the first row has width 0, so
+    /// every row does). A model would then encode nothing and predict a
+    /// constant whatever the input, so zero-width samples are rejected while
+    /// fewer features than qubits stay accepted (issue #513).
+    NoFeatures,
     /// A row's width differs from the first row's width (features must form a
     /// rectangular matrix). Reports the first offending row.
     RaggedRows {
@@ -351,6 +356,10 @@ impl fmt::Display for ValidationError {
             ValidationError::EmptyDataset => {
                 write!(f, "dataset is empty: at least one sample is required")
             }
+            ValidationError::NoFeatures => write!(
+                f,
+                "samples have no features: every sample needs at least one feature"
+            ),
             ValidationError::RaggedRows {
                 sample,
                 expected,
@@ -609,6 +618,13 @@ pub enum QmlError {
     /// A slice of counts maps handed to
     /// [`fitness_from_counts`](crate::QmlProblem::fitness_from_counts) has a
     /// length different from the number of training circuits.
+    ///
+    /// Also a circuit's reading of the wrong width for the exact readers that
+    /// take expectations instead of maps (issue #645), such as
+    /// [`fitness_from_expectations`](crate::QmlProblem::fitness_from_expectations):
+    /// `expected` is then the width (or, for one too short, the entries it
+    /// must have at least) and `got` the reading's. The message still speaks
+    /// of counts maps.
     CountsLengthMismatch {
         /// The number of circuits (and hence counts maps) expected.
         expected: usize,
@@ -859,6 +875,13 @@ mod tests {
             expected: 2,
             got: 1,
         });
+    }
+
+    #[test]
+    fn no_features_names_the_missing_feature() {
+        let s = ValidationError::NoFeatures.to_string();
+        assert!(s.contains("no features"), "{s}");
+        assert!(s.contains("at least one feature"), "{s}");
     }
 
     #[test]

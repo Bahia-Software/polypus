@@ -148,7 +148,11 @@ Never panic across the boundary — return a `BackendError`:
   process: `polypus_backend::check_statevector_fits(num_qubits)?` does the check
   against the same budget the built-in backends use (`POLYPUS_MEM_BUDGET`, else the
   detected RAM/cgroup limit minus a reserve) and never refuses when no limit could
-  be detected; `mem_budget::check_fits(n, budget)` takes the budget explicitly.
+  be detected; `mem_budget::check_fits(n, budget)` takes the budget explicitly. A
+  backend built on `polypus-sim` (ceiling 40 qubits) calls
+  `mem_budget::check_statevector_against(n, polypus_sim::MAX_QUBITS, budget)`
+  instead, which also keeps the 30-qubit ceiling where no limit is detected
+  (issue #428).
   Only meaningful for a dense `16 · 2^n`-byte simulation. *New in 0.8.0 — a
   breaking addition for exhaustive matches; see
   [Stability commitment](#stability-commitment).*
@@ -186,9 +190,12 @@ the built-in backends: native, `polypus.statevector` and Aer with
 `sim_method="statevector"` refuse in Rust on the `16 · 2^n` model; Aer with any
 other method receives the known budget as `max_memory_mb` and refuses by itself
 for the method it picks (raised as the same `polypus.InsufficientMemoryError`);
-nothing is refused against the fallback. A backend whose memory is not a dense
-statevector should likewise defer to its own validation rather than call
-`check_statevector_fits`.
+nothing is refused for lack of memory against the fallback. A backend built on
+`polypus-sim`, whose ceiling is 40 qubits, calls `check_statevector_against`
+instead, which also keeps the fallback's 30-qubit ceiling (issue #428):
+`check_statevector_fits` alone would let a 35-qubit statevector through on macOS.
+A backend whose memory is not a dense statevector should likewise defer to its
+own validation rather than call `check_statevector_fits`.
 
 ### Allocation walltime
 
@@ -479,8 +486,12 @@ bridge sends `{"op":"hello","protocol":1}` and the worker must answer `{"op":"re
 Circuits arrive as **OpenQASM 2.0** text (a provider-native `Foreign` object cannot
 cross a process boundary and is rejected before it reaches the worker). Return one
 counts map per circuit, in order. `seed`, when present, is this run request's own
-seed, already different on every request of a training run (C-7): pass it to your
-SDK as is.
+seed, already different on every request of a training run (C-7), and any 64-bit
+value: pass it to your SDK as is, or, for an SDK that takes fewer bits, masked to
+them — Qiskit Aer's `seed_simulator` takes a seed below `2**63`, so
+`seed & (2**63 - 1)` (as `examples/python-backend-template/worker.py` shows). Two
+request seeds that differ only in bit 63 then sample alike; derived seeds almost
+never do, and run seeds `s` and `s + 2**63` share only their first request.
 
 ### Polluted stdout and the frame-size cap
 
@@ -862,8 +873,9 @@ QMIO's compiler without this check.
 
 The check runs and connects to nothing. By default it is **structural**, so an accepted
 circuit can still fail for lack of resources. With `resources=True`, a circuit the
-native backend accepts structurally is also checked against its qubit ceiling (30) and
-the statevector memory budget (`POLYPUS_MEM_BUDGET`, issue #215), and a failure is
+native backend accepts structurally is also checked against its qubit ceiling (40, or 30
+where no memory limit is detected, issue #428) and the statevector memory budget
+(`POLYPUS_MEM_BUDGET`, issue #215), and a failure is
 reported with the message of the error the run raises (`polypus.NativeCircuitError`,
 `polypus.InsufficientMemoryError`). Only the native entry checks resources: Aer
 measures its own memory need at run time, which depends on the simulation method.

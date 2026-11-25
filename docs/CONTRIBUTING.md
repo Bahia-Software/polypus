@@ -52,10 +52,14 @@ pip install --force-reinstall dist/polypus_quantum-*.whl
 
 `--force-reinstall` makes pip replace an already-installed wheel that has the
 same version after a rebuild; it also replaces an editable install.
+`just wheel` builds and installs the wheel as CI does (see
+[Running the checks](#running-the-checks)).
 
 **Toolchain:** the Minimum Supported Rust Version is declared as
-`rust-version` in the workspace `Cargo.toml` — that field is the single place
-it lives (Cargo enforces it and Clippy picks it up automatically). The
+`rust-version` in the workspace `Cargo.toml` — that field is where it is
+decided (Cargo enforces it and Clippy picks it up automatically); the
+justfile's `msrv`, which the `msrv` job checks with, must name the same
+version, and `tests/docs/test_ci_recipes.py` fails when it does not. The
 workspace uses the MSRV-aware resolver (`resolver = "3"`), so `cargo update`
 avoids dependency releases that need a newer Rust than `rust-version`; the
 `msrv` CI job still builds with `--locked` and catches anything that slips
@@ -69,70 +73,61 @@ way.
 
 ## Running the checks
 
-These are the checks CI runs (`.github/workflows/ci.yml` and `hygiene.yml`);
-each can be run locally. They use the Rust that `rust-toolchain.toml` pins,
-which rustup selects in this checkout (`rustup toolchain install` installs
-it). Lints and builds:
+Every check of `.github/workflows/ci.yml` is a recipe of the root
+[`justfile`](https://github.com/Bahia-Software/polypus/blob/main/justfile), and
+`ci.yml` calls those recipes instead of repeating their commands, so the two
+cannot drift apart (a test, `tests/docs/test_ci_recipes.py`, fails when a
+`ci.yml` step runs a command of its own, or changes what a recipe runs through
+an environment variable, `$GITHUB_ENV`, `$GITHUB_PATH`, a shell setting or an
+unreviewed action). The checks of `hygiene.yml` and
+`docs.yml` have recipes too (`just hygiene`, `just docs-site`), although those
+workflows run their own commands. Install
+[just](https://just.systems) once; CI pins the version in `ci.yml`
+(`JUST_VERSION`):
 
 ```bash
-cargo fmt --all --check
-ruff check && ruff format --check          # ruff pinned in requirements-dev.txt
-cargo deny check                           # licenses, advisories and bans (needs cargo-deny, deny.toml)
-cargo metadata --locked --format-version 1 > /dev/null   # Cargo.lock matches the manifests
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo clippy --locked -p polypus-infrastructure --features qmio --all-targets -- -D warnings
-cargo clippy --locked -p polypus --features qmio --all-targets -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
-python .github/scripts/hygiene.py --base origin/main   # repository hygiene (commit first)
-cargo machete                              # unused dependencies (needs cargo-machete)
+cargo install --locked just --version 1.57.0
 ```
 
-Declared dependency floors (the `rust-minimal-versions` and `python-floors`
-jobs). The first rewrites `Cargo.lock`; restore it afterwards with
-`git checkout Cargo.lock`. The second needs a fresh environment on Python 3.10
-and installs the build requirements at their floors first (see the job):
+Then, from the repository root:
 
 ```bash
-cargo +nightly-2026-10-22 update -Z direct-minimal-versions
-cargo check --workspace --all-targets
-uv pip install --resolution lowest-direct -r pyproject.toml -r requirements-dev.txt
+just ci          # everything CI checks that one machine can reproduce
 ```
-
-Rust tests:
 
 ```bash
-cargo test --locked --workspace            # every crate, default features
-                                           # (polypus-subprocess-backend's tests spawn a Python
-                                           #  worker; they skip gracefully if python3 is absent)
-cargo test --locked --all-features -p polypus-circuit -p polypus-sim -p polypus-physics \
-  -p polypus-optimizers -p polypus-observable -p polypus-backend \
-  -p polypus-backend-conformance -p polypus-subprocess-backend
-                                           # pure-Rust crates, every feature
-CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \
-  cargo test --locked --release -p polypus-sim --features parallel --test memory_safety
-CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \
-  cargo test --locked --release -p polypus-sim --features parallel --lib kernels::
-cargo test --locked -p polypus-logger --features debug-logs   # the wheel's log level
-cargo test --locked -p polypus-infrastructure --features qmio
-cargo test --locked -p polypus --features qmio   # QMIO backend (skips gracefully without QPU access)
-cargo test --locked --manifest-path examples/rust-backend-template/Cargo.toml
-cargo test --locked --manifest-path examples/python-backend-template/Cargo.toml
+just ci-all      # that, plus the MSRV, dependency-floor, packaging, semver, fuzz and Miri jobs
 ```
-
-Python tests, with the wheel installed (see Setting up):
 
 ```bash
-python -m compileall -q examples benchmarks
-pytest tests/python -rs --strict-markers   # -rs lists every skip with its reason
-python -m mypy.stubtest polypus \
-  --allowlist tests/python/stubtest_allowlist.txt \
-  --mypy-config-file tests/python/stubtest_mypy.ini
-                                           # typing stubs vs the installed extension
-                                           # (mypy from requirements-dev.txt)
-OMP_NUM_THREADS=1 cargo test --locked -p polypus-infrastructure --test conformance \
-  -- --ignored --exact local_aer_backend_conformance
-                                           # the conformance battery against Aer
+just --list      # every recipe: `just fmt`, `just clippy`, `just test-rust`, `just pytest -k qml`, …
 ```
+
+The recipes use the Rust that `rust-toolchain.toml` pins, which rustup selects
+in this checkout (`rustup toolchain install` installs it); the ones on another
+toolchain (`msrv`, `minimal-versions`, `fuzz`, `miri`) install the version the
+justfile names. `just ci` builds the wheel and installs it in the active Python
+environment (`just wheel`), then runs the Python suite, the typing stubs, the
+Aer conformance battery and the tutorial notebooks against it. It expects the
+tools CI installs: `requirements-dev.txt` and `requirements-docs.txt`, plus
+cargo-deny, cargo-machete, LLVM's `llvm-as`, and for the notebooks nbconvert,
+ipykernel, matplotlib and the CPU build of PyTorch (several tutorials train
+through `polypus.torch`); `ci-all` adds cargo-semver-checks and cargo-fuzz. Their versions are
+in `ci.yml`. `just hygiene` analyses commits, not uncommitted changes, so commit
+first (see [Repository hygiene](#repository-hygiene)); `just minimal-versions`
+rewrites `Cargo.lock` and restores it afterwards.
+
+What one machine cannot reproduce is the matrix: CI builds the wheel on Linux,
+macOS and Windows, runs the Python suite on the floor and latest supported
+Python and on the Qiskit of the OpenQASM 3 fixtures, and runs it once more
+with every dependency at its declared floor on a fresh Python 3.10 (the
+`python-floors` job, whose steps show how). `just pytest` uses the Python of
+the active environment.
+
+Optional git hooks run the formatting checks before each commit:
+`pip install pre-commit`, then `pre-commit install` once per clone
+(`.pre-commit-config.yaml`: `just fmt`, `just ruff`, and nbstripout on
+`tutorials/`).
 
 A few tests skip when what they need is missing. CI provides it and sets a
 variable that turns those skips into failures: `POLYPUS_REQUIRE_LLVM_AS=1`
@@ -161,12 +156,11 @@ parametrized cases). Any other skip fails the run and is listed at its end
 does not fail it. A test that needs something a leg lacks either gets it
 installed there or goes on that leg's list in `.github/workflows/ci.yml`.
 
-CI also builds the wheel on Linux, macOS and Windows and executes every
-notebook under `tutorials/` (`jupyter nbconvert --to notebook --execute`).
-Three jobs set another toolchain with `RUSTUP_TOOLCHAIN`: `msrv` checks the
-workspace with the MSRV (`rust-version` in `Cargo.toml`), and `fuzz` and
-`miri` fuzz the OpenQASM importers and run Miri over `polypus-sim`'s `unsafe`
-kernels on a dated nightly. Their jobs in `ci.yml` show the exact commands.
+Four jobs use another toolchain, the one the justfile names: `msrv` checks
+the workspace with the MSRV (`rust-version` in `Cargo.toml`);
+`rust-minimal-versions` resolves the dependency floors with a dated nightly
+(and builds with the pinned Rust); `fuzz` and `miri` fuzz the OpenQASM
+importers and run Miri over `polypus-sim`'s `unsafe` kernels on that nightly.
 
 A green run is a **precondition** for opening a PR, not something to fix
 afterwards.
@@ -174,8 +168,9 @@ afterwards.
 > Note: CI tests with `--workspace` instead of listing crates one by one — a
 > hand-maintained crate list silently goes stale every time a crate is added
 > or split (it already happened once). The one deliberate exception is the
-> all-features pass over the pure-Rust crates: `--workspace --all-features`
-> would enable `extension-module`, which breaks building the test targets.
+> all-features pass over the pure-Rust crates (`pure_crates` in the
+> justfile): `--workspace --all-features` would enable `extension-module`,
+> which breaks building the test targets.
 
 Performance claims have their own bar: before claiming a speed-up, back it
 with the scripts in `benchmarks/` (`run_benchmarks.py`,
@@ -208,6 +203,8 @@ rejects:
 - blobs larger than 1 MiB;
 - a `CITATION.cff` version different from `Cargo.toml`, or not an earlier
   release when `Cargo.toml` is `X.Y.Z-dev` (contract C-6);
+- a change to `CHANGELOG.md` while `Cargo.toml` is `X.Y.Z-dev`: entries go in
+  `changelog.d/` (see [Changelog entries](#changelog-entries));
 - submodules.
 
 Run it before pushing:
@@ -226,9 +223,10 @@ result; `nbstripout --install` once per clone prevents it.
 
 Legitimate exceptions go in `.github/hygiene-allow.txt`, one per line as
 `RULE<TAB>PATTERN<TAB># reason`: one rule, the narrowest path or glob, and a
-reason. Forbidden names, notebooks, versions, submodules and commit messages
-admit none: merge commits keep every message in the history of `main`, so
-reword the commit instead (`git commit --amend` or `git rebase -i`).
+reason. Forbidden names, notebooks, versions, `CHANGELOG.md` edits, submodules
+and commit messages admit none: merge commits keep every message in the
+history of `main`, so reword the commit instead (`git commit --amend` or
+`git rebase -i`).
 Changes to the allow list, the script, the workflow or the policy-relevant
 `.gitignore` files need explicit human review.
 
@@ -373,7 +371,9 @@ A user-visible change adds one file to [`changelog.d/`](../changelog.d)
 instead of editing [`CHANGELOG.md`](../CHANGELOG.md); the release pull request
 assembles the files into `CHANGELOG.md` with
 [towncrier](https://towncrier.readthedocs.io/). Pull requests that all edited
-`CHANGELOG.md` used to conflict with each other on the same lines.
+`CHANGELOG.md` used to conflict with each other on the same lines. The
+hygiene check rejects a `CHANGELOG.md` edit while `Cargo.toml` carries an
+`X.Y.Z-dev` version.
 
 - Name: `<issue>.<type>.md` (`504.added.md`), or `+<short-slug>.<type>.md`
   when there is no issue. A second entry of the same issue and type is

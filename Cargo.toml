@@ -10,7 +10,8 @@
 #   - crates/polypus-optimizers : pure-Rust variational optimizers (DE, PSO, QNG, CMA-ES) decoupled
 #                              from circuits and Python via EvaluationOracle/VarianceOracle
 #   - crates/polypus-observable : pure-Rust, GIL-free cost observables (QUBO/Ising and other
-#                              diagonal costs) mapping measurement counts to expectation values
+#                              diagonal costs, Pauli-sum grouping and parity reduction) mapping
+#                              measurement counts to expectation values
 #   - crates/polypus-qml     : pure-Rust quantum machine learning (datasets, layered models,
 #                              Pauli readout, losses); produces polypus-circuit circuits (no PyO3)
 #   - crates/polypus-backend : the pyo3-free QuantumBackend contract a third party implements,
@@ -78,8 +79,10 @@ polypus-logger     = { path = "crates/polypus-logger", version = "0.9.0-dev" }
 # Each requirement is a tested floor: the `rust-minimal-versions` CI job builds
 # with every direct dependency at its minimum, so raise one when that job fails.
 # `log` is the logging facade every crate emits through; the concrete sink lives
-# in `polypus-logger`, which additionally enables its `std` feature.
-log                = "0.4.8"
+# in `polypus-logger`, which additionally enables its `std` feature. Floor 0.4.21:
+# `jiff` (`polypus-logger`) declares it as an optional dependency, which Cargo
+# still has to resolve.
+log                = "0.4.21"
 # UUID v4 run-id suffix (bindings layer), built from bytes `polypus-infrastructure`
 # draws fallibly: no `v4` feature, so `Uuid::new_v4` (panics if `getrandom` fails,
 # #264) is absent by default; `zeromq` (`qmio`) re-enables it, clippy.toml forbids it.
@@ -92,9 +95,11 @@ rand               = "0.10"
 # pyo3-free; `nix` wraps the POSIX process controls the bridge needs (the
 # `PR_SET_PDEATHSIG` orphan guard and `kill` for out-of-band cancellation) in
 # audited safe functions, so the bridge carries no hand-written FFI `unsafe`.
-serde              = { version = "1.0.209", features = ["derive"] }
+# `serde` floor 1.0.221: `jiff`'s optional `serde_core` pins `serde_derive` to
+# its own version, so an older `serde` can't share a lock with it.
+serde              = { version = "1.0.221", features = ["derive"] }
 serde_json         = "1.0.127"
-nix                = { version = "0.31", features = ["signal", "process"] }
+nix                = { version = "0.32", features = ["signal", "process"] }
 # PyO3 for the crates that touch Python (`polypus`, `polypus-infrastructure`,
 # `polypus-evaluation`): one pyo3 in the graph. rust-numpy releases are pinned
 # 1:1 to a pyo3 minor, so bump `numpy` together with `pyo3`. Features (e.g.

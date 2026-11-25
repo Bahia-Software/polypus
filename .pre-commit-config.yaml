@@ -1,0 +1,31 @@
+# Optional git hooks (#421). Install pre-commit (`pip install pre-commit`),
+# then run `pre-commit install` once per clone. Every hook is local and runs
+# the tool already installed for development: rustfmt and ruff through their
+# justfile recipes, so a commit is checked with the same commands and the same
+# pinned ruff as CI, and nbstripout from requirements-dev.txt. There is no
+# hook repository to pin, so nothing here can drift from those pins.
+repos:
+  - repo: local
+    hooks:
+      - id: rustfmt
+        name: rustfmt (just fmt)
+        entry: just fmt
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: ruff
+        name: ruff (just ruff)
+        entry: just ruff
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+      # Strips the outputs and execution counts that hygiene.py rejects in
+      # tutorials/; a stripped notebook fails the hook once, so stage it again.
+      # It strips the working copy too: with the nbstripout git filter
+      # (`nbstripout --install`) the commit is already clean, so skip this hook
+      # (SKIP=nbstripout) if you keep outputs locally.
+      - id: nbstripout
+        name: nbstripout (tutorials)
+        entry: nbstripout
+        language: system
+        files: ^tutorials/.*\.ipynb$

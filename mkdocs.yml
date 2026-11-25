@@ -119,7 +119,9 @@ nav:
       - Memory budget: guide/memory.md
       - Performance: guide/performance.md
   - Reference:
-      - Rust API: https://bahia-software.github.io/polypus/rust/polypus/
+      # The released API on docs.rs; this site's rustdoc is built from main.
+      - Rust API: https://docs.rs/polypus
+      - Rust API (main, unreleased): https://bahia-software.github.io/polypus/rust/polypus/
   - Developers:
       - Contributing: CONTRIBUTING.md
       - Writing a backend: backends.md

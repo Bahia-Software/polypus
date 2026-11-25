@@ -537,3 +537,27 @@ fn a_rounding_emptied_split_partition_cannot_reach_a_problem_c11() {
         );
     }
 }
+
+// ── C-11 · Data: every sample has at least one feature (#513) ───────────────
+//
+// A zero-width sample used to be accepted: the encoders emit nothing for zero
+// features and `compile(0)` succeeds (model construction relies on that to
+// count parameters without data), so the model trained and predicted a
+// constant whatever the input. `Dataset::from_rows` — the path every native
+// entry point builds its rows through — is where it is now rejected, typed.
+
+#[test]
+fn zero_width_samples_are_rejected_at_dataset_construction_c11() {
+    for rows in [vec![vec![]], vec![vec![], vec![]]] {
+        let labels = vec![1.0; rows.len()];
+        let err = Dataset::from_rows(&rows, &labels).unwrap_err();
+        assert_eq!(err, ValidationError::NoFeatures);
+        assert!(
+            err.to_string().contains("at least one feature"),
+            "the message must name the problem, got: {err}"
+        );
+    }
+    // Only zero is rejected: a one-feature sample is still a valid dataset.
+    let ds = Dataset::from_rows(&[vec![0.3]], &[1.0]).unwrap();
+    assert_eq!(ds.num_features(), 1);
+}

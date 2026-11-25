@@ -1,11 +1,10 @@
 """
 QML evaluation-path error classification (issue #81, Change 2).
 
-``EvaluationError::Runtime`` (Tokio runtime construction, or a ``spawn_blocking``
-worker panic surfaced as a ``JoinError``) is a Rust-side infrastructure failure
-and now surfaces as ``polypus.EvaluationError`` rather than a bare
-``RuntimeError`` — pinned by the Rust unit test in
-``crates/polypus/src/evaluation/error.rs`` (forcing those OS-level conditions
+``EvaluationError::Runtime`` (a planner the backend cannot run, or a failed
+minibatch selection) is a Rust-side infrastructure failure and now surfaces as
+``polypus.EvaluationError`` rather than a bare ``RuntimeError`` — pinned by the
+Rust unit test in ``crates/polypus/src/exceptions.rs`` (forcing those conditions
 deterministically from Python is neither viable nor portable; see the PR).
 
 This test guards the *other* side of that change: a genuine Python exception

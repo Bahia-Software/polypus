@@ -1,6 +1,6 @@
 # ADR 0006 — The circuit carries its declared classical width
 
-- **Status:** Proposed (2026-10)
+- **Status:** Accepted (2026-10)
 - **Contracts:** [C-2 · Gate vocabulary symmetry](../CONTRACTS.md#c-2--gate-vocabulary-symmetry), [C-3 · Measurement counts format](../CONTRACTS.md#c-3--measurement-counts-format), [C-10 · OpenQASM 3 profile](../CONTRACTS.md#c-10--openqasm-3-profile-with-qiskit-phase-conventions)
 - **Supersedes:** —
 - **Issue / PRs:** #279 (this record, tests and contract text); #311 (the implementation); #322 (QIR width); #323 (Python `clbits_width`); follows #251
