@@ -141,6 +141,6 @@ pub use layers::{
 };
 pub use loss::Loss;
 pub use model::{CompiledModel, QuantumModel, TrainedModel};
-pub use observables::{Observable, Pauli, PauliString};
+pub use observables::{ExactState, Observable, Pauli, PauliString};
 pub use problem::{minibatch_indices, QmlProblem};
 pub use readout::{Decision, Readout};

@@ -99,7 +99,7 @@ rand               = "0.10"
 # its own version, so an older `serde` can't share a lock with it.
 serde              = { version = "1.0.221", features = ["derive"] }
 serde_json         = "1.0.127"
-nix                = { version = "0.31", features = ["signal", "process"] }
+nix                = { version = "0.32", features = ["signal", "process"] }
 # PyO3 for the crates that touch Python (`polypus`, `polypus-infrastructure`,
 # `polypus-evaluation`): one pyo3 in the graph. rust-numpy releases are pinned
 # 1:1 to a pyo3 minor, so bump `numpy` together with `pyo3`. Features (e.g.

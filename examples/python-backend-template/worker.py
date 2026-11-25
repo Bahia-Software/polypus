@@ -23,8 +23,9 @@ Requests (bridge -> worker):
     {"op": "hello", "protocol": 1}
     {"op": "run", "id": "...", "circuits": [{"qasm": "...", "n_qubits": N}, ...],
                   "shots": S, "seed": <int|absent>}
-    (`seed` is this request's own seed, different on every request of a run;
-    pass it to the SDK as is.)
+    (`seed` is this request's own seed, different on every request of a run,
+    and any 64-bit value: pass it to the SDK as is, or, for an SDK that takes
+    fewer bits (Qiskit Aer takes a seed below 2**63), masked to them.)
     {"op": "shutdown"}
 
 Responses (worker -> bridge):
@@ -91,7 +92,9 @@ def _write_frame(stream, obj) -> None:
 # A real fill looks like, e.g. (Qiskit Aer):
 #     from qiskit import QuantumCircuit
 #     from qiskit_aer import AerSimulator
-#     sim = AerSimulator(seed_simulator=seed)
+#     # Aer takes a seed below 2**63; this worker gets any 64-bit one.
+#     aer_seed = None if seed is None else seed & (2**63 - 1)
+#     sim = AerSimulator(seed_simulator=aer_seed)
 #     out = []
 #     for c in circuits:
 #         qc = QuantumCircuit.from_qasm_str(c["qasm"])

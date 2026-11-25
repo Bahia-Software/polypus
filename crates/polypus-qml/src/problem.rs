@@ -39,7 +39,7 @@ use crate::dataset::Dataset;
 use crate::error::{AdjointOnlyGate, QmlError, ValidationError};
 use crate::loss::{categorical_cross_entropy, categorical_cross_entropy_gradient, Loss};
 use crate::model::{CompiledModel, InputGate};
-use crate::observables::BitstringWeight;
+use crate::observables::{CircuitReading, ExactState};
 use crate::readout::Decision;
 use crate::rng::shuffle;
 use polypus_circuit::rng::SplitMix64;
@@ -289,12 +289,13 @@ impl QmlProblem {
     /// The single implementation behind
     /// [`expectations_from_counts`](Self::expectations_from_counts) and its exact
     /// mirror [`expectations_from_probabilities`](Self::expectations_from_probabilities),
-    /// generic over the per-sample weight type via [`BitstringWeight`]: the length
+    /// generic over the per-circuit reading (a weight map or its expectations) via
+    /// [`CircuitReading`]: the length
     /// check and the `⟨O₀⟩`-per-sample map are written once instead of mirrored per
     /// path.
-    fn expectations_from_weighted<W: BitstringWeight>(
+    fn expectations_from_weighted<R: CircuitReading>(
         &self,
-        weights: &[HashMap<String, W>],
+        weights: &[R],
     ) -> Result<Vec<f64>, QmlError> {
         if weights.len() != self.templates.len() {
             return Err(QmlError::CountsLengthMismatch {
@@ -302,10 +303,10 @@ impl QmlProblem {
                 got: weights.len(),
             });
         }
-        let observable = &self.model.resolved_readout().observables()[0];
+        let observables = self.model.resolved_readout().observables();
         weights
             .iter()
-            .map(|sample| W::observable_expectation(observable, sample))
+            .map(|sample| sample.observable_expectation(observables, 0))
             .collect()
     }
 
@@ -330,10 +331,11 @@ impl QmlProblem {
     /// [`expectations_per_class_from_counts`](Self::expectations_per_class_from_counts)
     /// and its exact mirror
     /// [`expectations_per_class_from_probabilities`](Self::expectations_per_class_from_probabilities),
-    /// generic over the per-sample weight type via [`BitstringWeight`].
-    fn expectations_per_class_from_weighted<W: BitstringWeight>(
+    /// generic over the per-circuit reading (a weight map or its expectations) via
+    /// [`CircuitReading`].
+    fn expectations_per_class_from_weighted<R: CircuitReading>(
         &self,
-        weights: &[HashMap<String, W>],
+        weights: &[R],
     ) -> Result<Vec<Vec<f64>>, QmlError> {
         if weights.len() != self.templates.len() {
             return Err(QmlError::CountsLengthMismatch {
@@ -345,9 +347,8 @@ impl QmlProblem {
         weights
             .iter()
             .map(|sample| {
-                observables
-                    .iter()
-                    .map(|observable| W::observable_expectation(observable, sample))
+                (0..observables.len())
+                    .map(|index| sample.observable_expectation(observables, index))
                     .collect::<Result<Vec<f64>, QmlError>>()
             })
             .collect()
@@ -368,14 +369,12 @@ impl QmlProblem {
     /// The single implementation behind
     /// [`fitness_from_counts`](Self::fitness_from_counts) and its exact mirror
     /// [`fitness_from_probabilities`](Self::fitness_from_probabilities), generic
-    /// over the per-sample weight type via [`BitstringWeight`]. It leans on the
+    /// over the per-circuit reading (a weight map or its expectations) via
+    /// [`CircuitReading`]. It leans on the
     /// generic [`expectations_from_weighted`](Self::expectations_from_weighted) /
     /// [`expectations_per_class_from_weighted`](Self::expectations_per_class_from_weighted)
     /// so neither the loss branch nor the `−mean` aggregation is written twice.
-    fn fitness_from_weighted<W: BitstringWeight>(
-        &self,
-        weights: &[HashMap<String, W>],
-    ) -> Result<f64, QmlError> {
+    fn fitness_from_weighted<R: CircuitReading>(&self, weights: &[R]) -> Result<f64, QmlError> {
         // The categorical loss scores the whole per-class expectation vector, so
         // it takes a wholly separate path (design doc §17): all-class
         // expectations + `categorical_cross_entropy` per sample, then the same
@@ -521,9 +520,9 @@ impl QmlProblem {
     /// expectations once, then each occurrence's chain-rule contribution
     /// ([`param_gradient_weighted`](Self::param_gradient_weighted) or its
     /// categorical twin), added to the parameter that occurrence reads.
-    fn gradient_from_weighted<W: BitstringWeight>(
+    fn gradient_from_weighted<R: CircuitReading>(
         &self,
-        weights: &[HashMap<String, W>],
+        weights: &[R],
     ) -> Result<Vec<f64>, QmlError> {
         let untied = self.shift_untied()?;
         let expected = self.num_gradient_circuits()?;
@@ -581,12 +580,13 @@ impl QmlProblem {
     /// `base_expectations` — the first mismatch returns
     /// [`QmlError::CountsLengthMismatch`], deterministically, even if several
     /// disagree at once. Generic over the per-sample weight type via
-    /// [`BitstringWeight`], so counts and exact probabilities share it.
-    fn param_gradient_weighted<W: BitstringWeight>(
+    /// [`CircuitReading`], so counts, exact probabilities and their
+    /// expectations share it.
+    fn param_gradient_weighted<R: CircuitReading>(
         &self,
         base_expectations: &[f64],
-        plus: &[HashMap<String, W>],
-        minus: &[HashMap<String, W>],
+        plus: &[R],
+        minus: &[R],
     ) -> Result<f64, QmlError> {
         let n = self.num_circuits();
         if plus.len() != n {
@@ -651,11 +651,11 @@ impl QmlProblem {
     /// rule below zips `CE'` against the per-class shifts, so a vector of the
     /// wrong width would silently drop (or ignore) classes and return a
     /// plausible but wrong gradient.
-    fn param_gradient_categorical_weighted<W: BitstringWeight>(
+    fn param_gradient_categorical_weighted<R: CircuitReading>(
         &self,
         base_expectations: &[Vec<f64>],
-        plus: &[HashMap<String, W>],
-        minus: &[HashMap<String, W>],
+        plus: &[R],
+        minus: &[R],
     ) -> Result<f64, QmlError> {
         let n = self.num_circuits();
         if plus.len() != n {
@@ -766,6 +766,106 @@ impl QmlProblem {
         self.gradient_from_weighted(probabilities)
     }
 
+    // ── Exact readings without the maps (issue #645) ────────────────────────
+    //
+    // The exact native path reads each circuit's map as soon as it is built
+    // (`NativeStatevectorBackend::run_circuits_exact_with`) and keeps only
+    // `read_probabilities`'s few numbers, so a gradient holds no map beyond the
+    // circuits in flight. Each `*_from_expectations` gives what its
+    // `*_from_probabilities` twin gives for the maps the readings came from,
+    // bit for bit.
+
+    /// What fitness, gradients and adjoint runs read from one circuit's exact
+    /// `probabilities`: `[⟨O₀⟩]` for a scalar loss, or every readout
+    /// observable's expectation, in readout order, for
+    /// [`Loss::CategoricalCrossEntropy`]. Computed by the estimator the
+    /// `*_from_probabilities` methods use, so the values are theirs.
+    ///
+    /// # Errors
+    ///
+    /// The estimator's, as the `*_from_probabilities` methods raise them for
+    /// the same map: [`QmlError::EmptyCounts`] for an empty map or one of zero
+    /// total weight, [`QmlError::CountsWidthMismatch`] for keys of mixed width
+    /// or narrower than an observable's positions.
+    pub fn read_probabilities(
+        &self,
+        probabilities: &HashMap<String, f64>,
+    ) -> Result<Vec<f64>, QmlError> {
+        self.read_with(probabilities)
+    }
+
+    /// [`read_probabilities`](Self::read_probabilities) read straight from
+    /// the circuit's state, with no map of its probabilities (issue #628): the
+    /// same reading, bit for bit, and the same errors. What the exact native
+    /// oracle reads, so a gradient holds one statevector per circuit in
+    /// flight and nothing more.
+    ///
+    /// # Errors
+    ///
+    /// As [`read_probabilities`](Self::read_probabilities) for the map the
+    /// state stands for.
+    pub fn read_state<F: Fn(usize) -> f64>(
+        &self,
+        state: &ExactState<F>,
+    ) -> Result<Vec<f64>, QmlError> {
+        self.read_with(state)
+    }
+
+    fn read_with<R: CircuitReading>(&self, reading: &R) -> Result<Vec<f64>, QmlError> {
+        let observables = self.model.resolved_readout().observables();
+        (0..self.reading_width())
+            .map(|index| reading.observable_expectation(observables, index))
+            .collect()
+    }
+
+    /// The width of a [`read_probabilities`](Self::read_probabilities) reading.
+    fn reading_width(&self) -> usize {
+        if self.loss == Loss::CategoricalCrossEntropy {
+            self.model.resolved_readout().observables().len()
+        } else {
+            1
+        }
+    }
+
+    /// Refuse readings wider than [`read_probabilities`](Self::read_probabilities)'s:
+    /// another loss's or another model's, which would otherwise be read in
+    /// part and give a plausible but wrong value. Called once a reader has
+    /// succeeded, so every error the map readers raise comes first and in
+    /// their order; a reading too short fails inside the reader, where the
+    /// map's estimate would.
+    fn check_readings(&self, readings: &[Vec<f64>]) -> Result<(), QmlError> {
+        let expected = self.reading_width();
+        match readings.iter().find(|reading| reading.len() != expected) {
+            Some(reading) => Err(QmlError::CountsLengthMismatch {
+                expected,
+                got: reading.len(),
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// [`fitness_from_probabilities`](Self::fitness_from_probabilities) from
+    /// each circuit's [`read_probabilities`](Self::read_probabilities) reading,
+    /// with the same errors in the same order; a reading of another width than
+    /// that is [`QmlError::CountsLengthMismatch`] too (one too short where its
+    /// value is read, one too wide once everything else has passed).
+    pub fn fitness_from_expectations(&self, readings: &[Vec<f64>]) -> Result<f64, QmlError> {
+        let fitness = self.fitness_from_weighted(readings)?;
+        self.check_readings(readings)?;
+        Ok(fitness)
+    }
+
+    /// [`gradient_from_probabilities`](Self::gradient_from_probabilities) from
+    /// each circuit's [`read_probabilities`](Self::read_probabilities) reading,
+    /// with the same errors in the same order; a reading of another width
+    /// than that is [`QmlError::CountsLengthMismatch`] too, as for
+    /// [`fitness_from_expectations`](Self::fitness_from_expectations).
+    pub fn gradient_from_expectations(&self, readings: &[Vec<f64>]) -> Result<Vec<f64>, QmlError> {
+        let gradient = self.gradient_from_weighted(readings)?;
+        self.check_readings(readings)?;
+        Ok(gradient)
+    }
+
     // ── Adjoint differentiation (issue #503) ────────────────────────────────
     //
     // The same exact gradient for a caller that holds the statevector: one
@@ -800,6 +900,30 @@ impl QmlProblem {
         &self,
         theta: &[f64],
         base: &[HashMap<String, f64>],
+    ) -> Result<Vec<AdjointRun>, QmlError> {
+        self.adjoint_runs_weighted(theta, base)
+    }
+
+    /// [`adjoint_runs`](Self::adjoint_runs) from the `base` circuits' readings
+    /// by [`read_probabilities`](Self::read_probabilities) instead of their
+    /// maps (issue #645): the same runs, bit for bit, and the same errors in
+    /// the same order; a reading of another width than that is
+    /// [`QmlError::CountsLengthMismatch`] too, as for
+    /// [`fitness_from_expectations`](Self::fitness_from_expectations).
+    pub fn adjoint_runs_from_expectations(
+        &self,
+        theta: &[f64],
+        base: &[Vec<f64>],
+    ) -> Result<Vec<AdjointRun>, QmlError> {
+        let runs = self.adjoint_runs_weighted(theta, base)?;
+        self.check_readings(base)?;
+        Ok(runs)
+    }
+
+    fn adjoint_runs_weighted<R: CircuitReading>(
+        &self,
+        theta: &[f64],
+        base: &[R],
     ) -> Result<Vec<AdjointRun>, QmlError> {
         let untied = self.untied.as_ref().map_err(Clone::clone)?;
         if theta.len() != self.num_params() {
@@ -3246,6 +3370,236 @@ mod tests {
                 QmlProblem::new(model.compile(4).unwrap(), ds, Loss::SquaredError).unwrap()
             })
             .collect()
+    }
+
+    /// #645: each circuit's reading by `read_probabilities`, as the exact
+    /// native path keeps it instead of the map, gives the fitness, gradient
+    /// and adjoint runs the maps give, bit for bit, for scalar and categorical
+    /// losses (`{:?}` prints every `f64` exactly, a `-0.0` included).
+    /// The catalogue, a categorical problem, and a scalar loss over a readout
+    /// of several observables (which reads `⟨O₀⟩` only).
+    fn reading_problems() -> Vec<QmlProblem> {
+        let mut problems = catalogue();
+        problems.push(categorical_two_class_problem());
+        let z = |q: usize| {
+            Observable::new(vec![(1.0, PauliString::new(vec![(q, Pauli::Z)]).unwrap())]).unwrap()
+        };
+        let two = QuantumModel::new(4)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .readout(Readout::new(vec![z(2), z(0)], Decision::Raw).unwrap());
+        let rows: Vec<Vec<f64>> = vec![vec![0.4, 1.1, 0.7, 2.0], vec![1.3, 0.2, 2.2, 0.9]];
+        let ds = Dataset::from_rows(&rows, &[0.5, -0.3]).unwrap();
+        problems.push(QmlProblem::new(two.compile(4).unwrap(), ds, Loss::SquaredError).unwrap());
+        problems
+    }
+
+    #[test]
+    fn readings_of_the_maps_give_what_the_maps_give_bit_for_bit() {
+        let problems = reading_problems();
+        for (i, problem) in problems.iter().enumerate() {
+            let theta: Vec<f64> = (0..problem.num_params())
+                .map(|k| 0.3 - 0.17 * k as f64)
+                .collect();
+            let maps = exact_probabilities(&problem.gradient_circuits(&theta).unwrap());
+            let readings: Vec<Vec<f64>> = maps
+                .iter()
+                .map(|map| problem.read_probabilities(map).unwrap())
+                .collect();
+            let categorical = problem.loss() == Loss::CategoricalCrossEntropy;
+            let width = if categorical {
+                problem.model.resolved_readout().observables().len()
+            } else {
+                1
+            };
+            assert!(readings.iter().all(|r| r.len() == width), "problem {i}");
+            let n = problem.num_circuits();
+            assert_eq!(
+                format!("{:?}", problem.fitness_from_expectations(&readings[..n])),
+                format!("{:?}", problem.fitness_from_probabilities(&maps[..n])),
+                "problem {i}"
+            );
+            assert_eq!(
+                format!("{:?}", problem.gradient_from_expectations(&readings)),
+                format!("{:?}", problem.gradient_from_probabilities(&maps)),
+                "problem {i}"
+            );
+            assert_eq!(
+                format!(
+                    "{:?}",
+                    problem.adjoint_runs_from_expectations(&theta, &readings[..n])
+                ),
+                format!("{:?}", problem.adjoint_runs(&theta, &maps[..n])),
+                "problem {i}"
+            );
+        }
+    }
+
+    /// A circuit's amplitudes and the map the native backend builds from
+    /// them: keyed `width` bits wide, the zero-probability states left out.
+    fn state_and_map(
+        circuit: &ConcreteCircuit,
+        width: usize,
+    ) -> (Vec<polypus_sim::C64>, HashMap<String, f64>) {
+        use polypus_sim::{Simulator, StatevectorSimulator};
+        let sv = StatevectorSimulator::new().run(circuit).unwrap();
+        let map = sv
+            .amplitudes()
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.norm_sqr() != 0.0)
+            .map(|(state, a)| (format!("{state:0width$b}"), a.norm_sqr()))
+            .collect();
+        (sv.amplitudes().to_vec(), map)
+    }
+
+    /// #628: a circuit read straight from its state, with no map, gives what
+    /// its map gives, bit for bit: the problem's reading, the model's
+    /// expectations and its prediction (`{:?}` prints every `f64` exactly).
+    #[test]
+    fn states_read_as_their_maps_do_bit_for_bit() {
+        for (i, problem) in reading_problems().iter().enumerate() {
+            let theta: Vec<f64> = (0..problem.num_params())
+                .map(|k| 0.3 - 0.17 * k as f64)
+                .collect();
+            for circuit in problem.gradient_circuits(&theta).unwrap() {
+                let width = circuit.num_qubits();
+                let (amplitudes, map) = state_and_map(&circuit, width);
+                let state = ExactState::new(amplitudes.len(), width, |s| amplitudes[s].norm_sqr());
+                let model = &problem.model;
+                assert_eq!(
+                    format!("{:?}", problem.read_state(&state)),
+                    format!("{:?}", problem.read_probabilities(&map)),
+                    "problem {i}"
+                );
+                assert_eq!(
+                    format!("{:?}", model.expectations_from_state(&state)),
+                    format!("{:?}", model.expectations_from_probabilities(&map)),
+                    "problem {i}"
+                );
+                assert_eq!(
+                    format!("{:?}", model.predict_from_state(&state)),
+                    format!("{:?}", model.predict_from_probabilities(&map)),
+                    "problem {i}"
+                );
+            }
+        }
+    }
+
+    /// The state reader raises the map reader's errors: no state of non-zero
+    /// probability is `EmptyCounts`, a readout position past the key width
+    /// `CountsWidthMismatch`, with the same fields.
+    #[test]
+    fn states_raise_the_errors_their_maps_raise() {
+        let problem = &catalogue()[0]; // reads Z on qubits 0..=3
+        let empty = ExactState::new(16, 4, |_| 0.0);
+        assert_eq!(
+            problem.read_state(&empty).unwrap_err(),
+            problem.read_probabilities(&HashMap::new()).unwrap_err()
+        );
+        let narrow = ExactState::new(4, 2, |s| if s == 0 { 1.0 } else { 0.0 });
+        let narrow_map = HashMap::from([("00".to_string(), 1.0)]);
+        assert_eq!(
+            problem.read_state(&narrow).unwrap_err(),
+            problem.read_probabilities(&narrow_map).unwrap_err()
+        );
+        assert!(matches!(
+            problem.read_state(&narrow).unwrap_err(),
+            QmlError::CountsWidthMismatch {
+                expected: 3,
+                got: 2
+            }
+        ));
+        // Both at once: a map with no entry is empty before its width is
+        // looked at, and so is a state with no non-zero probability.
+        let empty_and_narrow = ExactState::new(4, 2, |_| 0.0);
+        assert_eq!(
+            problem.read_state(&empty_and_narrow).unwrap_err(),
+            QmlError::EmptyCounts
+        );
+    }
+
+    #[test]
+    fn a_reading_too_short_for_the_loss_is_a_length_mismatch() {
+        let problem = categorical_two_class_problem();
+        let short = vec![vec![0.5]; problem.num_circuits()];
+        let mismatch = QmlError::CountsLengthMismatch {
+            expected: 2,
+            got: 1,
+        };
+        assert_eq!(
+            problem.fitness_from_expectations(&short).unwrap_err(),
+            mismatch
+        );
+        let theta = vec![0.1; problem.num_params()];
+        assert_eq!(
+            problem
+                .adjoint_runs_from_expectations(&theta, &short)
+                .unwrap_err(),
+            mismatch
+        );
+        // A scalar loss reads one value: an empty reading is short, and a
+        // categorical-width reading is refused rather than read in part.
+        let scalar = &catalogue()[0];
+        let empty = vec![Vec::new(); scalar.num_circuits()];
+        assert_eq!(
+            scalar.fitness_from_expectations(&empty).unwrap_err(),
+            QmlError::CountsLengthMismatch {
+                expected: 1,
+                got: 0
+            }
+        );
+        let wide = vec![vec![0.5, 0.25]; scalar.num_circuits()];
+        assert_eq!(
+            scalar.fitness_from_expectations(&wide).unwrap_err(),
+            QmlError::CountsLengthMismatch {
+                expected: 1,
+                got: 2
+            }
+        );
+        // Every reader refuses a reading wider than `read_probabilities`'s.
+        let theta = vec![0.1; scalar.num_params()];
+        let wide_gradient = vec![vec![0.5, 0.25]; scalar.num_gradient_circuits().unwrap()];
+        let too_wide = QmlError::CountsLengthMismatch {
+            expected: 1,
+            got: 2,
+        };
+        assert_eq!(
+            scalar
+                .gradient_from_expectations(&wide_gradient)
+                .unwrap_err(),
+            too_wide
+        );
+        assert_eq!(
+            scalar
+                .adjoint_runs_from_expectations(&theta, &wide)
+                .unwrap_err(),
+            too_wide
+        );
+        // The map readers' own errors come first and in their order: a model
+        // without a shift rule is `NoExactGradient`, a `theta` of the wrong
+        // length `WrongNumberOfParams`, and a slice of the wrong length its
+        // mismatch, whatever the width of the readings.
+        let no_shift = adjoint_only_problem();
+        let wide_runs = vec![vec![0.5, 0.25]; no_shift.num_gradient_circuits().unwrap_or(4)];
+        assert!(matches!(
+            no_shift.gradient_from_expectations(&wide_runs).unwrap_err(),
+            QmlError::NoExactGradient { .. }
+        ));
+        let wide_base = vec![vec![0.5, 0.25]; no_shift.num_circuits()];
+        assert!(matches!(
+            no_shift
+                .adjoint_runs_from_expectations(&[0.1], &wide_base)
+                .unwrap_err(),
+            QmlError::Circuit(CircuitError::WrongNumberOfParams { .. })
+        ));
+        assert_eq!(
+            scalar.fitness_from_expectations(&wide[1..]).unwrap_err(),
+            QmlError::CountsLengthMismatch {
+                expected: scalar.num_circuits(),
+                got: scalar.num_circuits() - 1
+            }
+        );
     }
 
     #[test]

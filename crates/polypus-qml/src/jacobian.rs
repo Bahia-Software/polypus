@@ -48,7 +48,7 @@ use polypus_circuit::{AngleRef, CircuitError, ConcreteCircuit, ParameterizedCirc
 use crate::adjoint::{check_rows, AdjointRun, DiagonalObservable};
 use crate::error::{AdjointOnlyGate, QmlError};
 use crate::model::{CompiledModel, InputTrace};
-use crate::observables::BitstringWeight;
+use crate::observables::CircuitReading;
 use crate::problem::{untie_traced, Slot, UntiedTemplate};
 
 /// What an [`ExpectationJacobian`] differentiates with respect to.
@@ -342,6 +342,18 @@ impl ExpectationJacobian {
         self.all().jacobian_from_probabilities(probabilities)
     }
 
+    /// The model whose readout this Jacobian differentiates: what reads each
+    /// circuit's expectations ([`CompiledModel::expectations_from_probabilities`])
+    /// for [`jacobian_from_expectations`](Self::jacobian_from_expectations).
+    pub fn model(&self) -> &CompiledModel {
+        &self.model
+    }
+
+    /// [`all`](Self::all)`().jacobian_from_expectations(readings)`.
+    pub fn jacobian_from_expectations(&self, readings: &[Vec<f64>]) -> Result<Jacobian, QmlError> {
+        self.all().jacobian_from_expectations(readings)
+    }
+
     /// [`all`](Self::all)`().adjoint_runs(theta)`.
     pub fn adjoint_runs(&self, theta: &[f64]) -> Result<Vec<AdjointRun>, QmlError> {
         self.all().adjoint_runs(theta)
@@ -433,9 +445,31 @@ impl JacobianBlock<'_> {
         self.jacobian_from_weighted(probabilities)
     }
 
-    fn jacobian_from_weighted<W: BitstringWeight>(
+    /// [`jacobian_from_probabilities`](Self::jacobian_from_probabilities)
+    /// from each circuit's expectations, in readout order, as
+    /// [`CompiledModel::expectations_from_probabilities`] reads them, instead
+    /// of its map (issue #645): the same Jacobian, bit for bit, and the same
+    /// errors in the same order. A reading of another width than the
+    /// readout's observables is [`QmlError::CountsLengthMismatch`] too: one
+    /// too short where its value is read, one too wide once everything else
+    /// has passed.
+    ///
+    /// [`CompiledModel::expectations_from_probabilities`]: crate::CompiledModel::expectations_from_probabilities
+    pub fn jacobian_from_expectations(&self, readings: &[Vec<f64>]) -> Result<Jacobian, QmlError> {
+        let jacobian = self.jacobian_from_weighted(readings)?;
+        let expected = self.jacobian.model.num_observables();
+        if let Some(reading) = readings.iter().find(|reading| reading.len() != expected) {
+            return Err(QmlError::CountsLengthMismatch {
+                expected,
+                got: reading.len(),
+            });
+        }
+        Ok(jacobian)
+    }
+
+    fn jacobian_from_weighted<R: CircuitReading>(
         &self,
-        weights: &[HashMap<String, W>],
+        weights: &[R],
     ) -> Result<Jacobian, QmlError> {
         self.jacobian.check_shift()?;
         let expected = self.num_circuits();
