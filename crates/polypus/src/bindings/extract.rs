@@ -27,8 +27,7 @@ pub(super) fn extract_circuit_source(qc: &Bound<'_, PyAny>) -> CircuitSource {
 
 /// Start of the `ValueError` message for a circuit with free parameters, the
 /// same for a `polypus.Circuit` and a Qiskit `QuantumCircuit`.
-pub(super) const UNBOUND_PARAMETERS: &str =
-    "circuit has unbound parameters and cannot be executed directly";
+const UNBOUND_PARAMETERS: &str = "circuit has unbound parameters and cannot be executed directly";
 
 /// Interpret the `qc` argument of `run_quantum_circuit` as a fully bound,
 /// executable circuit:
@@ -67,7 +66,7 @@ pub(super) fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCirc
 
 /// The names of the free parameters of a Qiskit `QuantumCircuit` (its
 /// `parameters`), in Qiskit's order. An object without that attribute has none.
-pub(super) fn free_parameter_names(qc: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+fn free_parameter_names(qc: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
     let Ok(parameters) = qc.getattr(pyo3::intern!(qc.py(), "parameters")) else {
         return Ok(Vec::new());
     };

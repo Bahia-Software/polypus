@@ -210,7 +210,7 @@ impl TrainResult {
 /// C-7): the whole outcome — `best_params`, `best_fitness`, `iterations_run`,
 /// `converged` — plus the `seed`, rather than the bare best-parameter list the
 /// former `outcome_to_pyobject` produced.
-pub(super) fn outcome_to_train_result(
+fn outcome_to_train_result(
     py: Python<'_>,
     outcome: OptimizationOutcome,
     final_evaluation: Option<FinalEvaluation>,

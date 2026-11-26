@@ -26,7 +26,7 @@ use polypus_optimizers::VarianceOracle;
 /// is given: the external library chooses its own start. Checked after
 /// External's configuration and instead of the point's length and finiteness,
 /// so the message says why any point is refused.
-pub(super) fn check_external_initial_point(
+fn check_external_initial_point(
     method: &Bound<'_, PyAny>,
     initial_point: Option<&[f64]>,
 ) -> PyResult<()> {
@@ -49,7 +49,7 @@ pub(super) fn is_rotosolve(method: &Bound<'_, PyAny>) -> bool {
 
 /// The `ValueError` for a circuit Rotosolve cannot train, with the first
 /// reason the check found.
-pub(super) fn rotosolve_circuit_error(reason: &str) -> PyErr {
+fn rotosolve_circuit_error(reason: &str) -> PyErr {
     crate::exceptions::configuration_error(format!(
         "polypus.Rotosolve cannot train this circuit: {reason}. Rotosolve needs every \
          trainable parameter to be exactly one angle of an rx, ry, rz, rxx, rzz, p, u1, u, \
@@ -192,7 +192,7 @@ pub(super) fn too_large(
 }
 
 /// `value`'s `repr` for an error message, or a fixed text when it fails.
-pub(super) fn shown_repr(value: &Bound<'_, PyAny>) -> String {
+fn shown_repr(value: &Bound<'_, PyAny>) -> String {
     value
         .repr()
         .map_or_else(|_| "an unprintable value".to_string(), |r| r.to_string())

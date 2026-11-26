@@ -108,7 +108,7 @@ pub(super) fn reject_aer_only_args(
 /// custom `endpoint`). Only available with `--features qmio`; otherwise it returns
 /// an actionable error instead of silently degrading.
 #[cfg(feature = "qmio")]
-pub(super) fn build_qmio_registered(
+fn build_qmio_registered(
     program_format: ProgramFormat,
     options: HashMap<String, OptionValue>,
 ) -> PyResult<BackendConfig> {
@@ -118,7 +118,7 @@ pub(super) fn build_qmio_registered(
 /// [`build_qmio_registered`] with the `ZMQ_SERVER` value passed in, so tests do not
 /// depend on the process environment.
 #[cfg(feature = "qmio")]
-pub(super) fn qmio_registered_config(
+fn qmio_registered_config(
     program_format: ProgramFormat,
     zmq_server: Option<String>,
     options: HashMap<String, OptionValue>,
@@ -143,7 +143,7 @@ pub(super) fn qmio_registered_config(
 /// Without the `qmio` feature, selecting the QMIO infrastructure fails with a
 /// clear, actionable message instead of pulling a ZeroMQ stack into every build.
 #[cfg(not(feature = "qmio"))]
-pub(super) fn build_qmio_registered(
+fn build_qmio_registered(
     _program_format: ProgramFormat,
     _options: HashMap<String, OptionValue>,
 ) -> PyResult<BackendConfig> {
@@ -214,7 +214,7 @@ pub(super) fn validate_cunqa_allocation(
 /// (`train`/`qml.train`). Bounded so the effective id — prefix plus the 36-char
 /// UUID v4 suffix [`unique_id`] appends — stays comfortably inside the limits
 /// SLURM job names and filesystem path components impose downstream.
-pub(super) const MAX_ID_LEN: usize = 64;
+const MAX_ID_LEN: usize = 64;
 
 /// Validate the caller-supplied `id` at the Python-facing boundary
 /// (defense-in-depth, `docs/ENGINEERING.md` §8; contract C-9).

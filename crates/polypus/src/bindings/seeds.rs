@@ -82,7 +82,7 @@ pub(super) fn unique_id(base: &str) -> PyResult<String> {
 /// `base` suffixed with a UUID v4 built from the bytes `draw` returns
 /// (`random_id_bytes` in production): the body of [`unique_id`], with the
 /// entropy source injectable so its failure path can be tested.
-pub(super) fn unique_id_from(
+fn unique_id_from(
     base: &str,
     draw: impl FnOnce() -> Result<[u8; 16], EntropyError>,
 ) -> PyResult<String> {
