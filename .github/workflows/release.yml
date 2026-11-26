@@ -16,7 +16,8 @@
 #   Workflow: release.yml
 #   Environment: `pypi` for PyPI, `testpypi` for TestPyPI (must match below).
 #
-# No abi3 is used, so wheels are built per CPython version (3.10–3.13).
+# No abi3 is used, so wheels are built per CPython version (3.10–3.14; 3.14
+# not on Linux aarch64, see the `linux` job).
 #
 # Rust is the version rust-toolchain.toml pins: maturin-action reads that file,
 # and `publish-crates` installs it.
@@ -129,15 +130,18 @@ jobs:
           echo "::warning::$msg — TestPyPI dry run, continuing"
 
   # Linux: manylinux wheels for x86_64 and aarch64, one job per arch. The
-  # interpreters are listed explicitly: CPython 3.10–3.13, the same range as
-  # macos, windows and `requires-python`. ci.yml runs the full test suite at
-  # the floor and ceiling of that range (3.10 and 3.13, on Linux x86_64); every
-  # built wheel is then smoke-tested by the `smoke` job below. `--find-interpreter` is
-  # NOT used: the container also ships 3.14, 3.14t (free-threaded) and PyPy,
-  # which lie outside that range and would be published untested (they were
-  # for 0.7.1). On aarch64 (cross-compiled) maturin resolves `pythonX.Y` from
-  # its bundled sysconfig. The check step fails the job if the built set ever
-  # drifts from that list.
+  # interpreters are listed explicitly, per arch: CPython 3.10–3.14, the same
+  # range as macos, windows and `requires-python`, except 3.14 on aarch64:
+  # qiskit-aer 0.17 (the range pyproject.toml allows) publishes no cp314 wheel
+  # for Linux aarch64, so a Polypus wheel there could not be installed without
+  # building Aer from source. ci.yml runs the full test suite at the floor and
+  # ceiling of that range (3.10 and 3.14, on Linux x86_64); every built wheel
+  # is then smoke-tested by the `smoke` job below. `--find-interpreter` is NOT
+  # used: the container also ships 3.14t (free-threaded) and PyPy, which lie
+  # outside that range and would be published untested (they were for 0.7.1).
+  # On aarch64 (cross-compiled) maturin resolves `pythonX.Y` from its bundled
+  # sysconfig. The check step fails the job if the built set ever drifts from
+  # the arch's `want` list.
   linux:
     name: wheels (linux ${{ matrix.target }})
     needs: gate
@@ -146,7 +150,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64, aarch64]
+        include:
+          - target: x86_64
+            interpreters: python3.10 python3.11 python3.12 python3.13 python3.14
+            want: "cp310-cp310 cp311-cp311 cp312-cp312 cp313-cp313 cp314-cp314 "
+          - target: aarch64
+            interpreters: python3.10 python3.11 python3.12 python3.13
+            want: "cp310-cp310 cp311-cp311 cp312-cp312 cp313-cp313 "
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -160,9 +170,11 @@ jobs:
           target: ${{ matrix.target }}
           # Features come from the root pyproject `[tool.maturin]`, whose
           # `python-packages` ships `polypus_python` in every wheel.
-          args: --release --out dist -i python3.10 python3.11 python3.12 python3.13
+          args: --release --out dist -i ${{ matrix.interpreters }}
           manylinux: auto
       - name: Check built interpreters
+        env:
+          WANT: ${{ matrix.want }}
         run: |
           ls dist
           # Wheel name: {dist}-{version}-{python tag}-{abi tag}-{platform}.whl;
@@ -171,9 +183,8 @@ jobs:
           shopt -s nullglob
           got=$(for w in dist/*.whl; do basename "$w" .whl; done \
             | sed -E 's/^.*-([^-]+-[^-]+)-[^-]+$/\1/' | sort | tr '\n' ' ')
-          want="cp310-cp310 cp311-cp311 cp312-cp312 cp313-cp313 "
-          if [[ "$got" != "$want" ]]; then
-            echo "::error::Built wheels '$got' differ from the expected '$want'"
+          if [[ "$got" != "$WANT" ]]; then
+            echo "::error::Built wheels '$got' differ from the expected '$WANT'"
             exit 1
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -192,7 +203,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -221,7 +232,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -337,8 +348,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
         platform: [linux-x86_64, linux-aarch64, macos-arm64, windows]
+        # No cp314 wheel is built for Linux aarch64 (see the `linux` job).
+        exclude:
+          - platform: linux-aarch64
+            python-version: "3.14"
         include:
           - platform: linux-x86_64
             os: ubuntu-latest
