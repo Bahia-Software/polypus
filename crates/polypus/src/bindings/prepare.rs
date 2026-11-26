@@ -281,7 +281,7 @@ pub(super) fn scheduler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bindings::targets::{Native, Qmio};
+    use crate::bindings::targets::{Aer, Native, Qmio};
 
     /// The selection of `infrastructure`/`backend` on the string path, or of
     /// `target` when given.
@@ -439,5 +439,88 @@ mod tests {
             err.to_string(),
             "TypeError: train() missing 1 required positional argument: 'id'"
         );
+    }
+
+    /// `qml.train` and `qml.predict` call [`backend_config`], which calibrates
+    /// the native threshold for a `BackendConfig::LocalNative`, only after
+    /// [`reject_foreign_circuit`] has refused every `is_native()` selection.
+    /// That keeps calibration out of them only while every selection that
+    /// resolves to `LocalNative` is `is_native()`, which this pins over the
+    /// string path and the typed targets. #617 may narrow `is_native()` on the
+    /// string path; it must not lose any of these.
+    #[test]
+    fn every_selection_that_resolves_to_the_native_backend_is_native() {
+        Python::initialize();
+        Python::attach(|py| {
+            let targets = [
+                py.get_type::<Native>().call0().unwrap(),
+                py.get_type::<Aer>().call0().unwrap(),
+                py.get_type::<Qmio>().call1(("openqasm",)).unwrap(),
+            ];
+            let mut resolved_native = 0;
+            let mut check = |selection: Selection, what: &str| {
+                let native = selection.is_native();
+                let Ok(target) = selection.resolve(None) else {
+                    return;
+                };
+                let Ok(config) = build_backend_config(target) else {
+                    return;
+                };
+                if matches!(config, BackendConfig::LocalNative { .. }) {
+                    resolved_native += 1;
+                    assert!(
+                        native,
+                        "{what} resolves to LocalNative but is not is_native()"
+                    );
+                }
+            };
+            for entry in [Entry::QmlTrain, Entry::QmlPredict] {
+                for infrastructure in ["local", "cunqa", "qmio"] {
+                    for backend in [
+                        "aer",
+                        "AerSimulator",
+                        "polypus",
+                        "statevector",
+                        "polypus_statevector",
+                        "openqasm",
+                        "qir",
+                    ] {
+                        let args = TargetArgs {
+                            target: None,
+                            infrastructure: Some(infrastructure.to_owned()),
+                            backend,
+                            sim_method: "automatic",
+                            noise_model: None,
+                            fusion: None,
+                            nodes: Some(1),
+                            cores_per_qpu: Some(1),
+                            walltime: None,
+                        };
+                        if let Ok(selection) = select(entry, args) {
+                            check(selection, &format!("{infrastructure}/{backend}"));
+                        }
+                    }
+                }
+                for target in &targets {
+                    let args = TargetArgs {
+                        target: Some(target),
+                        infrastructure: None,
+                        backend: "aer",
+                        sim_method: "automatic",
+                        noise_model: None,
+                        fusion: None,
+                        nodes: None,
+                        cores_per_qpu: None,
+                        walltime: None,
+                    };
+                    if let Ok(selection) = select(entry, args) {
+                        check(selection, &format!("target {target}"));
+                    }
+                }
+            }
+            // Per entry point: the three native aliases on `local` and the
+            // typed `Native`. Fewer would mean the loop above checked nothing.
+            assert_eq!(resolved_native, 2 * 4);
+        });
     }
 }

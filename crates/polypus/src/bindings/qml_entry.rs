@@ -337,6 +337,9 @@ pub fn qml_train<'py>(
     // an Aer variant here, which never fuses. Pass `None` (no fusion opinion)
     // rather than `Some(true)` — the latter would trip the "fusion=True on a
     // non-fusing backend" rejection for a value the caller never chose.
+    // `reject_foreign_circuit` above refused every native selection, so this
+    // never calibrates the native threshold (pinned by `prepare`'s
+    // `every_selection_that_resolves_to_the_native_backend_is_native`).
     let backend_config = prepare::backend_config(py, selection, options, Some(effective_seed))?;
     // Suffix the caller-supplied `id` with a UUID v4 (see `train` and #75) so
     // concurrent qml.train runs sharing the same `id` never collide on the
@@ -518,7 +521,9 @@ pub fn qml_predict<'py>(
     // Always simulated (qmio is rejected), so a seed always applies (contract C-7).
     let effective_seed = seed_or_entropy(seed, random_seed)?;
     let id = unique_id(&id_prefix)?;
-    // predict has no `options=`; a `Registered` target brings its own.
+    // predict has no `options=`; a `Registered` target brings its own. As in
+    // `qml_train`, the native selections were refused above, so this never
+    // calibrates the native threshold.
     let backend_config = prepare::backend_config(py, selection, None, Some(effective_seed))?;
     let config = prepare::execution_config(
         id.clone(),
