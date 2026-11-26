@@ -813,7 +813,9 @@ dependencies = [
  "polypus-observable",
  "polypus-optimizers",
  "polypus-orchestration",
+ "polypus-physics",
  "polypus-qml",
+ "polypus-sim",
  "pyo3",
  "rayon",
 ]
