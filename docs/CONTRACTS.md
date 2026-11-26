@@ -471,7 +471,11 @@ simulator's adjoint gradient (`StatevectorSimulator::adjoint_gradient`)
 differentiates the Pauli rotations and the adjoint-only kinds above, each
 angle through the generator `G = i·(∂U)·U†` of the matrix it simulates (the
 table of generators, `family` in `crates/polypus-sim/src/adjoint.rs`; a
-gate's angles are numbered as `polypus_circuit::AngleRef` documents), and
+gate's angles are numbered in the order `GateInstruction::angles` lists
+them — the one definition of that order in the workspace, which
+`polypus-qml`'s untying also follows, and which
+`c2_angles_follow_the_qasm_argument_order` holds to the OpenQASM 2.0
+argument order; a call of a declared gate has none), and
 steps back through the inverse of every other instruction
 (`Statevector::push_inverse`, which takes `GateInstruction::push_inverse`'s
 table below, the one table of the workspace, and itself only keeps the
@@ -2508,11 +2512,12 @@ batching and distribution are the oracle's concern.
     `cu`/`cu3` relative to the control included, `u0` with derivative `0`. A
     model with one is built like any other; its occurrences are its trainable
     angles, numbered in gate order and, within a gate, in angle order
-    (`AngleRef`: `θ, φ, λ`, then `cu`'s `γ`; `u2`'s `φ, λ`), and `adjoint_runs`
-    / `gradient_from_adjoint` give its exact gradient — the derivative of the
-    fitness, a parameter several angles share summed — while every
-    parameter-shift method (`num_gradient_circuits`, `gradient_circuits`,
-    `gradient_from_counts`, `gradient_from_probabilities`) fails with
+    (`GateInstruction::angles`: `θ, φ, λ`, then `cu`'s `γ`; `u2`'s `φ, λ`),
+    and `adjoint_runs` / `gradient_from_adjoint` give its exact gradient —
+    the derivative of the fitness, a parameter several angles share summed —
+    while every parameter-shift method (`num_gradient_circuits`,
+    `gradient_circuits`, `gradient_from_counts`,
+    `gradient_from_probabilities`) fails with
     `NoExactGradient`. One that reads the sample, an expression angle, or the
     call of a declared gate still has no exact gradient at all, and that
     error comes first. No layer emits these gates today, so no model built

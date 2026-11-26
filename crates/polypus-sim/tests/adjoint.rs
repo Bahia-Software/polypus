@@ -49,7 +49,8 @@ fn expectation(circuit: &ConcreteCircuit, weights: &[f64]) -> f64 {
 
 /// The angles of `gate` in `AngleRef`'s documented order: empty for a gate
 /// with none, and for the call of a declared gate, which the adjoint does not
-/// differentiate. Written out here, independently of the simulator; a kind
+/// differentiate. Written out here, independently of the simulator and of
+/// `GateInstruction::angles`, which the simulator takes the order from; a kind
 /// this list does not name panics, so a gate added to `polypus-circuit` fails
 /// `every_instruction_kind_is_differentiated_through` until it is classified.
 fn angles_mut(gate: &mut G) -> Vec<&mut GateParam> {
