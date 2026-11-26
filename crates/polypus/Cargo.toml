@@ -23,6 +23,11 @@ name = "polypus"
 crate-type = ["cdylib", "rlib"]
 
 [features]
+# One of the two signals of a wheel build for the guard in `src/lib.rs` that
+# fails one with `polypus-qml`'s `test-support` on; the other is the
+# `PYO3_BUILD_EXTENSION_MODULE` variable, which replaces this feature
+# (deprecated in PyO3 0.29) and which maturin exports (see `[build-system]` in
+# the root `pyproject.toml`).
 extension-module = ["pyo3/extension-module"]
 # Real CESGA QMIO QPU backend. Opt-in so the default build never pulls a ZeroMQ
 # stack. The backend itself (ZeroMQ wire protocol, pickle serialisation) lives in
@@ -80,7 +85,8 @@ rayon = { workspace = true }
 [dev-dependencies]
 # The tests of `qml.jacobian`'s exact path build a Jacobian whose templates
 # hold gates no layer emits (issue #561); the feature only exists for tests,
-# never for the wheel.
+# never for the wheel, and the guard in `src/lib.rs` fails a wheel build that
+# has it.
 polypus-qml = { workspace = true, features = ["serde", "test-support"] }
 
 [lints]
