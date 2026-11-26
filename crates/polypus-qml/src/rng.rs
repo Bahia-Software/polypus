@@ -1,44 +1,14 @@
-//! A small, dependency-free SplitMix64 PRNG plus a Fisher–Yates shuffle.
+//! A Fisher–Yates shuffle over the workspace's SplitMix64.
 //!
-//! SplitMix64 (Steele, Lea & Flood, 2014) is a public-domain mixing function.
-//! It is not cryptographic, but it is fast, has a 2^64 period, and passes the
-//! statistical tests relevant for what this crate needs: shuffling rows for a
-//! dataset split now, and (in a later phase) drawing uniform floats for
-//! parameter initialization. Carrying our own generator (identical algorithm to
-//! the one in `polypus-sim`) keeps the crate free of an external RNG dependency
-//! and, more importantly, freezes the exact byte stream inside this repository:
-//! an external crate's internal algorithm can change between versions and break
-//! the byte-for-byte reproducibility promised by the engineering guidelines,
-//! whereas this code cannot change under us.
-//!
-//! Phase 1 exposes only [`SplitMix64::next_u64`] and [`shuffle`]; the
-//! `[0, 1)`-float draw that parameter initialization needs arrives with its
-//! consumer in a later phase, so it is not added here yet (an unused method
-//! would only be dead code today).
+//! The generator is [`polypus_circuit::rng::SplitMix64`], the one the
+//! simulator samples shots with; this module adds what this crate draws from
+//! it: shuffled rows for a dataset split and for each minibatch. Using that
+//! in-repository generator rather than an RNG crate freezes the exact stream:
+//! an external crate's internal algorithm can change between versions and
+//! break the byte-for-byte reproducibility promised by the engineering
+//! guidelines, whereas this code cannot change under us.
 
-/// Deterministic 64-bit SplitMix64 generator.
-#[derive(Debug, Clone)]
-pub(crate) struct SplitMix64 {
-    state: u64,
-}
-
-impl SplitMix64 {
-    /// Create a generator seeded with `seed`. The same seed always produces the
-    /// same stream, which makes dataset splits and parameter initialization
-    /// reproducible.
-    pub(crate) fn new(seed: u64) -> Self {
-        SplitMix64 { state: seed }
-    }
-
-    /// Return the next 64-bit value and advance the state.
-    pub(crate) fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-}
+use polypus_circuit::rng::SplitMix64;
 
 /// Shuffle `indices` in place into a uniformly random permutation using `rng`.
 ///
@@ -65,22 +35,6 @@ pub(crate) fn shuffle(indices: &mut [usize], rng: &mut SplitMix64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn is_deterministic_for_a_seed() {
-        let mut a = SplitMix64::new(42);
-        let mut b = SplitMix64::new(42);
-        for _ in 0..100 {
-            assert_eq!(a.next_u64(), b.next_u64());
-        }
-    }
-
-    #[test]
-    fn different_seeds_differ() {
-        let mut a = SplitMix64::new(1);
-        let mut b = SplitMix64::new(2);
-        assert_ne!(a.next_u64(), b.next_u64());
-    }
 
     #[test]
     fn shuffle_is_deterministic_for_a_seed() {

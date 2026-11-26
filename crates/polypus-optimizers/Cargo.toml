@@ -16,5 +16,9 @@ ndarray = { workspace = true }
 rand    = { workspace = true }
 log     = { workspace = true }
 
+[dev-dependencies]
+# The workspace's SplitMix64, for the seeded random searches of the tests.
+polypus-circuit = { workspace = true }
+
 [lints]
 workspace = true

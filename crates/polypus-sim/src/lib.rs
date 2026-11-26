@@ -82,7 +82,6 @@ mod error;
 mod gates;
 mod kernels;
 mod measure;
-mod rng;
 mod simulator;
 mod statevector;
 
@@ -93,10 +92,12 @@ pub use calibration::{
     CalibrationOutcome, CalibrationResult, FallbackReason,
 };
 pub use error::SimError;
+/// Re-exported from `polypus-circuit`, where the workspace's generator is
+/// defined: the shot sampler's stream ([`Statevector::sample`]).
+pub use polypus_circuit::rng::SplitMix64;
 /// Re-exported from `polypus-circuit`, where gates and their angles are
 /// defined: the argument of [`StatevectorSimulator::adjoint_gradient`].
 pub use polypus_circuit::AngleRef;
-pub use rng::SplitMix64;
 pub use simulator::{sample_projected, Simulator, StatevectorSimulator};
 pub use statevector::Statevector;
 

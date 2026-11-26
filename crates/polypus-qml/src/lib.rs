@@ -14,10 +14,11 @@
 //! ## Reproducibility
 //!
 //! All randomness in this crate takes an explicit `u64` seed and runs through
-//! a crate-local `SplitMix64`; the pure crate never reads OS entropy. Resolving
-//! `None → OS entropy` is the responsibility of the bindings layer. In this
-//! phase the only randomness is the dataset split; parameter initialization
-//! joins it later.
+//! the workspace's `SplitMix64` ([`polypus_circuit::rng`]); the pure crate
+//! never reads OS entropy. Resolving `None → OS entropy` is the responsibility
+//! of the bindings layer. The randomness is the dataset split
+//! ([`Dataset::train_test_split`]) and the minibatch selection
+//! ([`minibatch_indices`]).
 //!
 //! ## Current scope
 //!
