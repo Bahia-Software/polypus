@@ -119,10 +119,9 @@ impl LayerContext {
         }
         // Every layer computes its gates from its parameters, so a parameter
         // count that overflows has already been refused above. And the cursor
-        // stays far below a `usize`: a layer reserves at most as many θ as it
-        // emits gates, except a convolution with no pair to act on (4 θ, no
-        // gate), and a slice of layers holds fewer than 2^61 of them. The
-        // check stays, so that no arithmetic here can wrap.
+        // stays far below a `usize`: a layer reserves at most 4 θ more than
+        // it emits gates, and a slice of layers holds fewer than 2^61 of
+        // them. The check stays, so that no arithmetic here can wrap.
         let end = params
             .and_then(|params| self.param_cursor.checked_add(params))
             .ok_or(too_large(SizeLimit::Overflow))?;

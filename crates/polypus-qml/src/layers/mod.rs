@@ -239,6 +239,12 @@ mod tests {
         if n >= 2 {
             for block in [ConvBlock::Basic, ConvBlock::Cartan] {
                 for pairing in [Pairing::EvenPairs, Pairing::OddPairs, Pairing::Alternating] {
+                    // Two qubits have no odd pair, and issue #631 refuses a
+                    // convolution that selects none, so this test leaves the
+                    // case out whichever of the two lands first.
+                    if pairing == Pairing::OddPairs && n < 3 {
+                        continue;
+                    }
                     out.push((Layer::Conv(ConvLayer { block, pairing }), 0));
                 }
             }
