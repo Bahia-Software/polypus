@@ -181,13 +181,15 @@ jobs:
           name: wheels-linux-${{ matrix.target }}
           path: dist
 
-  # macOS: Apple Silicon only (macos-14). GitHub is retiring the Intel `macos-13`
-  # runners, which left the Intel jobs queued indefinitely ("waiting for a runner"),
-  # so they are dropped — Intel-mac users can build from the sdist.
+  # macOS: Apple Silicon only (macos-15, macOS 15 Arm64). GitHub retired the Intel
+  # `macos-13` runners, which left the Intel jobs queued indefinitely ("waiting for
+  # a runner"), so they are dropped — Intel-mac users can build from the sdist. The
+  # version is pinned on purpose (not `macos-latest`): an image migration must not
+  # change the release builds without a deliberate bump.
   macos:
     name: wheels (macos-arm64 py${{ matrix.python-version }})
     needs: gate
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -349,7 +351,7 @@ jobs:
             os: ubuntu-24.04-arm
             artifacts: wheels-linux-aarch64
           - platform: macos-arm64
-            os: macos-14
+            os: macos-15
             artifacts: wheels-macos-arm64-*
           - platform: windows
             os: windows-latest
