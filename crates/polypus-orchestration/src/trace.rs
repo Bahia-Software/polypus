@@ -831,6 +831,7 @@ mod tests {
     use std::io::ErrorKind;
     use std::time::Instant;
 
+    use polypus_circuit::rng::SplitMix64;
     use serde_json::Value;
 
     use super::test_support::{
@@ -1087,15 +1088,11 @@ mod tests {
     #[test]
     fn event_lines_encode_as_serde_json_does_for_random_values() {
         /// SplitMix64 from a fixed seed: every run checks the same lines.
-        struct Rng(u64);
+        struct Rng(SplitMix64);
 
         impl Rng {
             fn next(&mut self) -> u64 {
-                self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
-                let z = self.0;
-                let z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-                let z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-                z ^ (z >> 31)
+                self.0.next_u64()
             }
 
             /// An integer of any size: a random `u64` shifted right by 0 to
@@ -1121,7 +1118,7 @@ mod tests {
             BatchOp::Execute,
             BatchOp::ExecuteReplicas,
         ];
-        let mut rng = Rng(0x7ace_2024);
+        let mut rng = Rng(SplitMix64::new(0x7ace_2024));
         let tracer =
             CallTracer::from_sink(Box::new(io::sink()), header("encode"), DEFAULT_MAX_BYTES);
         let mut state = tracer.lock();

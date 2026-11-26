@@ -25,8 +25,9 @@
 #                              the Planner that sizes/runs circuit waves — how a circuit runs (PyO3)
 #   - crates/polypus-orchestration : Flow/Scheduler/Resources policy + optimizer dispatch —
 #                              how a flow is orchestrated (pure Rust, deliberately pyo3-free)
-#   - crates/polypus-evaluation : the oracles (VqcOracle, QmlOracle, variance) and their
-#                              OracleFactory assembly — how a candidate is evaluated (PyO3)
+#   - crates/polypus-evaluation : the oracles (VqcOracle, QmlOracle, PauliSumOracle,
+#                              variance) and their OracleFactory assembly — how a
+#                              candidate is evaluated (PyO3)
 #   - crates/polypus-logger  : pure-Rust logging sink (a `log::Log` implementation) shared by
 #                              the whole workspace; libraries emit via the `log` facade, only
 #                              the app layer installs it (no PyO3)
@@ -99,7 +100,7 @@ rand               = "0.10"
 # its own version, so an older `serde` can't share a lock with it.
 serde              = { version = "1.0.221", features = ["derive"] }
 serde_json         = "1.0.127"
-nix                = { version = "0.31", features = ["signal", "process"] }
+nix                = { version = "0.32", features = ["signal", "process"] }
 # PyO3 for the crates that touch Python (`polypus`, `polypus-infrastructure`,
 # `polypus-evaluation`): one pyo3 in the graph. rust-numpy releases are pinned
 # 1:1 to a pyo3 minor, so bump `numpy` together with `pyo3`. Features (e.g.

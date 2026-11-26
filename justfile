@@ -7,16 +7,17 @@
 #     just ci          everything CI checks that this machine can reproduce
 #     just ci-all      that, plus the jobs on other toolchains (MSRV, nightly)
 #
-# What CI does and one machine cannot: build the wheel on macOS and Windows,
-# and run the Python suite on each supported Python (the matrix legs, with
-# their POLYPUS_REQUIRE_* and POLYPUS_ALLOWED_SKIPS variables). `just pytest`
-# uses the Python of the active environment. Installing a tool (cargo-deny,
-# cargo-machete, ruff, maturin, llvm-as) is left to you; docs/CONTRIBUTING.md
-# lists them.
+# What CI does and one machine cannot: build and test the wheel on macOS and
+# Windows, and run the Python suite on each supported Python (the matrix legs,
+# with their POLYPUS_REQUIRE_* and POLYPUS_ALLOWED_SKIPS variables).
+# `just pytest` uses the Python of the active environment. Installing a tool
+# (cargo-deny, cargo-machete, ruff, maturin, llvm-as) is left to you;
+# docs/CONTRIBUTING.md lists them.
 #
 # Recipes run under bash. On Windows they run under `sh`, Git for Windows'
 # (the one GitHub runners provide): `bash` there can resolve to the WSL
-# launcher in System32 instead. CI runs only `build-wheel` on Windows.
+# launcher in System32 instead. CI runs `wheel`, `pytest-portable` and
+# `test-portable` on Windows.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set windows-shell := ["sh", "-eu", "-c"]
@@ -142,6 +143,13 @@ test-templates:
     cargo test --locked --manifest-path examples/rust-backend-template/Cargo.toml
     cargo test --locked --manifest-path examples/python-backend-template/Cargo.toml
 
+# CI runs it on macOS and Windows, where the calibration cache and the QIR
+# tests that spawn processes behave differently; `test-features` runs the
+# same tests among the other pure crates.
+# polypus-sim and polypus-circuit with every feature.
+test-portable:
+    cargo test --locked -p polypus-sim -p polypus-circuit --all-features
+
 # ---------------------------------------------------------------- Python
 
 # The first install pulls the runtime dependencies and keeps any already
@@ -154,8 +162,9 @@ wheel:
     pip install {{ wheel_dir }}/polypus_quantum-*.whl
     pip install --force-reinstall --no-deps {{ wheel_dir }}/polypus_quantum-*.whl
 
-# Extra arguments go to maturin (`--out dist`).
-# Build the wheel without installing it (the platform smoke test).
+# Extra arguments go to maturin (`--out dist`); the floors job builds with it
+# and installs the wheel with uv.
+# Build the wheel without installing it.
 [positional-arguments]
 build-wheel *args:
     maturin build --release "$@"
@@ -169,6 +178,16 @@ compile-examples:
 [positional-arguments]
 pytest *args:
     pytest tests/python -rs --strict-markers "$@"
+
+# What CI runs on the installed wheel of every platform: the README Bell
+# example, as the release `smoke` job runs it (with calibration off), and the
+# Python tests that need only the wheel and nothing Linux-specific. On
+# Windows, test_autocalibrate.py checks that the calibration cache lands in
+# %LOCALAPPDATA% (#416). `pytest` runs these tests and the rest.
+# The README Bell example and the portable Python tests.
+pytest-portable:
+    POLYPUS_NO_AUTOCALIBRATE=1 python -c 'import polypus; print("polypus", polypus.__version__); bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all(); result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local"); counts = result.counts[0]; print("counts:", counts); assert sum(counts.values()) == 1000, counts; assert set(counts) == {"00", "11"}, counts'
+    pytest tests/python/test_smoke.py tests/python/test_local_run.py tests/python/test_statevector.py tests/python/test_calibration.py tests/python/test_autocalibrate.py -rs --strict-markers
 
 # The typing stubs against the installed extension.
 stubtest:

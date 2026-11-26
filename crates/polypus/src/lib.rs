@@ -151,3 +151,31 @@ pub use polypus_circuit as circuit;
 pub use polypus_optimizers as optimizers;
 
 pub use crate::algorithms::*;
+
+// The wheel never ships `polypus-qml`'s test-support constructors, which skip
+// the rule that a problem's templates are its model's (issue #599). A build is
+// a wheel build when it has `extension-module` (`[tool.maturin] features`) or
+// `PYO3_BUILD_EXTENSION_MODULE` in its environment: maturin exports that
+// variable to the builds it runs (the floor in `pyproject.toml`'s
+// `[build-system]` is a release that does), also when a `--features` on the
+// command line replaces the pyproject list. A wheel build with `test-support`
+// on, from a `[dependencies]` entry, fails here at compile time.
+const WHEEL_BUILD: bool =
+    cfg!(feature = "extension-module") || option_env!("PYO3_BUILD_EXTENSION_MODULE").is_some();
+const _: () = assert!(
+    !(WHEEL_BUILD && polypus_qml::TEST_SUPPORT_ENABLED),
+    "polypus-qml's test-support feature is on in a wheel build (extension-module \
+     or PYO3_BUILD_EXTENSION_MODULE): enable test-support from [dev-dependencies] \
+     only, and do not build test targets as a wheel build"
+);
+
+// The guard above only protects the wheel while the constant follows the
+// feature. Every test build of this crate has it on (the `polypus-qml`
+// dev-dependency enables `test-support`), so a constant stuck at `false`
+// fails here.
+#[cfg(test)]
+const _: () = assert!(
+    polypus_qml::TEST_SUPPORT_ENABLED,
+    "polypus_qml::TEST_SUPPORT_ENABLED no longer follows the test-support \
+     feature, so the wheel's guard against it checks nothing"
+);
