@@ -72,6 +72,7 @@
 //! from Python, `polypus.init_logger()` once per process.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -535,23 +536,37 @@ pub fn calibrate_parallel_threshold() -> CalibrationResult {
     }
 }
 
-/// Directory holding Polypus caches: `$XDG_CACHE_HOME/polypus` when that is set
-/// and non-empty, otherwise `$HOME/.cache/polypus`. No `dirs`/`directories`
-/// crate is added for this single lookup — the workspace has none and this does
-/// not justify one. `None` when neither variable is usable (an unusual, headless
-/// environment); the caller then runs uncached rather than guessing a path.
+/// Directory holding Polypus caches, from the first of these variables that is
+/// set and non-empty: `$XDG_CACHE_HOME/polypus`; on Windows only,
+/// `%LOCALAPPDATA%\polypus`; then `$HOME/.cache/polypus`. See
+/// [`cache_dir_from`] for the order. No `dirs`/`directories` crate is added for
+/// this single lookup — the workspace has none and this does not justify one.
+/// `None` when no variable is usable (an unusual, headless environment); the
+/// caller then runs uncached rather than guessing a path.
 fn cache_dir() -> Option<PathBuf> {
-    if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {
-        if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join("polypus"));
+    cache_dir_from(cfg!(windows), |name: &str| std::env::var_os(name))
+}
+
+/// [`cache_dir`] for a given platform and environment lookup. Pure, so the
+/// order is unit-tested on every platform without touching the process
+/// environment.
+///
+/// `XDG_CACHE_HOME` wins everywhere: it is the explicit override. On Windows,
+/// `LOCALAPPDATA` comes before `HOME` because PowerShell and cmd define no
+/// `HOME` while Git Bash and MSYS do, so trying `HOME` first would put the cache
+/// in a different place depending on the shell. Outside Windows `LOCALAPPDATA`
+/// is ignored.
+fn cache_dir_from(windows: bool, var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let non_empty = |name: &str| var(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if let Some(xdg) = non_empty("XDG_CACHE_HOME") {
+        return Some(xdg.join("polypus"));
+    }
+    if windows {
+        if let Some(local) = non_empty("LOCALAPPDATA") {
+            return Some(local.join("polypus"));
         }
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        if !home.is_empty() {
-            return Some(PathBuf::from(home).join(".cache").join("polypus"));
-        }
-    }
-    None
+    non_empty("HOME").map(|home| home.join(".cache").join("polypus"))
 }
 
 /// Absolute path of the cache file, when a cache directory can be resolved.
@@ -1125,8 +1140,9 @@ pub fn calibrate_and_cache(force: bool) -> CalibrationOutcome {
         },
         None => {
             log::warn!(
-                "no cache directory (set XDG_CACHE_HOME or HOME) to persist gate-parallel \
-                 calibration; this process is calibrated but the result was not saved"
+                "no cache directory (set XDG_CACHE_HOME, LOCALAPPDATA on Windows, or HOME) \
+                 to persist gate-parallel calibration; this process is calibrated but the \
+                 result was not saved"
             );
             false
         }
@@ -1412,6 +1428,90 @@ core id\t\t: 0
         // A `|` inside a field must not shift the key's components.
         let text = "model name\t: weird | cpu\ncache size\t: 1 KB\nphysical id\t: 0\n";
         assert_eq!(parse_cpuinfo(text).as_deref(), Some("weird / cpu|1 KB|1"));
+    }
+
+    /// An environment lookup over fixed `(name, value)` pairs, for
+    /// [`cache_dir_from`]; the process environment is never read or changed.
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
+        }
+    }
+
+    const XDG: &str = "/var/empty/xdg";
+    const LOCAL: &str = r"C:\Users\u\AppData\Local";
+    const HOME: &str = "/var/empty/h";
+
+    fn home_cache() -> PathBuf {
+        PathBuf::from(HOME).join(".cache").join("polypus")
+    }
+
+    #[test]
+    fn cache_dir_on_windows_uses_localappdata() {
+        let only_local = [("LOCALAPPDATA", LOCAL)];
+        assert_eq!(
+            cache_dir_from(true, env_of(&only_local)),
+            Some(PathBuf::from(LOCAL).join("polypus"))
+        );
+    }
+
+    #[test]
+    fn cache_dir_on_windows_prefers_localappdata_to_home() {
+        // Git Bash defines HOME and PowerShell does not: the cache must not move
+        // with the shell.
+        let both = [("HOME", HOME), ("LOCALAPPDATA", LOCAL)];
+        assert_eq!(
+            cache_dir_from(true, env_of(&both)),
+            Some(PathBuf::from(LOCAL).join("polypus"))
+        );
+    }
+
+    #[test]
+    fn cache_dir_on_windows_still_prefers_xdg_cache_home() {
+        let all = [
+            ("XDG_CACHE_HOME", XDG),
+            ("LOCALAPPDATA", LOCAL),
+            ("HOME", HOME),
+        ];
+        assert_eq!(
+            cache_dir_from(true, env_of(&all)),
+            Some(PathBuf::from(XDG).join("polypus"))
+        );
+    }
+
+    #[test]
+    fn cache_dir_on_windows_skips_an_empty_localappdata() {
+        let empty_local = [("LOCALAPPDATA", ""), ("HOME", HOME)];
+        assert_eq!(
+            cache_dir_from(true, env_of(&empty_local)),
+            Some(home_cache())
+        );
+    }
+
+    #[test]
+    fn cache_dir_outside_windows_ignores_localappdata() {
+        let both = [("LOCALAPPDATA", LOCAL), ("HOME", HOME)];
+        assert_eq!(cache_dir_from(false, env_of(&both)), Some(home_cache()));
+        let only_local = [("LOCALAPPDATA", LOCAL)];
+        assert_eq!(cache_dir_from(false, env_of(&only_local)), None);
+    }
+
+    #[test]
+    fn cache_dir_outside_windows_prefers_a_non_empty_xdg_cache_home() {
+        let both = [("XDG_CACHE_HOME", XDG), ("HOME", HOME)];
+        assert_eq!(
+            cache_dir_from(false, env_of(&both)),
+            Some(PathBuf::from(XDG).join("polypus"))
+        );
+        let empty_xdg = [("XDG_CACHE_HOME", ""), ("HOME", HOME)];
+        assert_eq!(
+            cache_dir_from(false, env_of(&empty_xdg)),
+            Some(home_cache())
+        );
+        assert_eq!(cache_dir_from(false, env_of(&[])), None);
     }
 
     #[test]

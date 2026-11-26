@@ -118,7 +118,10 @@ first (see [Repository hygiene](#repository-hygiene)); `just minimal-versions`
 rewrites `Cargo.lock` and restores it afterwards.
 
 What one machine cannot reproduce is the matrix: CI builds the wheel on Linux,
-macOS and Windows, runs the Python suite on the floor and latest supported
+macOS and Windows and runs the README Bell example and a few Python test files
+on it there (`build-extension`, `just pytest-portable`), tests `polypus-sim`
+and `polypus-circuit` on macOS and Windows (`test-portable`,
+`just test-portable`), runs the Python suite on the floor and latest supported
 Python and on the Qiskit of the OpenQASM 3 fixtures, and runs it once more
 with every dependency at its declared floor on a fresh Python 3.10 (the
 `python-floors` job, whose steps show how). `just pytest` uses the Python of
