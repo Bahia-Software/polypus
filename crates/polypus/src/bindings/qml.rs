@@ -1531,7 +1531,7 @@ fn native_dataset(
     let rows = RealReader::new(x.py())?.rows(x, "x", |e| e)?;
     let labels = y
         .map(|y| {
-            extract_labels(y).map(|labels| {
+            extract_labels(y, "y").map(|labels| {
                 labels
                     .into_iter()
                     .map(|label| match label {

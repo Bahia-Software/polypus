@@ -67,8 +67,10 @@ CONTAINERS_2D = {
         np.array(rows, dtype=np.complex128),
         (0, 0),
     ),
-    # (c) complex64, which is not a subclass of Python's complex.
+    # (c) complex64, which is not a subclass of Python's complex, and
+    # clongdouble (complex256 on Linux, complex128 on Windows).
     "complex64": lambda rows: (np.array(rows, dtype=np.complex64), (0, 0)),
+    "clongdouble": lambda rows: (np.array(rows, dtype=np.clongdouble), (0, 0)),
     # (d) a list of rows holding one NumPy complex scalar.
     "list-numpy-complex": lambda rows: (_set(rows, np.complex128), (1, 0)),
     # (e) an object array holding one.
@@ -78,6 +80,15 @@ CONTAINERS_2D = {
     ),
     # (f) a list holding one Python complex.
     "list-python-complex": lambda rows: (_set(rows, complex), (1, 0)),
+    # (g) a list holding a complex 0-d array, which is not registered with
+    # `numbers.Complex`. A complex128 one's `float()` was a `TypeError` naming
+    # no position; a clongdouble one's dropped the imaginary part (complex256
+    # outside Windows).
+    "list-0d-array": lambda rows: (_set(rows, lambda v: np.array(v + 0.5j)), (1, 0)),
+    "list-0d-clongdouble": lambda rows: (
+        _set(rows, lambda v: np.array(v + 0.5j, dtype=np.clongdouble)),
+        (1, 0),
+    ),
 }
 
 
@@ -95,9 +106,15 @@ CONTAINERS_1D = {
     ),
     "complex128-real-valued": lambda v: (np.array(v, dtype=np.complex128), 0),
     "complex64": lambda v: (np.array(v, dtype=np.complex64), 0),
+    "clongdouble": lambda v: (np.array(v, dtype=np.clongdouble), 0),
     "list-numpy-complex": lambda v: (_set_1d(v, np.complex128), 1),
     "object-array": lambda v: (np.array(_set_1d(v, np.complex128), dtype=object), 1),
     "list-python-complex": lambda v: (_set_1d(v, complex), 1),
+    "list-0d-array": lambda v: (_set_1d(v, lambda x: np.array(x + 0.5j)), 1),
+    "list-0d-clongdouble": lambda v: (
+        _set_1d(v, lambda x: np.array(x + 0.5j, dtype=np.clongdouble)),
+        1,
+    ),
 }
 
 CONTAINER_2D = pytest.mark.parametrize("container", sorted(CONTAINERS_2D))
@@ -222,7 +239,7 @@ class TestComplexLabels:
     def test_fit(self, container):
         y, index = CONTAINERS_1D[container](LABELS)
         # `fit`'s `y` goes through C-8's label checks, whose messages name
-        # `y_train`.
+        # the argument: `y` here, `y_train` for `qml.train`.
         _refused(
             lambda: _model().fit(
                 ROWS,
@@ -232,7 +249,7 @@ class TestComplexLabels:
                 exact=True,
                 seed=1,
             ),
-            _complex_at("y_train", index),
+            _complex_at("y", index),
         )
 
     @CONTAINER_1D
@@ -274,6 +291,27 @@ def test_a_bool_still_reads_as_zero_or_one(booleans):
     expected = qml.expval(model, [[1.0, 0.0], [0.0, 1.0]], params, exact=True)
     got = qml.expval(model, booleans, params, exact=True)
     assert np.array_equal(got, expected)
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        np.array(ROWS, dtype=np.float32),
+        np.array([[1, 0], [0, 2]], dtype=np.int64),
+        np.array([[1, 0], [0, 2]], dtype=np.uint8),
+        [[np.array(1.0), np.array(0)], [np.float32(0.0), np.int64(2)]],
+    ],
+    ids=["float32", "int64", "uint8", "list-0d-and-scalars"],
+)
+def test_real_numpy_values_read_as_python_floats(rows):
+    # A guard: a NumPy array of a real dtype skips the per-value check, and a
+    # real 0-d array or NumPy scalar in a list passes it, each read as the
+    # same Python floats would be.
+    model = _model()
+    params = _params(model)
+    as_floats = [[float(value) for value in row] for row in rows]
+    expected = qml.expval(model, as_floats, params, exact=True)
+    assert np.array_equal(qml.expval(model, rows, params, exact=True), expected)
 
 
 @pytest.mark.parametrize(

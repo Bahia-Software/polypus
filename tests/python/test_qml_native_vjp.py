@@ -336,6 +336,9 @@ class TestCotangent:
             1j,
             np.complex128(1),
             np.complex64(1),
+            np.array(0.5),
+            np.array(1j),
+            np.array(1j, dtype=np.clongdouble),
         ],
         ids=repr,
     )

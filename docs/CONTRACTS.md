@@ -2826,16 +2826,17 @@ is also a `ValueError` (#418), as `train`'s do:
 
 - **Data.** `x` is rows of features or a `polypus.qml.Dataset`; with a
   `Dataset`, `y` is an error (it carries its own labels, or none).
-  Labels from `y` follow C-8's checks; the rows must be non-empty, each with
-  at least one feature (a zero-width row would encode nothing and predict a
-  constant, #513), of equal width and finite. Fewer features than qubits
-  stays accepted. Every value of `x` is a real number (a `bool` reads as 0
-  or 1): a complex one, Python's or NumPy's, in any container (a list, a NumPy
-  array of complex dtype, an object array), is a `TypeError` naming its
-  0-based row and column, whatever its imaginary part, rather than losing its
-  imaginary part (#602). The same holds for every native reader of rows
-  (`predict`, `run`, `qml.Dataset`, the primitives, `qml.kernel_matrix`) and,
-  naming the index, for the labels of `y` and of `qml.Dataset(x, y)`.
+  Labels from `y` follow C-8's checks, their messages naming `y`; the rows
+  must be non-empty, each with at least one feature (a zero-width row would
+  encode nothing and predict a constant, #513), of equal width and finite.
+  Fewer features than qubits stays accepted. Every value of `x` is a real
+  number (a `bool` reads as 0 or 1): a complex one, Python's or NumPy's, in
+  any container (a list, a NumPy array of complex dtype, an object array, a
+  0-d array in a list), is a `TypeError` naming its 0-based row and column,
+  whatever its imaginary part, rather than losing its imaginary part (#602).
+  The same holds for every native reader of rows (`predict`, `run`,
+  `qml.Dataset`, the primitives, `qml.kernel_matrix`) and, naming the index,
+  for the labels of `y` and of `qml.Dataset(x, y)`.
 - **Labels and loss.** With labels, `loss` is required and is a supervised
   loss; `"expectation"` (which ignores labels) is an error. Without
   labels (`y=None`, or a `Dataset` built without them), `loss=None` means
