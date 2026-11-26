@@ -25,7 +25,7 @@ use crate::error::SimError;
 use crate::simulator::CancellationCheck;
 use crate::statevector::{angle, Statevector};
 use crate::{kernels, StatevectorSimulator, C64};
-use polypus_circuit::{AngleRef, ConcreteCircuit, GateInstruction, GateParam};
+use polypus_circuit::{AngleRef, ConcreteCircuit, GateInstruction};
 
 /// The result of [`StatevectorSimulator::adjoint_gradient`].
 #[derive(Debug, Clone, PartialEq)]
@@ -127,15 +127,16 @@ fn u_generator(k: usize, theta: f64, phi: f64) -> [[C64; 2]; 2] {
     }
 }
 
-/// The table of generators: how `gate` depends on each of its angles, and the
-/// angles in [`AngleRef::angle`] order; `None` for a gate the adjoint does not
-/// differentiate (no angle, or a call of a declared gate, whose body may use
-/// its angles in any way). The generators are derived from the matrices
-/// [`Statevector::apply`] applies, and the test
+/// The table of generators: how `gate` depends on its angles; `None` for a
+/// gate the adjoint does not differentiate (no angle, or a call of a declared
+/// gate, whose body may use its angles in any way). The angles themselves,
+/// and their [`AngleRef::angle`] order, are [`GateInstruction::angles`]'s.
+/// The generators are derived from the matrices [`Statevector::apply`]
+/// applies, and the test
 /// `every_generator_is_the_derivative_of_the_simulated_matrix` holds each one
 /// to them. Its operands must already be known to lie inside the register,
 /// so the shifts cannot overflow.
-fn family(gate: &GateInstruction) -> Option<(Family, Vec<&GateParam>)> {
+fn family(gate: &GateInstruction) -> Option<Family> {
     use GateInstruction as G;
     let pauli = |x: usize, z: usize, y: bool| Family::Pauli { x, z, y };
     let constant = |target: usize, control: usize, g| Family::Constant { target, control, g };
@@ -146,67 +147,33 @@ fn family(gate: &GateInstruction) -> Option<(Family, Vec<&GateParam>)> {
         gamma,
     };
     Some(match gate {
-        G::Rx { qubit, theta } => (pauli(1 << qubit, 0, false), vec![theta]),
-        G::Ry { qubit, theta } => (pauli(1 << qubit, 1 << qubit, true), vec![theta]),
-        G::Rz { qubit, theta } => (pauli(0, 1 << qubit, false), vec![theta]),
-        G::Rxx { q0, q1, theta } => (pauli((1 << q0) | (1 << q1), 0, false), vec![theta]),
-        G::Rzz { q0, q1, theta } => (pauli(0, (1 << q0) | (1 << q1), false), vec![theta]),
+        G::Rx { qubit, .. } => pauli(1 << qubit, 0, false),
+        G::Ry { qubit, .. } => pauli(1 << qubit, 1 << qubit, true),
+        G::Rz { qubit, .. } => pauli(0, 1 << qubit, false),
+        G::Rxx { q0, q1, .. } => pauli((1 << q0) | (1 << q1), 0, false),
+        G::Rzz { q0, q1, .. } => pauli(0, (1 << q0) | (1 << q1), false),
         G::Crx {
-            control,
-            target,
-            theta,
-        } => (constant(*target, 1 << control, half_x()), vec![theta]),
+            control, target, ..
+        } => constant(*target, 1 << control, half_x()),
         G::Cry {
-            control,
-            target,
-            theta,
-        } => (constant(*target, 1 << control, half_y()), vec![theta]),
+            control, target, ..
+        } => constant(*target, 1 << control, half_y()),
         G::Crz {
-            control,
-            target,
-            theta,
-        } => (constant(*target, 1 << control, half_z()), vec![theta]),
+            control, target, ..
+        } => constant(*target, 1 << control, half_z()),
         // `Cp` is symmetric (`e^{iθ}` on `|11⟩`); `Cu1` is the same operator,
         // applied as `q0` controlling `diag(1, e^{iθ})` on `q1`.
-        G::Cp { q0, q1, theta } | G::Cu1 { q0, q1, theta } => {
-            (constant(*q1, 1 << q0, minus_one()), vec![theta])
-        }
-        G::P { qubit, lam } | G::U1 { qubit, lam } => (constant(*qubit, 0, minus_one()), vec![lam]),
-        G::U {
-            qubit,
-            theta,
-            phi,
-            lam,
-        }
-        | G::UGate {
-            qubit,
-            theta,
-            phi,
-            lam,
-        } => (u(*qubit, 0, None, false), vec![theta, phi, lam]),
-        G::U2 { qubit, phi, lam } => (
-            u(*qubit, 0, Some(std::f64::consts::FRAC_PI_2), false),
-            vec![phi, lam],
-        ),
+        G::Cp { q0, q1, .. } | G::Cu1 { q0, q1, .. } => constant(*q1, 1 << q0, minus_one()),
+        G::P { qubit, .. } | G::U1 { qubit, .. } => constant(*qubit, 0, minus_one()),
+        G::U { qubit, .. } | G::UGate { qubit, .. } => u(*qubit, 0, None, false),
+        G::U2 { qubit, .. } => u(*qubit, 0, Some(std::f64::consts::FRAC_PI_2), false),
         G::Cu3 {
-            control,
-            target,
-            theta,
-            phi,
-            lam,
-        } => (u(*target, 1 << control, None, false), vec![theta, phi, lam]),
+            control, target, ..
+        } => u(*target, 1 << control, None, false),
         G::Cu {
-            control,
-            target,
-            theta,
-            phi,
-            lam,
-            gamma,
-        } => (
-            u(*target, 1 << control, None, true),
-            vec![theta, phi, lam, gamma],
-        ),
-        G::U0 { gamma, .. } => (Family::Identity, vec![gamma]),
+            control, target, ..
+        } => u(*target, 1 << control, None, true),
+        G::U0 { .. } => Family::Identity,
         _ => return None,
     })
 }
@@ -216,20 +183,21 @@ fn family(gate: &GateInstruction) -> Option<(Family, Vec<&GateParam>)> {
 /// before anything is allocated, with the error [`Statevector::apply`] would
 /// give).
 fn generator(gate: &GateInstruction, at: AngleRef) -> Result<Generator, SimError> {
-    let (family, angles) = family(gate).ok_or_else(|| SimError::NotDifferentiable {
+    let family = family(gate).ok_or_else(|| SimError::NotDifferentiable {
         index: at.position,
         instruction: format!("{gate:?}"),
     })?;
-    if at.angle >= angles.len() {
+    let num_angles = gate.angles().count();
+    if at.angle >= num_angles {
         return Err(SimError::AngleIndexOutOfRange {
             index: at.position,
             angle: at.angle,
-            num_angles: angles.len(),
+            num_angles,
             instruction: format!("{gate:?}"),
         });
     }
-    let values = angles
-        .into_iter()
+    let values = gate
+        .angles()
         .map(angle)
         .collect::<Result<Vec<f64>, SimError>>()?;
     Ok(match family {
@@ -306,8 +274,9 @@ impl StatevectorSimulator {
     /// the gates the parameter-shift rule differentiates), the controlled
     /// rotations (`Crx`, `Cry`, `Crz`), the phase gates (`P`, `U1`, `Cp`,
     /// `Cu1`), the `u` family (`U`, `UGate`, `U2`, `Cu3`, and `Cu` with its
-    /// phase `γ`) and `U0`, whose derivative is `0` (see [`AngleRef`] for the
-    /// order of each gate's angles). The derivative is with respect to that
+    /// phase `γ`) and `U0`, whose derivative is `0`; each gate's angles are
+    /// numbered as [`GateInstruction::angles`] lists them (spelled out in
+    /// [`AngleRef`]). The derivative is with respect to that
     /// one angle of that one gate: for an angle several gates share, the
     /// caller adds up their derivatives.
     ///
@@ -539,6 +508,7 @@ fn poll(cancellation: &mut CancellationCheck) -> Result<(), SimError> {
 mod tests {
     use super::*;
     use crate::MAX_QUBITS;
+    use polypus_circuit::GateParam;
     use polypus_circuit::GateParam::Fixed;
 
     /// Gates for a sweep back that must outlive several checkpoints, and for
@@ -694,7 +664,8 @@ mod tests {
 
     /// `gate` with its angle `which` moved by `delta`, the angles counted in
     /// `AngleRef`'s documented order — written out here independently of
-    /// `family`, so a wrong order there shows up as a mismatch.
+    /// `GateInstruction::angles`, which `generator` takes the order from, so a
+    /// wrong order there shows up as a mismatch.
     fn moved(gate: &GateInstruction, which: usize, delta: f64) -> GateInstruction {
         use GateInstruction as G;
         let mut gate = gate.clone();
@@ -813,18 +784,19 @@ mod tests {
         let n = 3;
         let h = 1e-5;
         for gate in table_gates() {
-            let (_, angles) = family(&gate).expect("in the table");
+            family(&gate).expect("in the table");
+            let num_angles = gate.angles().count();
             assert_eq!(
-                generator(&gate, AngleRef::new(0, angles.len())).unwrap_err(),
+                generator(&gate, AngleRef::new(0, num_angles)).unwrap_err(),
                 SimError::AngleIndexOutOfRange {
                     index: 0,
-                    angle: angles.len(),
-                    num_angles: angles.len(),
+                    angle: num_angles,
+                    num_angles,
                     instruction: format!("{gate:?}"),
                 }
             );
             let u = simulated(&gate, n);
-            for which in 0..angles.len() {
+            for which in 0..num_angles {
                 let g = dense(
                     generator(&gate, AngleRef::new(0, which)).expect("differentiable"),
                     n,
