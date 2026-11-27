@@ -973,11 +973,12 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     measurement group's circuit of each candidate for a Pauli sum, and the
     Planner reads them from the tasks. `Arc<T>` and the walltime watch
     forward it. No optimizer calls it.
-  - Seed: the batch is the run's last call to the backend, which gives it a
-    sampling stream of its own (C-7), so its shot noise is independent of
-    the training's even for a candidate re-evaluated at the position it was
-    scored at, as `best_params` at index 0 is for QNG, Adam and SPSA, and a
-    seeded run still reproduces it.
+  - Seed: the batch is the run's last call to the backend (or last calls,
+    one per window, for an oracle that windows its candidates: `QmlOracle`
+    and `PauliSumOracle`), which gives it sampling streams of its own (C-7),
+    so its shot noise is independent of the training's even for a candidate
+    re-evaluated at the position it was scored at, as `best_params` at
+    index 0 is for QNG, Adam and SPSA, and a seeded run still reproduces it.
   - Preconditions: an integer from 1 to 4294967295. `train`, `qml.train` and
     `qml.Model.fit` raise `ValueError` for an integer out of that range (0, a
     negative, 2³²) and `TypeError` for anything that is not an integer (a

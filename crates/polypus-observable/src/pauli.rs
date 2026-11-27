@@ -362,9 +362,19 @@ impl Grouping {
 }
 
 /// Partition `terms` into qubit-wise commuting groups, greedily: in input
-/// order, each non-identity term joins the first group it commutes with
-/// qubit-wise, or opens a new one. Deterministic for a given input order.
-/// Identity terms go to [`Grouping::constant`], not to a group.
+/// order, each non-identity, non-zero term joins the first group it commutes
+/// with qubit-wise, or opens a new one. Deterministic for a given input
+/// order. Identity terms go to [`Grouping::constant`], not to a group.
+///
+/// A term whose coefficient is exactly zero (`0.0` or `-0.0`) is left out of
+/// every group: it adds nothing to the value, but its Paulis could open a
+/// group, or widen a group's basis so that later terms open others, and every
+/// group is a circuit to run. Its index is in no group's
+/// [`term_indices`](MeasurementGroup::term_indices), like an identity's.
+/// A repeated string needs no such care: it commutes qubit-wise with its first
+/// occurrence and every term grouped with it, so it joins that group (the
+/// groups before it rejected the first occurrence, and a basis only grows),
+/// and costs one more term in that group's reducer, not a circuit.
 ///
 /// # Errors
 ///
@@ -397,6 +407,9 @@ pub fn group_qubit_wise(
         }
         if mask.is_identity() {
             constant += coefficient;
+            continue;
+        }
+        if coefficient == 0.0 {
             continue;
         }
         let entry = (coefficient, mask.support());
@@ -712,6 +725,39 @@ mod tests {
             grouping.groups()[1].observable().terms(),
             &[(2.0, 0b11), (4.0, 0b10)]
         );
+    }
+
+    /// A zero term would open a group (`Z0` after `X0`) or widen one so a
+    /// later term opens another (`X1` widens `X0`'s group, and `Z1` then
+    /// cannot join); left out, both are free. A repeated string joins the
+    /// group of its first occurrence, even after other groups opened.
+    #[test]
+    fn zero_terms_open_no_group_and_repeats_join_their_twin() {
+        let x0 = mask(&[(0, Pauli::X)]);
+        let terms = [
+            (1.0, x0),
+            (0.0, mask(&[(0, Pauli::Z)])),
+            (-0.0, mask(&[(1, Pauli::X)])),
+            (2.0, mask(&[(1, Pauli::Z)])),
+            (3.0, mask(&[(0, Pauli::Y)])),
+            (4.0, x0),
+        ];
+        let grouping = group_qubit_wise(2, &terms).unwrap();
+        let indices: Vec<&[usize]> = grouping.groups().iter().map(|g| g.term_indices()).collect();
+        assert_eq!(indices, vec![&[0, 3, 5][..], &[4][..]]);
+        assert_eq!(grouping.constant(), 0.0);
+        let bases: Vec<PauliMask> = grouping.groups().iter().map(|g| g.basis()).collect();
+        assert_eq!(
+            bases,
+            vec![
+                mask(&[(0, Pauli::X), (1, Pauli::Z)]),
+                mask(&[(0, Pauli::Y)])
+            ]
+        );
+        // Only zero terms besides the identity: no group at all.
+        let grouping = group_qubit_wise(1, &[(0.5, PauliMask::identity()), (0.0, x0)]).unwrap();
+        assert!(grouping.groups().is_empty());
+        assert_eq!(grouping.constant(), 0.5);
     }
 
     #[test]

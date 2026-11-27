@@ -10,6 +10,6 @@
 | [0006](0006-declared-classical-registers.md) | The circuit carries its declared classical width | Accepted (2026-10) |
 | [0007](0007-native-qml.md) | Native QML, with its own API beside `qml.train` | Proposed (2026-10) |
 | [0008](0008-vector-jacobian-product.md) | `qml.vjp`: the vector-Jacobian product in one adjoint run per row | Proposed (2026-11) |
-| [0009](0009-pauli-sum-oracle.md) | Pauli-sum oracle: one circuit per measurement group, in one planner call | Proposed (2026-11) |
+| [0009](0009-pauli-sum-oracle.md) | Pauli-sum oracle: one circuit per measurement group, in one planner call per window | Proposed (2026-11) |
 
 Numbers are never reused or renumbered. A new ADR takes the next free number.

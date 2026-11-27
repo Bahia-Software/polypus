@@ -1,9 +1,10 @@
-# ADR 0009 — Pauli-sum oracle: one circuit per measurement group, in one planner call
+# ADR 0009 — Pauli-sum oracle: one circuit per measurement group, in one planner call per window
 
 - **Status:** Proposed (2026-11)
 - **Contracts:** [C-3 · Measurement counts format](../CONTRACTS.md#c-3--measurement-counts-format), [C-4 · Measurement placement](../CONTRACTS.md#c-4--measurement-placement-terminal-measurements), [C-5 · Optimizer ↔ oracle](../CONTRACTS.md#c-5--optimizer--oracle-contract-polypus-optimizers), [C-7 · Seeding & run manifest](../CONTRACTS.md#c-7--seeding--run-manifest-python-entry-points); C-12 (call trace) is unchanged
 - **Supersedes:** —
 - **Issue / PRs:** #531 (epic #528, step 3 of #424); builds on #529 (multi-qubit `PauliSum`, exact H2) and #530 (qubit-wise grouping and parity reducer)
+- **Amended by:** #667 (2026-11): decision 6 runs the candidates in windows, one call per window; every group's counts must total the shots; zero-coefficient terms are in no group
 
 ## Context
 
@@ -62,8 +63,9 @@ depends on the term order, and a term can vanish below
    - the Hamiltonian is checked by `group_qubit_wise` over the template's
      width: at most 64 qubits (`MAX_QUBITS`), finite coefficients, no term
      acting outside the template, and `Σ|c|` within `MAX_WEIGHT_BOUND`;
-   - a Hamiltonian with no non-identity term (empty, or identity terms only)
-     is rejected: it has no group to measure, its value does not depend on
+   - a Hamiltonian with no non-identity term (empty, or identity terms only;
+     since #667 also when its other terms all have a zero coefficient, which
+     `group_qubit_wise` leaves out of every group) is rejected: it has no group to measure, its value does not depend on
      the candidate, and nothing would be trained.
 
    The G measurement templates (template, then group `g`'s rotations in
@@ -102,16 +104,29 @@ depends on the term order, and a term can vanish below
    independent of the training's because every backend call, and on the
    native backend every circuit, has its own sampling stream (C-7).
 
-6. **One `Planner::execute` call per batch, with `N · G` tasks, and the oracle
-   reduces.** The tasks are candidate-major: task `i · G + g` is candidate
-   `i`'s circuit for group `g`, groups in `Grouping::groups()` order.
-   `Planner::execute` returns "merged counts, one per task, in input order",
-   however many waves it splits the batch into. The oracle:
+6. **One `Planner::execute` call per window of whole candidates, with
+   `W · G` tasks, and the oracle reduces.** *(Amended by #667: this was one
+   call per batch, with `N · G` tasks.)* `W` is
+   `candidate_window_size(backend, G)`, as the QML oracle sizes its windows,
+   so at most `W · G` bound circuits are alive at once; a failing window
+   stops the batch before the next is bound. The tasks are candidate-major:
+   task `i · G + g` is the window's candidate `i`'s circuit for group `g`,
+   groups in `Grouping::groups()` order. `Planner::execute` returns "merged
+   counts, one per task, in input order", however many waves it splits the
+   window into. The windows change no expected value, since the tasks keep
+   their order across windows. The sampled values are the same bit for bit
+   on the native backend, which seeds each circuit by its position in the
+   run (`circuit_seed`, C-7), not by its call; a backend seeded per call
+   (Local/Aer, CUNQA) gives each window's call its own stream, so there the
+   noise depends on `W`, and so on the host, as it already does for the QML
+   oracle. An empty batch makes no call. The oracle:
    - returns finite sentinels without running anything once the run's
      `OracleErrorSlot` holds an error, as `VqcOracle` does (C-12's trace
      relies on this short-circuit);
-   - checks it got `N · G` counts maps (`EvaluationError::WrongLength`
-     otherwise);
+   - checks it got `W · G` counts maps (`EvaluationError::WrongLength`
+     otherwise), and that each totals the shots asked for (C-3; otherwise
+     `EvaluationError::Observable`, naming the group and the candidate, #667:
+     the built-in planners already check it, a caller's own may not);
    - reduces map `i · G + g` with group `g`'s `ParityObservable` and returns
      `−(constant + value_{i,0} + … + value_{i,G−1})` for candidate `i`, summed
      in that order (the constant, then the groups in order) so that a seeded
@@ -157,8 +172,9 @@ first:
   if the `Planner` contract guarantees the whole batch reaches the reducer in
   order, never split into waves.
 
-This ADR takes **one call**, without a composite reducer (decision 6), because
-the guarantee the issue asks for already exists, on `execute`:
+This ADR takes **one call** (per window of whole candidates since #667),
+without a composite reducer (decision 6), because the guarantee the issue
+asks for already exists, on `execute`:
 
 - The concern is about `Planner::evaluate`, which runs the tasks and hands the
   counts to a `CostObservable`. A reducer that needs all G groups of a
@@ -191,12 +207,13 @@ the guarantee the issue asks for already exists, on `execute`:
 
 One call gives full waves: 10 candidates of 5 groups on a backend that runs 8
 circuits at a time take 7 waves in one call, and 10 (8 + 2, five times) in
-five. A test pins the guarantee decision 6 relies on, through a backend that
+five. With windows (#667), a window holding all 10 candidates is still one
+call; smaller windows lose at most one partial wave each. A test pins the guarantee decision 6 relies on, through a backend that
 runs 3 circuits at a time and encodes each circuit's identity in its counts,
 with `N · G` not a multiple of 3, so that a candidate's groups straddle two
 waves: every candidate must still get its own value.
 
-What one call gives up, compared with the issue's starting point:
+What one call (per window) gives up, compared with the issue's starting point:
 
 - **Noise independence on every backend.** With one call per group, two
   groups of a candidate are always in different calls, which C-7 gives
@@ -231,11 +248,12 @@ the FCI energy.
   group, which needs no engine change), or change the `Planner` so that it
   splits waves where the shots change (an engine-contract change, with its own
   ADR and the matching C-12 trace change).
-- All `N · G` bound circuits of a batch are held at once. That is fine for H2
-  (G = 5). Before G grows (FCIDUMP molecules, #535, with the deeper ansatzes
-  of #538), the oracle should window the candidates as the QML oracle does,
-  with `candidate_window_size(backend, G)`; windows are whole candidates, so
-  the pairing of decision 6 is unchanged.
+- All `N · G` bound circuits of a batch were held at once, fine for H2
+  (G = 5) but not once G grows (FCIDUMP molecules, #535, with the deeper
+  ansatzes of #538). #667 windows the candidates as the QML oracle does, with
+  `candidate_window_size(backend, G)`; windows are whole candidates, so the
+  pairing of decision 6 is unchanged. A trace (C-12) then shows one `batch`
+  line per window, as it does for the QML oracle.
 - C-5's text gains this oracle (decision 1).
 
 ## Validation
@@ -266,9 +284,18 @@ The acceptance criteria of #531, and the decisions above, map to tests:
   test alone cannot do: every H2 term has an even number of `Y`, so `S` for
   `S†` would cancel there.
 - **The pairing across waves:** the test described in the deviation above.
-- **Failures:** a wrong number of counts maps is `WrongLength`, recorded in
-  the error slot with finite sentinels, and a recorded failure
-  short-circuits later batches without calling the backend.
+- **Failures:** a wrong number of counts maps is `WrongLength`, and a counts
+  map that does not total the shots (empty, short, over, or overflowing
+  `u64`) is an `Observable` error naming the group and the candidate in the
+  batch (#667); both are recorded in the error slot with finite sentinels,
+  and a recorded failure short-circuits later batches without calling the
+  backend.
+- **Windows (#667):** on the native backend, five noisy candidates give the
+  same values bit for bit in windows of 1, 2, 3 or all five, each call
+  carrying at most `W · G` tasks; a failing window stops the batch before
+  the next call; an empty batch makes no call.
+- **Zero terms (#667):** a zero-coefficient term opens no group and widens
+  none, and a repeated string joins its twin's group.
 - The determinism gate stays green and existing flows are unchanged.
 
 ## Alternatives considered

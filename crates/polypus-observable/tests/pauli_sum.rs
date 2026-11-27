@@ -136,6 +136,7 @@ fn h2_groups_cover_every_term_once_and_commute_qubit_wise() {
     // Deviation from the issue's wording, by design (decision 3): "the groups
     // cover every term exactly once" holds for every non-identity term; the
     // identity term is in `constant`, since its value needs no measurement.
+    // (A zero term would be in no group, #667; H2 has none.)
     let mut seen = vec![0usize; terms.len()];
     for group in grouping.groups() {
         for &index in group.term_indices() {
@@ -153,6 +154,7 @@ fn h2_groups_cover_every_term_once_and_commute_qubit_wise() {
             assert_eq!(seen[index], 0, "identity term {index} is in a group");
             identity += coefficient;
         } else {
+            assert_ne!(coefficient, 0.0, "H2 has no zero term");
             assert_eq!(seen[index], 1, "term {index} is in {} groups", seen[index]);
         }
     }

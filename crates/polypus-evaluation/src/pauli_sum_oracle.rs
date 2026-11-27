@@ -16,12 +16,26 @@
 //!
 //! A candidate is `G` circuits, one per group, each measured with the run's
 //! shots (or `final_shots` for the final batch): `G · shots` shots in all.
-//! A batch of `N` candidates is **one** [`Planner::execute`] call with `N · G`
-//! tasks, candidate-major; `execute` returns one counts map per task, in
-//! input order, however many waves it splits the batch into, and the oracle
-//! pairs them with their candidate and group itself (ADR 0009, decision 6,
-//! which also records why this differs from the issue's suggested one call
-//! per group).
+//! A batch of `N` candidates is run in windows of `W` whole candidates,
+//! `W` from [`candidate_window_size`] (as the QML oracle sizes its own): each
+//! window is **one** [`Planner::execute`] call with `W · G` tasks,
+//! candidate-major; `execute` returns one counts map per task, in input
+//! order, however many waves it splits the window into, and the oracle pairs
+//! them with their candidate and group itself (ADR 0009, decision 6, which
+//! also records why this differs from the issue's suggested one call per
+//! group). A window's circuits are dropped before the next is bound, so at
+//! most `W · G` are alive at once, however large the population or the
+//! Hamiltonian (issue #667).
+//!
+//! The windows change no expected value: the tasks keep their order across
+//! windows and each candidate's energy is summed in the same order. On the
+//! native backend the sampled values do not change either: it seeds each
+//! circuit by its position in the run (`circuit_seed`, contract C-7), not by
+//! the call it is in, so a seeded run gives the same values bit for bit
+//! whatever the window. A backend seeded per call (Local/Aer, CUNQA) gives
+//! each window's call its own stream, so there the noise of a seeded run
+//! depends on the window, and so on the host's parallelism, as it does for
+//! the QML oracle.
 //!
 //! The groups of one candidate usually share a backend call. Their noise is
 //! independent where the backend gives each circuit of a call its own
@@ -34,12 +48,14 @@ use std::sync::Arc;
 
 use polypus_circuit::{CircuitError, GateInstruction, ParameterizedCircuit};
 use polypus_infrastructure::{
-    BoundCircuit, CancelToken, CircuitTask, Planner, QuantumBackend, RunParams,
+    BoundCircuit, CancelToken, CircuitTask, Counts, Planner, QuantumBackend, RunParams,
 };
 use polypus_observable::{group_qubit_wise, BasisRotation, Grouping, ObservableError, PauliMask};
 use polypus_orchestration::{OracleFactory, Oracles, Resources};
 
-use crate::{CostObservable, EvaluationError, EvaluationOracle, OracleErrorSlot};
+use crate::{
+    candidate_window_size, CostObservable, EvaluationError, EvaluationOracle, OracleErrorSlot,
+};
 
 /// Why a [`PauliSumOracleFactory`] could not be built.
 ///
@@ -56,9 +72,9 @@ pub enum PauliSumOracleError {
         /// Position of the first measurement in the template's gates.
         index: usize,
     },
-    /// The Hamiltonian has no term besides the identity (or no term at all):
-    /// there is nothing to measure, and its value would not depend on the
-    /// candidate.
+    /// The Hamiltonian has no term besides the identity and zero-coefficient
+    /// terms (or no term at all): there is nothing to measure, and its value
+    /// would not depend on the candidate.
     NothingToMeasure,
     /// The Hamiltonian is invalid for the template: a term acting outside the
     /// template's qubits, a template wider than 64 qubits, a non-finite
@@ -82,8 +98,8 @@ impl fmt::Display for PauliSumOracleError {
             ),
             PauliSumOracleError::NothingToMeasure => write!(
                 f,
-                "the Hamiltonian has no term besides the identity, so there is nothing to \
-                 measure and its value does not depend on the parameters"
+                "the Hamiltonian has no term besides the identity and zero-coefficient terms, \
+                 so there is nothing to measure and its value does not depend on the parameters"
             ),
             PauliSumOracleError::Hamiltonian(e) => write!(f, "invalid Hamiltonian: {e}"),
             PauliSumOracleError::Circuit(e) => {
@@ -127,8 +143,10 @@ impl PauliSumOracleFactory {
     /// [`PauliSumOracleError::MeasuringTemplate`] if the template measures,
     /// [`PauliSumOracleError::Hamiltonian`] if [`group_qubit_wise`] rejects
     /// the terms, and [`PauliSumOracleError::NothingToMeasure`] if no term
-    /// remains besides the identity. [`PauliSumOracleError::Circuit`] is
-    /// unreachable (see its docs) and reported rather than unwrapped.
+    /// remains besides the identity and zero-coefficient terms (which
+    /// [`group_qubit_wise`] leaves out of every group).
+    /// [`PauliSumOracleError::Circuit`] is unreachable (see its docs) and
+    /// reported rather than unwrapped.
     pub fn new(
         template: ParameterizedCircuit,
         terms: &[(f64, PauliMask)],
@@ -250,64 +268,103 @@ impl PauliSumOracle {
         }
     }
 
-    /// The fallible core: bind the `N · G` circuits candidate-major, run them
-    /// in one [`Planner::execute`] call, and reduce each candidate's `G`
-    /// counts maps with its groups' observables.
+    /// The fallible core: [`try_evaluate_windowed`](Self::try_evaluate_windowed)
+    /// with this host's and backend's window.
     fn try_evaluate(
         &self,
         candidates: &[Vec<f64>],
         shots: u32,
     ) -> Result<Vec<f64>, EvaluationError> {
+        let window = candidate_window_size(
+            self.backend.capabilities().max_concurrency,
+            self.templates.len(),
+        );
+        self.try_evaluate_windowed(candidates, window, shots)
+    }
+
+    /// Score `candidates` in windows of at most `window` whole candidates
+    /// (issue #667; ADR 0009, decision 6): bind a window's `W · G` circuits
+    /// candidate-major, run them in one [`Planner::execute`] call, reduce
+    /// each candidate's `G` counts maps with its groups' observables (each
+    /// map first checked to hold exactly `shots` shots, [`check_shot_total`]),
+    /// and drop the window's circuits before binding the next. At most
+    /// `window · G` bound circuits are alive at once, and a failing window
+    /// stops the batch before the next is bound.
+    ///
+    /// The window is an argument so that tests can fix it; the values do not
+    /// depend on it (see the [module docs](self)).
+    fn try_evaluate_windowed(
+        &self,
+        candidates: &[Vec<f64>],
+        window: usize,
+        shots: u32,
+    ) -> Result<Vec<f64>, EvaluationError> {
         let num_groups = self.templates.len();
-        // Task `i · G + g` is candidate `i`'s circuit for group `g`.
-        let bound: Vec<BoundCircuit> = candidates
-            .iter()
-            .flat_map(|params| {
-                self.templates.iter().map(move |template| {
-                    template
-                        .assign_parameters(params)
-                        .map(BoundCircuit::Native)
-                        .map_err(EvaluationError::Binding)
-                })
-            })
-            .collect::<Result<_, _>>()?;
-        let tasks: Vec<CircuitTask> = bound
-            .iter()
-            .map(|circuit| CircuitTask { circuit, shots })
-            .collect();
-
-        // `execute`, not `evaluate`: it returns one counts map per task, in
-        // input order, whatever waves it runs (ADR 0009, decision 6).
-        let counts =
-            self.planner
-                .execute(self.backend.as_ref(), &tasks, &self.config, &self.cancel)?;
-        if counts.len() != tasks.len() {
-            return Err(EvaluationError::WrongLength {
-                expected: tasks.len(),
-                got: counts.len(),
-            });
-        }
-
         let mut values = Vec::with_capacity(candidates.len());
-        for candidate_counts in counts.chunks(num_groups) {
-            // The constant, then the groups in order: a fixed summation order,
-            // so that a seeded run is reproducible bit for bit.
-            let mut energy = self.grouping.constant();
-            for (group, group_counts) in self.grouping.groups().iter().zip(candidate_counts) {
-                let reduced = group
-                    .observable()
-                    .expectation_batch(std::slice::from_ref(group_counts))?;
-                match reduced.as_slice() {
-                    [value] => energy += value,
-                    _ => {
-                        return Err(EvaluationError::WrongLength {
-                            expected: 1,
-                            got: reduced.len(),
-                        })
+        // `chunks` panics on 0; `candidate_window_size` is never 0, but the
+        // loop stays total. An empty batch has no window, so the planner is
+        // not called with zero tasks.
+        for (number, window_candidates) in candidates.chunks(window.max(1)).enumerate() {
+            let first = number * window.max(1);
+            // Task `i · G + g` is the window's candidate `i`'s circuit for
+            // group `g`.
+            let bound: Vec<BoundCircuit> = window_candidates
+                .iter()
+                .flat_map(|params| {
+                    self.templates.iter().map(move |template| {
+                        template
+                            .assign_parameters(params)
+                            .map(BoundCircuit::Native)
+                            .map_err(EvaluationError::Binding)
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            let tasks: Vec<CircuitTask> = bound
+                .iter()
+                .map(|circuit| CircuitTask { circuit, shots })
+                .collect();
+
+            // `execute`, not `evaluate`: it returns one counts map per task,
+            // in input order, whatever waves it runs (ADR 0009, decision 6).
+            let counts =
+                self.planner
+                    .execute(self.backend.as_ref(), &tasks, &self.config, &self.cancel)?;
+            if counts.len() != tasks.len() {
+                return Err(EvaluationError::WrongLength {
+                    expected: tasks.len(),
+                    got: counts.len(),
+                });
+            }
+
+            for (offset, candidate_counts) in counts.chunks(num_groups).enumerate() {
+                let candidate = first + offset;
+                // The constant, then the groups in order: a fixed summation
+                // order, so that a seeded run is reproducible bit for bit.
+                let mut energy = self.grouping.constant();
+                for (index, (group, group_counts)) in self
+                    .grouping
+                    .groups()
+                    .iter()
+                    .zip(candidate_counts)
+                    .enumerate()
+                {
+                    check_shot_total(group_counts, shots, candidate, index)?;
+                    let reduced = group
+                        .observable()
+                        .expectation_batch(std::slice::from_ref(group_counts))?;
+                    match reduced.as_slice() {
+                        [value] => energy += value,
+                        _ => {
+                            return Err(EvaluationError::WrongLength {
+                                expected: 1,
+                                got: reduced.len(),
+                            })
+                        }
                     }
                 }
+                values.push(-energy);
             }
-            values.push(-energy);
+            // `bound` and `counts` drop here, before the next window is bound.
         }
 
         // Contract C-5: one finite value per candidate. `MAX_WEIGHT_BOUND`
@@ -319,12 +376,40 @@ impl PauliSumOracle {
     }
 }
 
+/// Contract C-3: a circuit's counts total the shots it asked for. A map with
+/// fewer (empty, say) or more would still reduce, to a value that is wrong
+/// with no sign of it (an empty map reduces to 0), so it fails the
+/// evaluation instead. The built-in planners already reject such a wave
+/// (`validate_run_results`); this holds the oracle to C-3 under any other
+/// [`Planner`] too (a Rust caller's own), which the `execute` contract does
+/// not oblige to check the counts.
+fn check_shot_total(
+    counts: &Counts,
+    shots: u32,
+    candidate: usize,
+    group: usize,
+) -> Result<(), EvaluationError> {
+    let total = counts
+        .values()
+        .try_fold(0u64, |total, &n| total.checked_add(n));
+    if total == Some(u64::from(shots)) {
+        return Ok(());
+    }
+    let total = total.map_or_else(|| "more than u64::MAX".to_string(), |t| t.to_string());
+    Err(EvaluationError::Observable(ObservableError::Invalid(
+        format!(
+            "group {group} of candidate {candidate}: its counts total {total} shots, not the \
+             {shots} requested (contract C-3)"
+        ),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use polypus_circuit::{ConcreteCircuit, GateParam};
     use polypus_infrastructure::{
-        BackendCapabilities, BackendError, Counts, InfrastructureError, OptLevel,
+        BackendCapabilities, BackendError, InfrastructureError, NativeStatevectorBackend, OptLevel,
         PlannerRequirements, SequentialPlanner,
     };
     use polypus_observable::{Pauli, MAX_WEIGHT_BOUND};
@@ -523,7 +608,8 @@ mod tests {
         }
     }
 
-    /// ADR 0009, decision 6: one `execute` call of `N · G` tasks, split into
+    /// ADR 0009, decision 6: one window's `execute` call (the default window
+    /// holds both candidates: at least 6 with a backend of 3), split into
     /// waves of 3, still gives every candidate its own value. 2 candidates of
     /// 5 groups are 10 tasks, so waves of 3, 3, 3, 1, and candidate 0's last
     /// group shares a wave with candidate 1's first.
@@ -667,13 +753,241 @@ mod tests {
         assert!(matches!(*error, EvaluationError::Binding(_)), "{error:?}");
     }
 
+    /// The counts map of task `task` asked for `shots` shots.
+    type MapsOf = fn(usize, usize, u64) -> Counts;
+
+    /// A planner whose counts maps come from `maps(call, task, shots)`:
+    /// `call` counts its `execute` calls from 0, `task` the tasks of a call.
+    struct MapsPlanner {
+        maps: MapsOf,
+        calls: AtomicUsize,
+    }
+
+    impl MapsPlanner {
+        fn new(maps: MapsOf) -> Self {
+            Self {
+                maps,
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Planner for MapsPlanner {
+        fn requirements(&self) -> PlannerRequirements {
+            PlannerRequirements {
+                needs_shot_distribution: false,
+                min_concurrency: 1,
+            }
+        }
+
+        fn execute(
+            &self,
+            _backend: &dyn QuantumBackend,
+            tasks: &[CircuitTask<'_>],
+            _params: &RunParams,
+            _cancel: &CancelToken,
+        ) -> Result<Vec<Counts>, InfrastructureError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(tasks
+                .iter()
+                .enumerate()
+                .map(|(task, t)| (self.maps)(call, task, u64::from(t.shots)))
+                .collect())
+        }
+    }
+
+    /// Contract C-3: every group's counts must total the shots. Task 7 is
+    /// candidate 1's group 2 (5 groups per candidate); a map there that is
+    /// empty, one short, one over or overflowing is recorded as an error
+    /// naming it, with finite sentinels, instead of biasing the energy.
     #[test]
-    fn an_empty_batch_is_an_empty_result() {
-        let oracle = oracle(
+    fn counts_that_do_not_total_the_shots_are_recorded() {
+        let cases: [(MapsOf, &str); 4] = [
+            (
+                |_, task, shots| match task {
+                    7 => HashMap::new(),
+                    _ => HashMap::from([("00".to_string(), shots)]),
+                },
+                "total 0 shots, not the 16",
+            ),
+            (
+                |_, task, shots| match task {
+                    7 => HashMap::from([("00".to_string(), shots - 1)]),
+                    _ => HashMap::from([("00".to_string(), shots)]),
+                },
+                "total 15 shots, not the 16",
+            ),
+            (
+                |_, task, shots| match task {
+                    7 => HashMap::from([("00".to_string(), shots), ("01".to_string(), 1)]),
+                    _ => HashMap::from([("00".to_string(), shots)]),
+                },
+                "total 17 shots, not the 16",
+            ),
+            (
+                |_, task, shots| match task {
+                    7 => {
+                        HashMap::from([("00".to_string(), u64::MAX), ("01".to_string(), u64::MAX)])
+                    }
+                    _ => HashMap::from([("00".to_string(), shots)]),
+                },
+                "total more than u64::MAX shots",
+            ),
+        ];
+        for (maps, message) in cases {
+            let oracle = oracle(
+                Arc::new(ContentBackend::new(3)),
+                Arc::new(MapsPlanner::new(maps)),
+            );
+            assert_eq!(oracle.evaluate_batch(&candidates(2)), vec![0.0, 0.0]);
+            let error = oracle
+                .errors
+                .take()
+                .expect("an error is recorded")
+                .downcast::<EvaluationError>()
+                .expect("an evaluation error");
+            match *error {
+                EvaluationError::Observable(ObservableError::Invalid(ref text)) => {
+                    assert!(text.contains("group 2 of candidate 1"), "{text}");
+                    assert!(text.contains(message), "{text}");
+                }
+                ref other => panic!("{other:?}"),
+            }
+        }
+        // Maps that total the shots, here split over two keys, pass.
+        let split = oracle(
             Arc::new(ContentBackend::new(3)),
-            Arc::new(SequentialPlanner),
+            Arc::new(MapsPlanner::new(|_, _, shots| {
+                HashMap::from([("00".to_string(), shots - 4), ("01".to_string(), 4)])
+            })),
         );
+        assert_eq!(split.evaluate_batch(&candidates(2)).len(), 2);
+        assert!(!split.errors.failed());
+        // In windows of one candidate, the second call's group 2 is
+        // candidate 1's: the message names the candidate in the batch, not
+        // in its window.
+        let windowed = oracle(
+            Arc::new(ContentBackend::new(3)),
+            Arc::new(MapsPlanner::new(|call, task, shots| match (call, task) {
+                (1, 2) => HashMap::new(),
+                _ => HashMap::from([("00".to_string(), shots)]),
+            })),
+        );
+        match windowed.try_evaluate_windowed(&candidates(2), 1, 16) {
+            Err(EvaluationError::Observable(ObservableError::Invalid(text))) => {
+                assert!(text.contains("group 2 of candidate 1:"), "{text}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A planner that runs like [`SequentialPlanner`] and records how many
+    /// tasks each `execute` call carried.
+    #[derive(Default)]
+    struct RecordingPlanner {
+        tasks_per_call: Mutex<Vec<usize>>,
+    }
+
+    impl RecordingPlanner {
+        fn tasks_per_call(&self) -> Vec<usize> {
+            self.tasks_per_call
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        }
+    }
+
+    impl Planner for RecordingPlanner {
+        fn requirements(&self) -> PlannerRequirements {
+            SequentialPlanner.requirements()
+        }
+
+        fn execute(
+            &self,
+            backend: &dyn QuantumBackend,
+            tasks: &[CircuitTask<'_>],
+            params: &RunParams,
+            cancel: &CancelToken,
+        ) -> Result<Vec<Counts>, InfrastructureError> {
+            self.tasks_per_call
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(tasks.len());
+            SequentialPlanner.execute(backend, tasks, params, cancel)
+        }
+    }
+
+    /// Issue #667: the windows bound each call to `W · G` tasks and change
+    /// no value. On the native backend, which seeds each circuit by its
+    /// position in the run (C-7), five noisy candidates give the same values
+    /// bit for bit in windows of 1, 2, 3 or all five, with a fresh backend
+    /// of the same seed each time.
+    #[test]
+    fn windows_bound_each_call_and_change_no_value_bit_for_bit() {
+        let candidates: Vec<Vec<f64>> = [0.3, 1.1, 2.0, -0.7, 2.9]
+            .iter()
+            .map(|&theta| vec![theta])
+            .collect();
+        let run = |seed: u64, window: usize| {
+            let planner = Arc::new(RecordingPlanner::default());
+            let oracle = oracle(
+                Arc::new(NativeStatevectorBackend::new(seed)),
+                planner.clone(),
+            );
+            let values = oracle
+                .try_evaluate_windowed(&candidates, window, 16)
+                .expect("a valid batch");
+            (values, planner.tasks_per_call())
+        };
+        let (all, calls) = run(667, 5);
+        assert_eq!(calls, vec![25]);
+        // 16 shots per group: the values are noisy (another seed changes
+        // them), so the equal values below come from equal noise.
+        assert_ne!(run(668, 5).0, all, "the native backend samples");
+        for (window, expected_calls) in [
+            (1, vec![5, 5, 5, 5, 5]),
+            (2, vec![10, 10, 5]),
+            (3, vec![15, 10]),
+        ] {
+            let (values, calls) = run(667, window);
+            assert_eq!(calls, expected_calls, "window {window}");
+            assert_eq!(
+                values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                all.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "window {window}"
+            );
+        }
+    }
+
+    /// A failing window stops the batch: the next window is never bound or
+    /// run, and the error is recorded as for an unwindowed batch.
+    #[test]
+    fn a_failing_window_stops_the_batch() {
+        let planner = Arc::new(ShortPlanner {
+            calls: AtomicUsize::new(0),
+        });
+        let oracle = oracle(Arc::new(ContentBackend::new(3)), planner.clone());
+        assert!(matches!(
+            oracle.try_evaluate_windowed(&candidates(2), 1, 16),
+            Err(EvaluationError::WrongLength {
+                expected: 5,
+                got: 4
+            })
+        ));
+        assert_eq!(planner.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// An empty batch is an empty result, and the planner is not called:
+    /// there is nothing to run.
+    #[test]
+    fn an_empty_batch_is_an_empty_result_and_runs_nothing() {
+        let planner = Arc::new(ShortPlanner {
+            calls: AtomicUsize::new(0),
+        });
+        let oracle = oracle(Arc::new(ContentBackend::new(3)), planner.clone());
         assert!(oracle.evaluate_batch(&[]).is_empty());
+        assert!(oracle.evaluate_batch_with_shots(&[], 4096).is_empty());
+        assert_eq!(planner.calls.load(Ordering::SeqCst), 0);
         assert!(!oracle.errors.failed());
     }
 
@@ -700,7 +1014,7 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(vec![
                 HashMap::from([("00".to_string(), 16)]);
-                tasks.len() - 1
+                tasks.len().saturating_sub(1)
             ])
         }
     }
@@ -756,10 +1070,13 @@ mod tests {
     #[test]
     fn a_hamiltonian_without_a_non_identity_term_is_rejected() {
         let identity = PauliMask::identity();
+        let z0 = PauliMask::new([(0, Pauli::Z)]).expect("a valid string");
         for terms in [
             vec![],
             vec![(0.5, identity)],
             vec![(0.5, identity), (-1.0, identity)],
+            // Zero terms are in no group (#667), so nothing is left to measure.
+            vec![(0.5, identity), (0.0, z0), (-0.0, z0)],
         ] {
             let error = PauliSumOracleFactory::new(template(), &terms).unwrap_err();
             assert!(
