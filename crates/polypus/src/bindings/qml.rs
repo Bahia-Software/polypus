@@ -841,7 +841,10 @@ impl Ansatz {
     /// Append a QCNN convolution: one `block` (`"basic"`, 4 parameters, or
     /// `"cartan"`, 3) shared by every pair of active qubits that `pairing`
     /// selects (`"even_pairs"`/`"odd_pairs"`/`"alternating"`, default
-    /// `"alternating"`).
+    /// `"alternating"`). The pairing must select at least one pair of the
+    /// qubits active where the layer sits: `"odd_pairs"` needs at least three,
+    /// the others at least two; otherwise this raises `ValueError` and leaves
+    /// the `Ansatz` as it was.
     #[pyo3(signature = (block, pairing="alternating"))]
     fn conv<'py>(
         mut slf: PyRefMut<'py, Self>,

@@ -30,6 +30,7 @@ use std::fmt;
 
 use polypus_circuit::CircuitError;
 
+use crate::layers::Pairing;
 use crate::loss::Loss;
 use crate::observables::Pauli;
 use crate::readout::Decision;
@@ -139,11 +140,13 @@ pub enum ValidationError {
         /// The limit, [`MAX_MODEL_QUBITS`](crate::MAX_MODEL_QUBITS).
         max_qubits: usize,
     },
-    /// A layer needs more active qubits than are available at its position in
-    /// the model. Raised by an encoder whose feature count exceeds the number
-    /// of active qubits.
+    /// An encoder has more features to load than there are active qubits at
+    /// its position in the model. Raised by the angle, basis and IQP encoders,
+    /// which load one feature per qubit, when their feature count exceeds the
+    /// number of active qubits.
     NotEnoughQubits {
-        /// The number of active qubits the layer requires.
+        /// The number of active qubits the encoder requires (its feature
+        /// count).
         needed: usize,
         /// The number of active qubits available at this position.
         active: usize,
@@ -166,6 +169,21 @@ pub enum ValidationError {
     /// fewer are available at its position in the model. Raised by
     /// [`PoolLayer`](crate::PoolLayer)'s `plan`.
     PoolNeedsTwoQubits {
+        /// The number of active qubits available at this position.
+        active: usize,
+    },
+    /// A convolution layer's [`Pairing`](crate::Pairing) selects no pair of
+    /// the active qubits available at its position in the model, so no gate
+    /// would read the parameters it reserves:
+    /// [`OddPairs`](crate::Pairing::OddPairs) needs at least three active
+    /// qubits, [`EvenPairs`](crate::Pairing::EvenPairs) and
+    /// [`Alternating`](crate::Pairing::Alternating) at least two. Raised by
+    /// [`ConvLayer`](crate::ConvLayer)'s `plan`, which then reserves nothing.
+    ConvNeedsQubits {
+        /// The layer's pairing.
+        pairing: Pairing,
+        /// The fewest active qubits on which `pairing` selects a pair.
+        needed: usize,
         /// The number of active qubits available at this position.
         active: usize,
     },
@@ -440,6 +458,15 @@ impl fmt::Display for ValidationError {
             ValidationError::PoolNeedsTwoQubits { active } => write!(
                 f,
                 "pooling layer needs at least 2 active qubit(s) but only {active} are available"
+            ),
+            ValidationError::ConvNeedsQubits {
+                pairing,
+                needed,
+                active,
+            } => write!(
+                f,
+                "convolution layer with pairing \"{}\" needs at least {needed} active qubit(s) but only {active} are available",
+                pairing.python_name()
             ),
             ValidationError::StronglyEntanglingRangesLength { reps, got } => write!(
                 f,
@@ -1035,6 +1062,33 @@ mod tests {
         assert!(ValidationError::PoolNeedsTwoQubits { active: 1 }
             .to_string()
             .contains('1'));
+    }
+
+    #[test]
+    fn conv_needs_qubits_names_the_layer_and_the_pairing() {
+        let s = ValidationError::ConvNeedsQubits {
+            pairing: Pairing::OddPairs,
+            needed: 3,
+            active: 2,
+        }
+        .to_string();
+        assert!(s.contains("convolution"), "{s}");
+        assert!(s.contains("\"odd_pairs\""), "{s}");
+        assert!(s.contains("at least 3 active"), "{s}");
+        assert!(s.contains("only 2 are"), "{s}");
+        // The Python spelling, never the Rust variant name.
+        for (pairing, name) in [
+            (Pairing::EvenPairs, "\"even_pairs\""),
+            (Pairing::Alternating, "\"alternating\""),
+        ] {
+            let s = ValidationError::ConvNeedsQubits {
+                pairing,
+                needed: 2,
+                active: 1,
+            }
+            .to_string();
+            assert!(s.contains("convolution") && s.contains(name), "{s}");
+        }
     }
 
     #[test]

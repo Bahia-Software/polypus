@@ -30,19 +30,48 @@ pub enum ConvBlock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Pairing {
-    /// `(0,1),(2,3),…` — `even_pairs`.
+    /// `(0,1),(2,3),…` — `even_pairs`. Needs at least two active qubits.
     EvenPairs,
-    /// `(1,2),(3,4),…` — `odd_pairs`.
+    /// `(1,2),(3,4),…` — `odd_pairs`. Needs at least three active qubits: on
+    /// two there is no odd pair.
     OddPairs,
     /// All [`EvenPairs`](Self::EvenPairs) followed by all
     /// [`OddPairs`](Self::OddPairs) — the Cong–Choi–Lukin pattern (the default).
+    /// Needs at least two active qubits.
     Alternating,
+}
+
+impl Pairing {
+    /// The fewest active qubits on which this pairing selects a pair: 3 for
+    /// [`OddPairs`](Self::OddPairs) (its first pair is `(1,2)`), 2 for the
+    /// others (their first pair is `(0,1)`).
+    pub(crate) fn min_active_qubits(self) -> usize {
+        match self {
+            Pairing::OddPairs => 3,
+            Pairing::EvenPairs | Pairing::Alternating => 2,
+        }
+    }
+
+    /// The spelling of this pairing in the Python API (`conv(pairing=…)`),
+    /// which is what an error message names.
+    pub(crate) fn python_name(self) -> &'static str {
+        match self {
+            Pairing::EvenPairs => "even_pairs",
+            Pairing::OddPairs => "odd_pairs",
+            Pairing::Alternating => "alternating",
+        }
+    }
 }
 
 /// A convolution layer: one shared block ([`ConvBlock`]) applied to every pair
 /// of active qubits chosen by a [`Pairing`]. Every pair reuses the same `θ`
 /// indices (parameter sharing), so the layer's parameter count is fixed by the
 /// block alone, independent of the number of qubits.
+///
+/// Its `plan` refuses a position where the pairing selects no pair (fewer
+/// active qubits than [`Pairing`] needs) with
+/// [`ValidationError::ConvNeedsQubits`], so every `θ` it reserves is read by a
+/// gate.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConvLayer {
@@ -105,8 +134,15 @@ impl ConvLayer {
 impl LayerOps for ConvLayer {
     fn plan(&self, ctx: &mut LayerContext) -> Result<LayerAllocation, ValidationError> {
         let active = ctx.active.len();
-        if active < 2 {
-            return Err(ValidationError::NotEnoughQubits { needed: 2, active });
+        // Below this the pairing selects no pair: the θ reserved next would be
+        // read by no gate.
+        let needed = self.pairing.min_active_qubits();
+        if active < needed {
+            return Err(ValidationError::ConvNeedsQubits {
+                pairing: self.pairing,
+                needed,
+                active,
+            });
         }
         // Parameter sharing: the block reserves its θ once for the whole layer,
         // *not* per pair. The cursor advances by the block width only, while
@@ -201,6 +237,8 @@ fn emit_cartan(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::error::SizeLimit;
 
@@ -356,16 +394,142 @@ mod tests {
         }
     }
 
+    /// Every parameter index some gate of `qc` reads. `num_params` is only the
+    /// highest index plus one, so it cannot tell a skipped `θ` apart. Panics on
+    /// a gate neither block emits, so a new angle-carrying gate cannot slip
+    /// past unread.
+    fn read_params(qc: &ParameterizedCircuit) -> BTreeSet<usize> {
+        let mut read = BTreeSet::new();
+        for gate in qc.gates() {
+            match gate {
+                GateInstruction::Ry { theta, .. }
+                | GateInstruction::Rxx { theta, .. }
+                | GateInstruction::Rzz { theta, .. } => match theta {
+                    Param(i) => {
+                        read.insert(*i);
+                    }
+                    other => panic!("unexpected angle {other:?}"),
+                },
+                GateInstruction::Cx(..) | GateInstruction::S(_) | GateInstruction::Sdg(_) => {}
+                other => panic!("unexpected gate {other:?}"),
+            }
+        }
+        read
+    }
+
+    const BLOCKS: [ConvBlock; 2] = [ConvBlock::Basic, ConvBlock::Cartan];
+    const PAIRINGS: [Pairing; 3] = [Pairing::EvenPairs, Pairing::OddPairs, Pairing::Alternating];
+
     #[test]
     fn plan_rejects_fewer_than_two_active_qubits() {
-        let layer = ConvLayer::new(ConvBlock::Basic);
-        let mut c = ctx(1);
-        assert!(matches!(
-            layer.plan(&mut c),
-            Err(ValidationError::NotEnoughQubits {
-                needed: 2,
-                active: 1,
-            })
-        ));
+        for pairing in [Pairing::EvenPairs, Pairing::Alternating] {
+            for active in [0, 1] {
+                let layer = ConvLayer {
+                    block: ConvBlock::Basic,
+                    pairing,
+                };
+                let mut c = ctx(active);
+                assert_eq!(
+                    layer.plan(&mut c).unwrap_err(),
+                    ValidationError::ConvNeedsQubits {
+                        pairing,
+                        needed: 2,
+                        active,
+                    }
+                );
+                assert_eq!(c.param_cursor, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn plan_rejects_odd_pairs_without_an_odd_pair() {
+        for block in BLOCKS {
+            for active in [1, 2] {
+                let layer = ConvLayer {
+                    block,
+                    pairing: Pairing::OddPairs,
+                };
+                let mut c = ctx(active);
+                assert_eq!(
+                    layer.plan(&mut c).unwrap_err(),
+                    ValidationError::ConvNeedsQubits {
+                        pairing: Pairing::OddPairs,
+                        needed: 3,
+                        active,
+                    }
+                );
+                // A rejected layer reserves nothing.
+                assert_eq!(c.param_cursor, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn plan_accepts_each_pairing_from_its_first_pair() {
+        // OddPairs from three qubits: its one pair (1,2) gets the whole block.
+        for (block, width) in [(ConvBlock::Basic, 4), (ConvBlock::Cartan, 3)] {
+            let layer = ConvLayer {
+                block,
+                pairing: Pairing::OddPairs,
+            };
+            let mut c = ctx(3);
+            assert_eq!(layer.plan(&mut c).unwrap().params, 0..width);
+            assert_eq!(c.param_cursor, width);
+        }
+        let layer = ConvLayer {
+            block: ConvBlock::Basic,
+            pairing: Pairing::OddPairs,
+        };
+        let alloc = layer.plan(&mut ctx(3)).unwrap();
+        let mut qc = ParameterizedCircuit::new(3);
+        layer.emit(&mut qc, &alloc, &[]).unwrap();
+        assert_eq!(
+            qc.gates(),
+            vec![
+                ry(1, 0),
+                ry(2, 1),
+                GateInstruction::Cx(1, 2),
+                ry(1, 2),
+                ry(2, 3),
+            ]
+        );
+
+        // EvenPairs and Alternating from two qubits: the pair (0,1).
+        for block in BLOCKS {
+            for pairing in [Pairing::EvenPairs, Pairing::Alternating] {
+                assert!(ConvLayer { block, pairing }.plan(&mut ctx(2)).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn every_reserved_parameter_is_read() {
+        // Whatever the block, the pairing and the width, a layer `plan`
+        // accepts emits at least one gate and reads every θ it reserved; a
+        // layer it refuses had no pair to act on.
+        for block in BLOCKS {
+            for pairing in PAIRINGS {
+                for n in 0..=6 {
+                    let layer = ConvLayer { block, pairing };
+                    match layer.plan(&mut ctx(n)) {
+                        Ok(alloc) => {
+                            let mut qc = ParameterizedCircuit::new(n);
+                            layer.emit(&mut qc, &alloc, &[]).unwrap();
+                            assert!(!qc.gates().is_empty(), "{block:?} {pairing:?} n={n}");
+                            assert_eq!(
+                                read_params(&qc),
+                                alloc.params.clone().collect::<BTreeSet<_>>(),
+                                "{block:?} {pairing:?} n={n}"
+                            );
+                        }
+                        Err(_) => assert!(
+                            layer.pairs(n).is_empty(),
+                            "{block:?} {pairing:?} n={n} refused with pairs to act on"
+                        ),
+                    }
+                }
+            }
+        }
     }
 }

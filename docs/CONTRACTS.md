@@ -2683,8 +2683,8 @@ batching and distribution are the oracle's concern.
   num_features)` compiles encoders alone (no ansatz, no readout) through the
   layers' own `plan` (`plan_layers`, shared with `QuantumModel::compile`), so a
   stack raises the errors it raises in a model (`AmplitudeEncoderNotFirst`,
-  `TooManyFeatures`, `NotEnoughQubits`, …); a layer that reserves parameters is
-  `ValidationError::TrainableLayerInFeatureMap`. Its `circuit(x)` is `U(x)`:
+  `TooManyFeatures`, `NotEnoughQubits`, `ConvNeedsQubits`, …); a layer that
+  reserves parameters is `ValidationError::TrainableLayerInFeatureMap`. Its `circuit(x)` is `U(x)`:
   gate for gate what a model's template emits for those layers, unmeasured, and
   a sample they reject is that `QmlError`. A `FidelityKernel` over the states of
   `x` (rows) and `y` (columns, or `x` again for the symmetric kernel) numbers
@@ -2741,9 +2741,11 @@ that does not depend on the data is checked where it is written, as a plain
 `predict` and `run` below are `polypus.ConfigurationError`):
 
 - each `Encoder`/`Ansatz` builder call re-checks its layers (a misplaced
-  amplitude encoder, pooling below two active qubits, a
-  `strongly_entangling` range out of bounds) and leaves the object as it was
-  when it raises;
+  amplitude encoder, pooling below two active qubits, a convolution whose
+  `pairing` selects no pair (`"odd_pairs"` below three active qubits,
+  `"even_pairs"` and `"alternating"` below two;
+  `ValidationError::ConvNeedsQubits`), a `strongly_entangling` range out of
+  bounds) and leaves the object as it was when it raises;
 - `Model` checks that the `Encoder` and the `Ansatz` have the same width, that
   some layer loads the data, that the layers reserve trainable parameters, and
   that the readout's positions exist among the qubits still active at the end;

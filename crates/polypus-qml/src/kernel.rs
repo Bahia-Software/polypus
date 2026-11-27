@@ -873,6 +873,30 @@ mod tests {
             FeatureMap::compile(2, trainable, 2).unwrap_err(),
             ValidationError::TrainableLayerInFeatureMap { layer: 1 }
         );
+        // A convolution with no pair to act on is refused by its own `plan`,
+        // before the trainable-layer check; one with a pair is still a
+        // trainable layer.
+        let conv_after_iqp = |pairing| {
+            vec![
+                Layer::Iqp(IqpEncoder::new()),
+                Layer::Conv(crate::ConvLayer {
+                    block: crate::ConvBlock::Basic,
+                    pairing,
+                }),
+            ]
+        };
+        assert_eq!(
+            FeatureMap::compile(2, conv_after_iqp(crate::Pairing::OddPairs), 2).unwrap_err(),
+            ValidationError::ConvNeedsQubits {
+                pairing: crate::Pairing::OddPairs,
+                needed: 3,
+                active: 2
+            }
+        );
+        assert_eq!(
+            FeatureMap::compile(2, conv_after_iqp(crate::Pairing::EvenPairs), 2).unwrap_err(),
+            ValidationError::TrainableLayerInFeatureMap { layer: 1 }
+        );
     }
 
     #[test]

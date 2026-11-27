@@ -609,6 +609,91 @@ class TestConvAndPool:
             _pool_model(4, "odd_positions"), theta
         )
 
+    @pytest.mark.parametrize("block", ["basic", "cartan"])
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda cls: cls(2).real_amplitudes(1),
+            lambda cls: cls(4).pool("basic"),
+        ],
+        ids=["two-qubits", "two-left-after-pooling"],
+    )
+    def test_odd_pairs_without_an_odd_pair_is_rejected_at_the_call(self, block, build):
+        # On two active qubits there is no odd pair (1, 2): the layer would
+        # reserve parameters no gate reads (#631).
+        from polypus.qml import Ansatz
+
+        ansatz = build(Ansatz)
+        state = (ansatz.num_layers, ansatz.num_params)
+        with pytest.raises(ValueError, match=r'"odd_pairs".*at least 3 active'):
+            ansatz.conv(block, pairing="odd_pairs")
+        assert (ansatz.num_layers, ansatz.num_params) == state
+
+    def test_odd_pairs_from_three_qubits_and_other_pairings_from_two_are_accepted(
+        self,
+    ):
+        """A control that passes before and after #631: the check refuses only
+        a pairing with no pair, never one with a pair to act on."""
+        from polypus.qml import Ansatz
+
+        assert Ansatz(3).conv("basic", "odd_pairs").num_params == 4
+        assert Ansatz(3).conv("cartan", "odd_pairs").num_params == 3
+        for block, width in (("basic", 4), ("cartan", 3)):
+            for pairing in ("even_pairs", "alternating"):
+                assert Ansatz(2).conv(block, pairing).num_params == width
+
+    def test_conv_below_two_qubits_names_the_convolution(self):
+        from polypus.qml import Ansatz
+
+        ansatz = Ansatz(2).pool("basic")
+        with pytest.raises(
+            ValueError, match=r'convolution layer with pairing "alternating"'
+        ):
+            ansatz.conv("basic")
+        assert ansatz.num_layers == 1
+
+    @pytest.mark.parametrize("pairing", ["even_pairs", "odd_pairs", "alternating"])
+    def test_the_message_spells_the_pairing_as_it_was_written(self, pairing):
+        # The name is parsed in the bindings and spelled back by polypus-qml:
+        # the two tables must agree for every pairing.
+        from polypus.qml import Ansatz
+
+        with pytest.raises(ValueError, match=f'pairing "{pairing}" needs'):
+            Ansatz(1).conv("basic", pairing)
+
+    @staticmethod
+    def _even_pairs_model():
+        from polypus.qml import Ansatz, Encoder, Model, Readout, Z
+
+        return Model(
+            Encoder(2).angle_encoder("ry"),
+            Ansatz(2).real_amplitudes(1).conv("basic", "even_pairs"),
+            Readout([Z(0)]),
+        )
+
+    def test_an_edited_spec_with_odd_pairs_on_two_qubits_is_a_value_error(self):
+        # `Model._from_spec` (unpickling) runs the builders' checks.
+        from polypus.qml import Model
+
+        _, (spec,) = self._even_pairs_model().__reduce__()
+        bad = spec.replace('"EvenPairs"', '"OddPairs"')
+        assert bad != spec, spec
+        with pytest.raises(ValueError, match=r'"odd_pairs".*at least 3 active'):
+            Model._from_spec(bad)
+
+    def test_load_refuses_a_saved_model_with_odd_pairs_on_two_qubits(self, tmp_path):
+        from polypus.qml import load
+
+        model = self._even_pairs_model()
+        path = tmp_path / "m.json"
+        model.bind([0.0] * model.num_params).save(path)
+        text = path.read_text()
+        bad = text.replace('"EvenPairs"', '"OddPairs"')
+        assert bad != text, text
+        path.write_text(bad)
+        with pytest.raises(ValueError, match=r'"odd_pairs".*at least 3 active'):
+            load(path)
+
 
 _COUNT_IDS = ["hardware-efficient", "real-amplitudes"]
 
