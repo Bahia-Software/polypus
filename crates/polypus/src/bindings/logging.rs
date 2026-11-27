@@ -241,14 +241,19 @@ pub fn init_logger(
 ///
 /// # Levels
 /// Which levels each `polypus` logger lets through is read from Python when
-/// this function runs and again at the start of every Polypus call that runs
-/// Rust code with the GIL released (`train`, `run_quantum_circuit`,
-/// `statevector`, `qml.train`, `qml.predict`, `Model.fit`,
-/// `TrainedModel.predict` and `run`, `qml.expval`, `qml.jacobian`, `qml.vjp`,
-/// `qml.kernel_matrix`, `calibrate_parallel_threshold`). Records are filtered
-/// against that snapshot without taking the GIL, so a level changed while a
-/// call runs is seen from the next call on. A record that passes the filter is
+/// this function runs and again at the start of each Polypus call that runs
+/// Rust code on worker threads, a complete list: `train`,
+/// `run_quantum_circuit`, `statevector`, `qml.train`, `qml.predict`,
+/// `Model.fit`, `TrainedModel.predict` and `run`, `qml.expval`,
+/// `qml.jacobian`, `qml.vjp`, `qml.kernel_matrix`,
+/// `calibrate_parallel_threshold`. Records are filtered against the levels
+/// read last without taking the GIL, so a level changed while a call runs is
+/// seen from the next of these calls on. A record that passes the filter is
 /// checked once more against the live logger before it is handled.
+///
+/// A record has no Python function (`funcName` is `None`), and one emitted on
+/// a thread Python did not start has the `threadName` Python gives such a
+/// thread, `Dummy-<n>`.
 ///
 /// # When Python is unavailable
 /// A record emitted while the interpreter cannot be reached (it is shutting

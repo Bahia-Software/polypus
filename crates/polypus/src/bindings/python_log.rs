@@ -15,7 +15,7 @@
 //! - **A disabled record never takes the GIL.** Which records Python wants is
 //!   read from Python ([`PythonLogBridge::refresh`]) only on a thread that
 //!   already holds the GIL: when the bridge is installed, and at the start of
-//!   every entry point that releases the GIL around code that logs
+//!   every entry point that runs code that logs on worker threads
 //!   ([`refresh_levels`]). Records are filtered against that snapshot, so a
 //!   level changed in Python in the middle of a call is seen from the next
 //!   call on. A record that passes is then checked once more against the live
@@ -36,11 +36,12 @@
 use std::fmt::{self, Write as _};
 use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use pyo3::prelude::*;
-use pyo3::types::{PyModule, PyTuple};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyDict, PyModule, PyString, PyTuple};
 
 use crate::infrastructure::attach_or;
 
@@ -177,6 +178,11 @@ pub(crate) struct PythonLogBridge {
     levels: RwLock<Snapshot>,
     /// The last ticket handed out by [`refresh`](Self::refresh); 0 = none.
     tickets: AtomicU64,
+    /// The last walk of the logger dictionary, which the next refresh reuses
+    /// if the dictionary has not changed. A refresh takes it out and puts its
+    /// own back, so the lock is never held while calling Python; two refreshes
+    /// at once simply both walk.
+    walk: Mutex<Option<Walk>>,
 }
 
 /// A level snapshot and the ticket of the refresh that took it.
@@ -195,6 +201,7 @@ impl PythonLogBridge {
                 levels: None,
             }),
             tickets: AtomicU64::new(0),
+            walk: Mutex::new(None),
         }
     }
 
@@ -224,7 +231,18 @@ impl PythonLogBridge {
         apply_max_level: bool,
     ) -> PyResult<Option<LevelFilter>> {
         let ticket = self.tickets.fetch_add(1, Ordering::Relaxed) + 1;
-        let cache = read_levels(py)?;
+        let previous = self
+            .walk
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let (cache, walk) = read_levels(py, previous)?;
+        let mut slot = self.walk.lock().unwrap_or_else(PoisonError::into_inner);
+        let replaced = slot.replace(walk);
+        drop(slot);
+        // Dropped after the guard: releasing Python objects can run Python
+        // code, which must not happen under a lock (docs/ENGINEERING.md §9).
+        drop(replaced);
         Ok(self.store(ticket, cache, apply_max_level))
     }
 
@@ -309,8 +327,7 @@ fn deliver(
     line: Option<u32>,
     message: &str,
 ) -> PyResult<()> {
-    let logging = PyModule::import(py, "logging")?;
-    let logger = logging.call_method1("getLogger", (name,))?;
+    let logger = get_logger(py, name)?;
     let levelno = python_level(level);
     if !logger
         .call_method1("isEnabledFor", (levelno,))?
@@ -334,6 +351,23 @@ fn deliver(
     Ok(())
 }
 
+/// `logging.getLogger(name)`. The function is looked up once per process: a
+/// record is delivered on every call, possibly in a hot loop, and importing
+/// `logging` each time is a needless cost. (`PyOnceLock` detaches before it
+/// waits for another thread's initialisation, and the initialisation logs
+/// nothing.)
+fn get_logger<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    static GET_LOGGER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    GET_LOGGER
+        .get_or_try_init(py, || {
+            PyModule::import(py, "logging")?
+                .getattr("getLogger")
+                .map(Bound::unbind)
+        })?
+        .bind(py)
+        .call1((name,))
+}
+
 /// What happens to a record when Python cannot be reached: an `ERROR` or
 /// `WARN` record becomes one line on stderr,
 /// `polypus: <LEVEL> <logger name>: <message>` (with Python's level name,
@@ -351,59 +385,160 @@ fn write_unavailable(level: Level, name: &str, message: &str) {
     );
 }
 
-/// Read, for every `polypus` logger, which levels it lets through.
+/// Read, for every `polypus` logger, which levels it lets through. Returns
+/// the snapshot and the walk of the logger dictionary it was read from, which
+/// the next call gets back as `previous`.
 ///
 /// `logging.getLogger("polypus")` is created first, so every name under it
-/// has an ancestor in the snapshot. The logger dictionary is copied before it
-/// is walked: the calls into Python below may let another thread create a
-/// logger, and the copy cannot change under the walk.
-fn read_levels(py: Python<'_>) -> PyResult<LevelCache> {
+/// has an ancestor in the snapshot. The logger dictionary holds every logger
+/// of the process, hundreds in an application that imports a few libraries,
+/// and this runs at the start of every entry point, so it is walked only when
+/// it has changed since `previous` ([`Walk::is_current`]); otherwise only the
+/// `polypus` loggers found then are asked again.
+fn read_levels(py: Python<'_>, previous: Option<Walk>) -> PyResult<(LevelCache, Walk)> {
     let logging = PyModule::import(py, "logging")?;
     let logger_class = logging.getattr("Logger")?;
-    let top = logging.call_method1("getLogger", ("polypus",))?;
+    let is_enabled_for = logger_class.getattr("isEnabledFor")?;
+    let top = get_logger(py, "polypus")?;
     let manager = top.getattr("manager")?;
     let disable: i32 = manager.getattr("disable")?.extract()?;
-    let loggers = manager.getattr("loggerDict")?.call_method0("copy")?;
+    let live = manager.getattr("loggerDict")?.cast_into::<PyDict>()?;
+    let walk = match previous {
+        Some(walk) if walk.is_current(&live)? => walk,
+        // The copy is walked, not the live dictionary: nothing else holds the
+        // copy, so it cannot change under the walk.
+        _ => Walk::new(&live.copy()?, &logger_class)?,
+    };
+    // The calls below run Python code, which may let another thread create a
+    // logger; the walk is ours and does not change, and the next refresh sees
+    // the new logger.
     let mut cache = LevelCache::default();
-    for item in loggers.call_method0("items")?.try_iter()? {
-        let (name, logger): (Bound<'_, PyAny>, Bound<'_, PyAny>) = item?.extract()?;
-        let Ok(name) = name.extract::<String>() else {
-            continue;
-        };
-        if name != "polypus" && !name.starts_with("polypus.") {
-            continue;
-        }
-        // A `PlaceHolder` stands for a name nobody created; a logger created
-        // under it later starts from its nearest real ancestor, as
-        // `LevelCache::enabled` assumes.
-        if !logger.is_instance(&logger_class)? {
-            continue;
-        }
-        cache.loggers.insert(name, levels_of(&logger, disable)?);
+    for entry in walk.entries.iter().filter(|entry| entry.is_logger) {
+        let levels = levels_of(entry.object.bind(py), disable, &is_enabled_for)?;
+        cache.loggers.insert(entry.name.clone(), levels);
     }
     if !cache.loggers.contains_key("polypus") {
-        cache
-            .loggers
-            .insert("polypus".to_owned(), levels_of(&top, disable)?);
+        cache.loggers.insert(
+            "polypus".to_owned(),
+            levels_of(&top, disable, &is_enabled_for)?,
+        );
     }
-    Ok(cache)
+    Ok((cache, walk))
 }
 
-/// The [`Levels`] of one Python logger. Each level is asked with
-/// `isEnabledFor`, never compared by name, so a custom level, a subclass's
-/// override and `logging.disable` are all honoured.
-fn levels_of(logger: &Bound<'_, PyAny>, disable: i32) -> PyResult<Levels> {
+/// The `polypus` entries of `logging`'s logger dictionary, as one walk of it
+/// found them (see [`read_levels`]).
+struct Walk {
+    /// The size of the dictionary walked.
+    len: usize,
+    /// Every entry named `polypus` or `polypus.*`.
+    entries: Vec<Entry>,
+}
+
+/// One `polypus` entry of the logger dictionary.
+struct Entry {
+    /// The entry's key, kept as the Python string to look the entry up again
+    /// without building a new one.
+    key: Py<PyString>,
+    /// The same name, for the snapshot.
+    name: String,
+    /// The object under the key: a logger, or a `PlaceHolder`.
+    object: Py<PyAny>,
+    /// Whether `object` is a logger. A `PlaceHolder` stands for a name nobody
+    /// created: it gets no levels, and a logger created under it later starts
+    /// from its nearest real ancestor, as `LevelCache::enabled` assumes.
+    is_logger: bool,
+}
+
+impl Walk {
+    /// Walk `loggers`, a dictionary nothing else can change while this runs.
+    fn new(loggers: &Bound<'_, PyDict>, logger_class: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let mut entries = Vec::new();
+        for (key, object) in loggers.iter() {
+            let Ok(key) = key.cast_into::<PyString>() else {
+                continue;
+            };
+            // A name that is not valid UTF-8 (a lone surrogate) is no
+            // `polypus` logger a record can name.
+            let Ok(name) = key.to_cow() else {
+                continue;
+            };
+            if name != "polypus" && !name.starts_with("polypus.") {
+                continue;
+            }
+            entries.push(Entry {
+                name: name.into_owned(),
+                is_logger: object.is_instance(logger_class)?,
+                key: key.unbind(),
+                object: object.unbind(),
+            });
+        }
+        Ok(Self {
+            len: loggers.len(),
+            entries,
+        })
+    }
+
+    /// Whether walking `loggers`, the live logger dictionary, again would find
+    /// the same `polypus` loggers. `logging` only ever adds an entry to it
+    /// (`getLogger` of a new name) or replaces a `PlaceHolder` with a logger
+    /// (`getLogger` of a name that had a descendant), so the same size and
+    /// the same object under every name walked mean that no `polypus` logger
+    /// was created since. Neither check runs Python code when the keys are
+    /// all strings, as `logging`'s are.
+    fn is_current(&self, loggers: &Bound<'_, PyDict>) -> PyResult<bool> {
+        if loggers.len() != self.len {
+            return Ok(false);
+        }
+        let py = loggers.py();
+        for entry in &self.entries {
+            match loggers.get_item(entry.key.bind(py))? {
+                Some(object) if object.is(&entry.object) => {}
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// The [`Levels`] of one Python logger. Levels are compared as numbers, never
+/// by name, so a custom level and `logging.disable` are honoured.
+///
+/// `own` is `isEnabledFor`'s answer. For a logger whose class keeps
+/// `logging.Logger.isEnabledFor`, that is computed here from what that method
+/// reads, its `disabled` flag, `logging.disable` and `getEffectiveLevel()`,
+/// with one call into Python instead of one per level; it does not consult the
+/// method's cache, which `setLevel` and `logging.disable` keep up to date. A
+/// class that overrides the method is asked once per level, so the override
+/// is honoured.
+fn levels_of(
+    logger: &Bound<'_, PyAny>,
+    disable: i32,
+    is_enabled_for: &Bound<'_, PyAny>,
+) -> PyResult<Levels> {
     let effective: i32 = logger.call_method0("getEffectiveLevel")?.extract()?;
     let mut levels = Levels::default();
+    for (level, levelno) in LEVELS {
+        if levelno > disable && levelno >= effective {
+            levels.inherited |= bit(level);
+        }
+    }
+    if logger
+        .get_type()
+        .getattr("isEnabledFor")?
+        .is(is_enabled_for)
+    {
+        if !logger.getattr("disabled")?.is_truthy()? {
+            levels.own = levels.inherited;
+        }
+        return Ok(levels);
+    }
     for (level, levelno) in LEVELS {
         if logger
             .call_method1("isEnabledFor", (levelno,))?
             .is_truthy()?
         {
             levels.own |= bit(level);
-        }
-        if levelno > disable && levelno >= effective {
-            levels.inherited |= bit(level);
         }
     }
     Ok(levels)
@@ -432,11 +567,15 @@ pub(crate) fn install(py: Python<'_>) -> PyResult<bool> {
 /// Take a new level snapshot for the installed bridge; a no-op, and cheap,
 /// when the bridge is not installed.
 ///
-/// Every entry point that releases the GIL around code that logs calls this
+/// Every entry point that runs code that logs on worker threads calls this
 /// first, on its own thread, before `py.detach`: records emitted while
-/// detached are filtered against this snapshot without taking the GIL. A
-/// failure to read the levels never fails the call: it is reported through
-/// `sys.unraisablehook` and the previous snapshot stays in force.
+/// detached are filtered against this snapshot without taking the GIL. Other
+/// calls that detach (`Circuit.from_qasm3`, `Circuit.compose`,
+/// `circuits.qft`, …) run single-threaded work and use the snapshot in force,
+/// which never deadlocks but may be older; `docs/guide/running.md` lists the
+/// calls that refresh. A failure to read the levels never fails the call: it
+/// is reported through `sys.unraisablehook` and the previous snapshot stays
+/// in force.
 pub(crate) fn refresh_levels(py: Python<'_>) {
     if !BRIDGE_INSTALLED.load(Ordering::Acquire) {
         return;
@@ -734,6 +873,133 @@ def attach(name, level):
             );
             assert!(bridge.wants("polypus.t4.mid.leaf", Level::Info));
             assert!(!bridge.wants("polypus.t4.mid.leaf", Level::Debug));
+        });
+    }
+
+    /// A walk is reused only while the dictionary keeps its size and the same
+    /// object under every `polypus` name the walk found: a logger added
+    /// anywhere, or a placeholder replaced by a logger, makes it stale. A
+    /// private dictionary stands in for `logging`'s, which other tests change.
+    #[test]
+    fn a_walk_is_current_until_the_logger_dictionary_changes() {
+        Python::initialize();
+        Python::attach(|py| {
+            let logging = PyModule::import(py, "logging").expect("logging imports");
+            let logger_class = logging.getattr("Logger").expect("logging.Logger");
+            let logger = |name: &str| logger_class.call1((name,)).expect("a logger is built");
+            let top = logger("polypus");
+            let placeholder = logging
+                .getattr("PlaceHolder")
+                .and_then(|class| class.call1((&top,)))
+                .expect("a placeholder is built");
+            let loggers = PyDict::new(py);
+            loggers.set_item("polypus", &top).expect("set");
+            loggers.set_item("polypus.walk", &placeholder).expect("set");
+            loggers.set_item("other", logger("other")).expect("set");
+            // A name that is not valid UTF-8 is skipped, not an error.
+            let surrogate = py
+                .eval(c"'polypus.\\udc80'", None, None)
+                .expect("a name with a lone surrogate");
+            loggers
+                .set_item(&surrogate, logger("other.surrogate"))
+                .expect("set");
+
+            let walk = Walk::new(&loggers, &logger_class).expect("the dictionary is walked");
+            let mut found: Vec<_> = walk
+                .entries
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.is_logger))
+                .collect();
+            found.sort_unstable();
+            assert_eq!(found, [("polypus", true), ("polypus.walk", false)]);
+            let current = |walk: &Walk| walk.is_current(&loggers).expect("the check runs");
+            assert!(current(&walk));
+
+            loggers
+                .set_item("other.child", logger("other.child"))
+                .expect("set");
+            assert!(!current(&walk), "a logger was added");
+            loggers.del_item("other.child").expect("del");
+            assert!(current(&walk));
+
+            loggers
+                .set_item("polypus.walk", logger("polypus.walk"))
+                .expect("set");
+            assert!(!current(&walk), "the placeholder became a logger");
+        });
+    }
+
+    /// A refresh after an earlier one sees a logger created in between, and
+    /// a placeholder that became a logger, though the dictionary keeps its
+    /// size in the second case.
+    #[test]
+    fn a_refresh_sees_the_loggers_created_since_the_last_one() {
+        Python::initialize();
+        let bridge = PythonLogBridge::new();
+        Python::attach(|py| {
+            // `polypus.t6.mid` is only a placeholder for now.
+            let _ = list_handler(py, "bridge_t6", "polypus.t6.mid.leaf", 30);
+            bridge.refresh(py, false).expect("the levels are read");
+            bridge
+                .refresh(py, false)
+                .expect("the levels are read again");
+            assert!(!bridge.wants("polypus.t6.new", Level::Debug));
+            assert!(!bridge.wants("polypus.t6.mid", Level::Debug));
+
+            let _ = list_handler(py, "bridge_t6b", "polypus.t6.new", 10);
+            bridge.refresh(py, false).expect("the levels are read");
+            assert!(bridge.wants("polypus.t6.new", Level::Debug), "a new logger");
+
+            let _ = list_handler(py, "bridge_t6c", "polypus.t6.mid", 10);
+            bridge.refresh(py, false).expect("the levels are read");
+            assert!(
+                bridge.wants("polypus.t6.mid", Level::Debug),
+                "a placeholder that became a logger"
+            );
+        });
+    }
+
+    /// A logger's own `disabled` flag silences it but not a new logger under
+    /// it, and a logger whose class overrides `isEnabledFor` is asked rather
+    /// than answered from its effective level.
+    #[test]
+    fn a_disabled_logger_and_an_overridden_is_enabled_for_are_honoured() {
+        Python::initialize();
+        let bridge = PythonLogBridge::new();
+        Python::attach(|py| {
+            let _ = list_handler(py, "bridge_t7", "polypus.t7", 10);
+            PyModule::from_code(
+                py,
+                c"
+import logging
+
+class ErrorsOnly(logging.Logger):
+    def isEnabledFor(self, level):
+        return level >= logging.ERROR
+
+def setup():
+    logging.getLogger('polypus.t7').disabled = True
+    picky = ErrorsOnly('polypus.t7picky')
+    picky.setLevel(logging.DEBUG)
+    picky.parent = logging.getLogger('polypus')
+    logging.Logger.manager.loggerDict['polypus.t7picky'] = picky
+",
+                c"bridge_t7c.py",
+                c"bridge_t7c",
+            )
+            .and_then(|module| module.call_method0("setup"))
+            .expect("the loggers are set up");
+            bridge.refresh(py, false).expect("the levels are read");
+            assert!(!bridge.wants("polypus.t7", Level::Error), "disabled");
+            assert!(
+                bridge.wants("polypus.t7.child", Level::Debug),
+                "a child does not inherit `disabled`"
+            );
+            assert!(
+                !bridge.wants("polypus.t7picky", Level::Warn),
+                "the override refuses WARNING at an effective level of DEBUG"
+            );
+            assert!(bridge.wants("polypus.t7picky", Level::Error));
         });
     }
 }
