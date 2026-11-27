@@ -324,11 +324,13 @@ jobs:
           PY
 
   # ── Pre-publish wheel smoke test ────────────────────────────────────────────
-  # ci.yml runs the test suite on Linux x86_64 only, so every built wheel is
-  # installed on its own platform and interpreter before anything is published:
-  # `import polypus` plus the README Bell circuit on the local simulator. pip
-  # picks the wheel matching the running interpreter from the downloaded set
-  # (no match fails the job), then installs it with its runtime deps from PyPI.
+  # ci.yml installs and tests the wheel on Linux x86_64, macOS and Windows, but
+  # only at the floor and latest Python, and runs the full test suite on Linux
+  # x86_64 only. So every built wheel is installed on its own platform and
+  # interpreter before anything is published: `import polypus` plus the README
+  # Bell circuit on the local simulator. pip picks the wheel matching the
+  # running interpreter from the downloaded set (no match fails the job), then
+  # installs it with its runtime deps from PyPI.
   smoke:
     name: smoke (${{ matrix.platform }} py${{ matrix.python-version }})
     needs: [linux, macos, windows]

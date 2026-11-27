@@ -354,25 +354,20 @@ impl ActsOn<'_> {
     }
 }
 
-impl GateInstruction {
-    /// Largest classical-bit index used by this instruction, if any.
-    /// `MeasureAll` is handled separately by the circuit (it needs `num_qubits`).
-    pub(crate) fn max_cbit(&self) -> Option<usize> {
-        match self {
-            GateInstruction::Measure { cbit, .. } => Some(*cbit),
-            _ => None,
-        }
-    }
-
-    /// The angle parameters of this instruction, in QASM argument order
-    /// (`theta, phi, lambda` for `u3`). Empty for parameter-free instructions.
-    ///
-    /// Exhaustive over the vocabulary (no wildcard arm): a new parameterised
-    /// gate cannot compile until it says what its parameters are, so builder
-    /// validation and `num_params` tracking can never silently skip it.
-    pub(crate) fn params(&self) -> impl Iterator<Item = &GateParam> + '_ {
+/// The angle fields of a built-in instruction, in [`AngleRef`] order, as
+/// `[Option<_>; MAX_GATE_PARAMS]`: `&GateParam`s for `&GateInstruction`,
+/// `&mut GateParam`s for `&mut GateInstruction` (match ergonomics bind the
+/// fields through whichever reference it is given). The one listing of a
+/// gate's angles: [`GateInstruction::angles`] and
+/// [`GateInstruction::angles_mut`] expand it, and everything else derives from
+/// them.
+///
+/// Exhaustive over the vocabulary (no wildcard arm): a new instruction cannot
+/// compile until it says which angles it has, in which order.
+macro_rules! angle_fields {
+    ($gate:expr) => {{
         use GateInstruction as G;
-        let params: [Option<&GateParam>; MAX_GATE_PARAMS] = match self {
+        match $gate {
             G::Rx { theta, .. }
             | G::Ry { theta, .. }
             | G::Rz { theta, .. }
@@ -402,6 +397,9 @@ impl GateInstruction {
                 gamma,
                 ..
             } => [Some(theta), Some(phi), Some(lam), Some(gamma)],
+            // The call of a declared gate has no angle of a built-in gate: its
+            // arguments live in `CustomGate`, which keeps them private so that
+            // new ones go through `with_arguments`' checks.
             G::H(_)
             | G::X(_)
             | G::Y(_)
@@ -429,185 +427,123 @@ impl GateInstruction {
             | G::Custom(_)
             | G::Barrier(_)
             | G::Measure { .. }
-            | G::MeasureAll => [None; MAX_GATE_PARAMS],
-        };
+            | G::MeasureAll => [None, None, None, None],
+        }
+    }};
+}
+
+impl GateInstruction {
+    /// Largest classical-bit index used by this instruction, if any.
+    /// `MeasureAll` is handled separately by the circuit (it needs `num_qubits`).
+    pub(crate) fn max_cbit(&self) -> Option<usize> {
+        match self {
+            GateInstruction::Measure { cbit, .. } => Some(*cbit),
+            _ => None,
+        }
+    }
+
+    /// The angles of this built-in instruction, in [`AngleRef`] order: the
+    /// order its fields and its OpenQASM 2.0 arguments list them (`θ, φ, λ`
+    /// for `U`, then `Cu`'s `γ`; `U2`'s `φ, λ`). Empty for a parameter-free
+    /// instruction, and for the call of a declared gate, whose arguments
+    /// ([`CustomGate::params`](crate::CustomGate::params)) are not angles of
+    /// a built-in gate.
+    ///
+    /// This is the definition of the order in which [`AngleRef`] numbers a
+    /// gate's angles (contract C-2).
+    ///
+    /// ```
+    /// use polypus_circuit::{GateInstruction, GateParam};
+    ///
+    /// let u = GateInstruction::U {
+    ///     qubit: 0,
+    ///     theta: GateParam::Fixed(0.1),
+    ///     phi: GateParam::Param(0),
+    ///     lam: GateParam::Fixed(0.3),
+    /// };
+    /// let angles: Vec<GateParam> = u.angles().copied().collect();
+    /// assert_eq!(
+    ///     angles,
+    ///     [GateParam::Fixed(0.1), GateParam::Param(0), GateParam::Fixed(0.3)]
+    /// );
+    /// assert_eq!(GateInstruction::H(0).angles().count(), 0);
+    /// ```
+    pub fn angles(&self) -> impl Iterator<Item = &GateParam> + '_ {
+        let fields: [Option<&GateParam>; MAX_GATE_PARAMS] = angle_fields!(self);
+        fields.into_iter().flatten()
+    }
+
+    /// The angles of this built-in instruction, mutably, in the order of
+    /// [`Self::angles`]. Empty for a parameter-free instruction and for the
+    /// call of a declared gate, whose arguments are not rewritten this way:
+    /// [`CustomGate::with_arguments`](crate::CustomGate::with_arguments)
+    /// checks new ones against the declaration.
+    ///
+    /// ```
+    /// use polypus_circuit::{GateInstruction, GateParam};
+    ///
+    /// let mut u = GateInstruction::U {
+    ///     qubit: 0,
+    ///     theta: GateParam::Fixed(0.1),
+    ///     phi: GateParam::Fixed(0.2),
+    ///     lam: GateParam::Fixed(0.3),
+    /// };
+    /// if let Some(phi) = u.angles_mut().nth(1) {
+    ///     *phi = GateParam::Param(0);
+    /// }
+    /// assert_eq!(
+    ///     u,
+    ///     GateInstruction::U {
+    ///         qubit: 0,
+    ///         theta: GateParam::Fixed(0.1),
+    ///         phi: GateParam::Param(0),
+    ///         lam: GateParam::Fixed(0.3),
+    ///     }
+    /// );
+    /// ```
+    pub fn angles_mut(&mut self) -> impl Iterator<Item = &mut GateParam> + '_ {
+        let fields: [Option<&mut GateParam>; MAX_GATE_PARAMS] = angle_fields!(self);
+        fields.into_iter().flatten()
+    }
+
+    /// The angle parameters of this instruction, in QASM argument order:
+    /// [`Self::angles`], then the arguments of a call of a declared gate.
+    /// Empty for parameter-free instructions.
+    ///
+    /// Derived from the exhaustive table of [`Self::angles`], so builder
+    /// validation and `num_params` tracking can never silently skip a new
+    /// parameterised gate.
+    pub(crate) fn params(&self) -> impl Iterator<Item = &GateParam> + '_ {
         // A call of a declared gate takes any number of arguments.
         let call_params: &[GateParam] = match self {
-            G::Custom(call) => call.params(),
+            GateInstruction::Custom(call) => call.params(),
             _ => &[],
         };
-        params.into_iter().flatten().chain(call_params)
+        self.angles().chain(call_params)
     }
 
     /// A copy of this instruction with every angle parameter replaced by
-    /// `f(parameter)`, visited in QASM argument order; the first error aborts.
-    /// Used to bind free parameters
+    /// `f(parameter)`, visited in QASM argument order (that of [`Self::params`]);
+    /// the first error aborts. Used to bind free parameters
     /// ([`ParameterizedCircuit::assign_parameters`](crate::ParameterizedCircuit::assign_parameters)).
     ///
-    /// Exhaustive over the vocabulary, for the same reason as [`Self::params`].
+    /// Derived from the exhaustive table of [`Self::angles`], for the same
+    /// reason as [`Self::params`]; a call of a declared gate rebuilds its
+    /// argument list (`CustomGate::with_params`).
     pub(crate) fn try_map_params<E>(
         &self,
         mut f: impl FnMut(&GateParam) -> Result<GateParam, E>,
     ) -> Result<GateInstruction, E> {
-        use GateInstruction as G;
-        Ok(match self {
-            G::Rx { qubit, theta } => G::Rx {
-                qubit: *qubit,
-                theta: f(theta)?,
-            },
-            G::Ry { qubit, theta } => G::Ry {
-                qubit: *qubit,
-                theta: f(theta)?,
-            },
-            G::Rz { qubit, theta } => G::Rz {
-                qubit: *qubit,
-                theta: f(theta)?,
-            },
-            G::Rzz { q0, q1, theta } => G::Rzz {
-                q0: *q0,
-                q1: *q1,
-                theta: f(theta)?,
-            },
-            G::Rxx { q0, q1, theta } => G::Rxx {
-                q0: *q0,
-                q1: *q1,
-                theta: f(theta)?,
-            },
-            G::Cp { q0, q1, theta } => G::Cp {
-                q0: *q0,
-                q1: *q1,
-                theta: f(theta)?,
-            },
-            G::U {
-                qubit,
-                theta,
-                phi,
-                lam,
-            } => G::U {
-                qubit: *qubit,
-                theta: f(theta)?,
-                phi: f(phi)?,
-                lam: f(lam)?,
-            },
-            G::Crx {
-                control,
-                target,
-                theta,
-            } => G::Crx {
-                control: *control,
-                target: *target,
-                theta: f(theta)?,
-            },
-            G::Cry {
-                control,
-                target,
-                theta,
-            } => G::Cry {
-                control: *control,
-                target: *target,
-                theta: f(theta)?,
-            },
-            G::Crz {
-                control,
-                target,
-                theta,
-            } => G::Crz {
-                control: *control,
-                target: *target,
-                theta: f(theta)?,
-            },
-            G::Cu1 { q0, q1, theta } => G::Cu1 {
-                q0: *q0,
-                q1: *q1,
-                theta: f(theta)?,
-            },
-            G::Cu3 {
-                control,
-                target,
-                theta,
-                phi,
-                lam,
-            } => G::Cu3 {
-                control: *control,
-                target: *target,
-                theta: f(theta)?,
-                phi: f(phi)?,
-                lam: f(lam)?,
-            },
-            G::Cu {
-                control,
-                target,
-                theta,
-                phi,
-                lam,
-                gamma,
-            } => G::Cu {
-                control: *control,
-                target: *target,
-                theta: f(theta)?,
-                phi: f(phi)?,
-                lam: f(lam)?,
-                gamma: f(gamma)?,
-            },
-            G::U0 { qubit, gamma } => G::U0 {
-                qubit: *qubit,
-                gamma: f(gamma)?,
-            },
-            G::P { qubit, lam } => G::P {
-                qubit: *qubit,
-                lam: f(lam)?,
-            },
-            G::U1 { qubit, lam } => G::U1 {
-                qubit: *qubit,
-                lam: f(lam)?,
-            },
-            G::U2 { qubit, phi, lam } => G::U2 {
-                qubit: *qubit,
-                phi: f(phi)?,
-                lam: f(lam)?,
-            },
-            G::UGate {
-                qubit,
-                theta,
-                phi,
-                lam,
-            } => G::UGate {
-                qubit: *qubit,
-                theta: f(theta)?,
-                phi: f(phi)?,
-                lam: f(lam)?,
-            },
-            G::Custom(call) => G::Custom(
-                call.with_params(call.params().iter().map(&mut f).collect::<Result<_, E>>()?),
-            ),
-            G::H(_)
-            | G::X(_)
-            | G::Y(_)
-            | G::Z(_)
-            | G::S(_)
-            | G::T(_)
-            | G::Sdg(_)
-            | G::Tdg(_)
-            | G::Id(_)
-            | G::Sx(_)
-            | G::Sxdg(_)
-            | G::Cx(..)
-            | G::Cz(..)
-            | G::Swap(..)
-            | G::Cy(..)
-            | G::Ch(..)
-            | G::Csx(..)
-            | G::Ccx(..)
-            | G::Cswap(..)
-            | G::Rccx(..)
-            | G::Rc3x(..)
-            | G::C3x(..)
-            | G::C3sqrtx(..)
-            | G::C4x(..)
-            | G::Barrier(_)
-            | G::Measure { .. }
-            | G::MeasureAll => self.clone(),
-        })
+        if let GateInstruction::Custom(call) = self {
+            return Ok(GateInstruction::Custom(call.with_params(
+                call.params().iter().map(&mut f).collect::<Result<_, E>>()?,
+            )));
+        }
+        let mut gate = self.clone();
+        for angle in gate.angles_mut() {
+            *angle = f(angle)?;
+        }
+        Ok(gate)
     }
 
     /// A copy of this instruction with every qubit `q` it refers to replaced
@@ -1489,7 +1425,7 @@ impl GateInstruction {
 /// respect to.
 ///
 /// `angle` counts the gate's angles in the order its fields (and its OpenQASM
-/// arguments) list them:
+/// arguments) list them, which [`GateInstruction::angles`] defines:
 ///
 /// - `0`, the only one, for `Rx`, `Ry`, `Rz`, `Rxx`, `Rzz`, `Crx`, `Cry`,
 ///   `Crz`, `Cp`, `Cu1`, `P`, `U1` and `U0`;
@@ -1497,8 +1433,8 @@ impl GateInstruction {
 /// - `φ, λ` (`0, 1`) for `U2`, whose `θ` is fixed at `π/2`;
 /// - `θ, φ, λ, γ` (`0, 1, 2, 3`) for `Cu`.
 ///
-/// It is only a reference: whether the gate has that angle is checked where it
-/// is used.
+/// A call of a declared gate has none. It is only a reference: whether the
+/// gate has that angle is checked where it is used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AngleRef {
     /// The gate's position in the circuit's instruction list.
@@ -1882,6 +1818,263 @@ mod tests {
                 num_params: 0
             })
         );
+    }
+
+    /// A call of a declared gate with two arguments, `g(0.25, 0.5) q[0];`.
+    fn declared_call() -> GateInstruction {
+        let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n\
+                   gate g(s, t) a { rz(s) a; ry(t) a; }\n\
+                   qreg q[1];\ng(0.25, 0.5) q[0];\n";
+        let imported = crate::ParameterizedCircuit::from_qasm2(src).unwrap();
+        imported.gates()[0].clone()
+    }
+
+    /// One instruction of every kind, each with the number of angles it
+    /// takes, written out here independently of `angle_fields!`: none for a
+    /// parameter-free instruction, a barrier, a measurement or the call of a
+    /// declared gate; two for `U2`; three for `U`, `UGate` and `Cu3`; four for
+    /// `Cu`; one for every other kind. Fails if a kind is missing.
+    fn every_kind_with_its_angle_count() -> Vec<(GateInstruction, usize)> {
+        use GateInstruction as G;
+        let a = GateParam::Fixed(0.5);
+        let gates = vec![
+            (G::H(0), 0),
+            (G::X(0), 0),
+            (G::Y(0), 0),
+            (G::Z(0), 0),
+            (G::S(0), 0),
+            (G::T(0), 0),
+            (G::Sdg(0), 0),
+            (G::Tdg(0), 0),
+            (G::Id(0), 0),
+            (G::Rx { qubit: 0, theta: a }, 1),
+            (G::Ry { qubit: 0, theta: a }, 1),
+            (G::Rz { qubit: 0, theta: a }, 1),
+            (G::Cx(0, 1), 0),
+            (G::Cz(0, 1), 0),
+            (G::Swap(0, 1), 0),
+            (
+                G::Rzz {
+                    q0: 0,
+                    q1: 1,
+                    theta: a,
+                },
+                1,
+            ),
+            (
+                G::Rxx {
+                    q0: 0,
+                    q1: 1,
+                    theta: a,
+                },
+                1,
+            ),
+            (
+                G::Cp {
+                    q0: 0,
+                    q1: 1,
+                    theta: a,
+                },
+                1,
+            ),
+            (
+                G::U {
+                    qubit: 0,
+                    theta: a,
+                    phi: a,
+                    lam: a,
+                },
+                3,
+            ),
+            (G::Sx(0), 0),
+            (G::Sxdg(0), 0),
+            (G::Cy(0, 1), 0),
+            (G::Ch(0, 1), 0),
+            (G::Csx(0, 1), 0),
+            (G::Ccx(0, 1, 2), 0),
+            (G::Cswap(0, 1, 2), 0),
+            (
+                G::Crx {
+                    control: 0,
+                    target: 1,
+                    theta: a,
+                },
+                1,
+            ),
+            (
+                G::Cry {
+                    control: 0,
+                    target: 1,
+                    theta: a,
+                },
+                1,
+            ),
+            (
+                G::Crz {
+                    control: 0,
+                    target: 1,
+                    theta: a,
+                },
+                1,
+            ),
+            (
+                G::Cu1 {
+                    q0: 0,
+                    q1: 1,
+                    theta: a,
+                },
+                1,
+            ),
+            (
+                G::Cu3 {
+                    control: 0,
+                    target: 1,
+                    theta: a,
+                    phi: a,
+                    lam: a,
+                },
+                3,
+            ),
+            (
+                G::Cu {
+                    control: 0,
+                    target: 1,
+                    theta: a,
+                    phi: a,
+                    lam: a,
+                    gamma: a,
+                },
+                4,
+            ),
+            (G::Barrier(vec![0, 1]), 0),
+            (G::Measure { qubit: 0, cbit: 0 }, 0),
+            (G::MeasureAll, 0),
+            (declared_call(), 0),
+            (G::U0 { qubit: 0, gamma: a }, 1),
+            (G::Rccx(0, 1, 2), 0),
+            (G::Rc3x(0, 1, 2, 3), 0),
+            (G::C3x(0, 1, 2, 3), 0),
+            (G::C3sqrtx(0, 1, 2, 3), 0),
+            (G::C4x(0, 1, 2, 3, 4), 0),
+            (G::P { qubit: 0, lam: a }, 1),
+            (G::U1 { qubit: 0, lam: a }, 1),
+            (
+                G::U2 {
+                    qubit: 0,
+                    phi: a,
+                    lam: a,
+                },
+                2,
+            ),
+            (
+                G::UGate {
+                    qubit: 0,
+                    theta: a,
+                    phi: a,
+                    lam: a,
+                },
+                3,
+            ),
+        ];
+        let mut seen = [false; G::KINDS];
+        for (gate, _) in &gates {
+            seen[gate.kind_index()] = true;
+        }
+        let missing: Vec<usize> = (0..G::KINDS).filter(|&k| !seen[k]).collect();
+        assert!(missing.is_empty(), "instruction kinds missing: {missing:?}");
+        gates
+    }
+
+    /// Each named angle field of a multi-angle gate holds `Param(k)` for its
+    /// angle `k` (`U`/`UGate`/`Cu3`: `θ, φ, λ`; `U2`: `φ, λ`; `Cu`: `θ, φ, λ,
+    /// γ`), written out here independently of `angle_fields!`.
+    fn assert_named_fields_in_order(gate: &GateInstruction) {
+        use GateInstruction as G;
+        let p = GateParam::Param;
+        match gate {
+            G::U {
+                theta, phi, lam, ..
+            }
+            | G::UGate {
+                theta, phi, lam, ..
+            }
+            | G::Cu3 {
+                theta, phi, lam, ..
+            } => assert_eq!([*theta, *phi, *lam], [p(0), p(1), p(2)], "{gate:?}"),
+            G::U2 { phi, lam, .. } => assert_eq!([*phi, *lam], [p(0), p(1)], "{gate:?}"),
+            G::Cu {
+                theta,
+                phi,
+                lam,
+                gamma,
+                ..
+            } => assert_eq!(
+                [*theta, *phi, *lam, *gamma],
+                [p(0), p(1), p(2), p(3)],
+                "{gate:?}"
+            ),
+            _ => {}
+        }
+    }
+
+    /// `angles` and `angles_mut` list each kind's angles, as many as the
+    /// table above says, in the same order, and that order is the fields'
+    /// (`AngleRef`'s): angle `k` written through `angles_mut` lands in the
+    /// field named for it. A call of a declared gate has no angle, but keeps
+    /// its arguments in `params`.
+    #[test]
+    fn angles_count_and_order_per_kind() {
+        let p = GateParam::Param;
+        for (mut gate, n) in every_kind_with_its_angle_count() {
+            assert_eq!(gate.angles().count(), n, "{gate:?}");
+            assert_eq!(gate.angles_mut().count(), n, "{gate:?}");
+            for (k, angle) in gate.angles_mut().enumerate() {
+                *angle = p(k);
+            }
+            assert_eq!(
+                gate.angles().copied().collect::<Vec<_>>(),
+                (0..n).map(p).collect::<Vec<_>>(),
+                "{gate:?}"
+            );
+            assert_named_fields_in_order(&gate);
+        }
+        let call = declared_call();
+        assert_eq!(call.angles().count(), 0);
+        assert_eq!(
+            call.params().copied().collect::<Vec<_>>(),
+            [GateParam::Fixed(0.25), GateParam::Fixed(0.5)]
+        );
+    }
+
+    /// `try_map_params` calls `f` once per parameter — a built-in gate's
+    /// angles, a declared gate's arguments — and puts each result back where
+    /// the parameter it was given came from: `f` returning `0, 1, …` gives a
+    /// gate whose parameters read `0, 1, …` in order, on the same qubits, and
+    /// each result lands in the named field it belongs to.
+    #[test]
+    fn try_map_params_visits_angles_then_call_arguments() {
+        for (gate, angles) in every_kind_with_its_angle_count() {
+            let n = match &gate {
+                GateInstruction::Custom(call) => call.params().len(),
+                _ => angles,
+            };
+            let mut calls = 0;
+            let mapped = gate
+                .try_map_params(|_| -> Result<GateParam, ()> {
+                    calls += 1;
+                    Ok(GateParam::Param(calls - 1))
+                })
+                .unwrap();
+            assert_eq!(calls, n, "{gate:?}");
+            assert_eq!(
+                mapped.params().copied().collect::<Vec<_>>(),
+                (0..n).map(GateParam::Param).collect::<Vec<_>>(),
+                "{gate:?}"
+            );
+            assert_eq!(mapped.kind_index(), gate.kind_index(), "{gate:?}");
+            assert_eq!(mapped.acts_on(), gate.acts_on(), "{gate:?}");
+            assert_named_fields_in_order(&mapped);
+        }
     }
 
     #[test]

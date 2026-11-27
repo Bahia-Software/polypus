@@ -1,8 +1,10 @@
 [build-system]
-# 1.9.2 is the first maturin that writes `license` as a PEP 639
-# License-Expression (1.8.0 and 1.8.1 cannot parse `license-files`). CI builds
-# with this floor (python-floors job).
-requires = ["maturin>=1.9.2,<2.0"]
+# 1.9.4 is the first maturin that exports `PYO3_BUILD_EXTENSION_MODULE` to the
+# cargo builds it runs, the signal PyO3 0.29 reads in place of its deprecated
+# `extension-module` feature. 1.9.2 was already needed to write `license` as a
+# PEP 639 License-Expression (1.8.0 and 1.8.1 cannot parse `license-files`).
+# CI builds with this floor (python-floors job).
+requires = ["maturin>=1.9.4,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -83,6 +85,11 @@ Issues = "https://github.com/Bahia-Software/polypus/issues"
 # `debug-logs` sets the compile-time log ceiling of the wheel (the crate has no
 # default level): `init_logger(level="debug")` then shows optimizer progress,
 # and `trace!` stays compiled out. The runtime level filters below it.
+# A `--features` on maturin's command line replaces this list instead of
+# extending it. The guard in `crates/polypus/src/lib.rs` that fails a wheel
+# with `polypus-qml`'s `test-support` on still applies then: it also reads
+# `PYO3_BUILD_EXTENSION_MODULE`, which maturin exports (see `[build-system]`
+# above).
 features = ["extension-module", "debug-logs"]
 # The repo is a Cargo workspace; the PyO3 extension crate lives here.
 manifest-path = "crates/polypus/Cargo.toml"

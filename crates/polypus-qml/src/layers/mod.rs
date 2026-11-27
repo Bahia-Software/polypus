@@ -45,6 +45,33 @@ pub(crate) fn odd_pairs(n: usize) -> Vec<(usize, usize)> {
     (0..(n - 1) / 2).map(|k| (2 * k + 1, 2 * k + 2)).collect()
 }
 
+/// How many pairs [`even_pairs`] gives over `n` logical positions.
+pub(crate) fn even_pair_count(n: usize) -> usize {
+    n / 2
+}
+
+/// How many pairs [`odd_pairs`] gives over `n` logical positions.
+pub(crate) fn odd_pair_count(n: usize) -> usize {
+    n.saturating_sub(1) / 2
+}
+
+/// How many pairs [`entanglement_pairs`] gives over `n` logical positions, or
+/// `None` if that does not fit in a `usize` (a `Full` pattern over some
+/// 6·10^9 positions or more).
+pub(crate) fn entanglement_pair_count(n: usize, entanglement: Entanglement) -> Option<usize> {
+    if n < 2 {
+        return Some(0);
+    }
+    match entanglement {
+        Entanglement::Linear => Some(n - 1),
+        Entanglement::Circular => Some(n),
+        // n·(n − 1)/2, halving whichever factor is even so that only the
+        // product itself can overflow.
+        Entanglement::Full if n % 2 == 0 => (n / 2).checked_mul(n - 1),
+        Entanglement::Full => n.checked_mul((n - 1) / 2),
+    }
+}
+
 /// The pairs of logical positions an [`Entanglement`] pattern selects over `n`
 /// active qubits: `Linear` → `(0,1),…,(n-2,n-1)`; `Circular` → `Linear` plus
 /// the wrap-around `(n-1,0)`; `Full` → every `(i,j)` with `i < j`, in
@@ -163,6 +190,118 @@ impl LayerOps for Layer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every layer configuration the count test plans and emits over `n`
+    /// active qubits, with the feature count each encoder is compiled for.
+    fn configurations(n: usize) -> Vec<(Layer, usize)> {
+        let patterns = [
+            Entanglement::Linear,
+            Entanglement::Circular,
+            Entanglement::Full,
+        ];
+        let mut out = Vec::new();
+        for reps in [0, 1, 3] {
+            for entanglement in patterns {
+                for final_rotation_layer in [false, true] {
+                    for rotations in [
+                        vec![],
+                        vec![RotationAxis::Ry],
+                        vec![RotationAxis::Rx, RotationAxis::Ry, RotationAxis::Rz],
+                    ] {
+                        let ansatz = HardwareEfficientAnsatz {
+                            reps,
+                            rotations,
+                            entangler: Entangler::Cz,
+                            entanglement,
+                            final_rotation_layer,
+                        };
+                        out.push((Layer::HardwareEfficient(ansatz), 0));
+                    }
+                }
+            }
+            out.push((
+                Layer::StronglyEntangling(StronglyEntanglingAnsatz::new(reps)),
+                0,
+            ));
+            if n >= 2 {
+                let ansatz = StronglyEntanglingAnsatz {
+                    ranges: Some(vec![n - 1; reps]),
+                    entangler: Entangler::Cz,
+                    ..StronglyEntanglingAnsatz::new(reps)
+                };
+                out.push((Layer::StronglyEntangling(ansatz), 0));
+            }
+            out.push((
+                Layer::SimplifiedTwoDesign(SimplifiedTwoDesignAnsatz::new(reps)),
+                0,
+            ));
+        }
+        if n >= 2 {
+            for block in [ConvBlock::Basic, ConvBlock::Cartan] {
+                for pairing in [Pairing::EvenPairs, Pairing::OddPairs, Pairing::Alternating] {
+                    // Two qubits have no odd pair, and issue #631 refuses a
+                    // convolution that selects none, so this test leaves the
+                    // case out whichever of the two lands first.
+                    if pairing == Pairing::OddPairs && n < 3 {
+                        continue;
+                    }
+                    out.push((Layer::Conv(ConvLayer { block, pairing }), 0));
+                }
+            }
+            for keep in [KeepRule::EvenPositions, KeepRule::OddPositions] {
+                let pool = PoolLayer {
+                    block: PoolBlock::Basic,
+                    keep,
+                };
+                out.push((Layer::Pool(pool), 0));
+            }
+        }
+        for f in 0..=n {
+            for axis in [RotationAxis::Rx, RotationAxis::Ry, RotationAxis::Rz] {
+                for prepend_hadamard in [false, true] {
+                    let angle = AngleEncoder {
+                        axis,
+                        prepend_hadamard,
+                    };
+                    out.push((Layer::AngleEncoder(angle), f));
+                }
+            }
+            for entanglement in patterns {
+                out.push((Layer::Iqp(IqpEncoder { entanglement }), f));
+            }
+            out.push((Layer::Basis(BasisEncoder), f));
+        }
+        // A zero sample has no norm to prepare, so at least one feature.
+        for f in (1..=n).chain([1 << n]) {
+            out.push((Layer::AmplitudeEncoder(AmplitudeEncoder), f));
+        }
+        out
+    }
+
+    #[test]
+    fn plan_counts_exactly_the_gates_emit_appends() {
+        for n in 1..=5 {
+            for (layer, f) in configurations(n) {
+                let mut ctx = LayerContext {
+                    // Non-contiguous physical qubits, as after a pooling.
+                    active: (0..n).map(|q| 2 * q + 1).collect(),
+                    num_features: f,
+                    param_cursor: 0,
+                    layers_planned: 0,
+                    gate_count: 0,
+                };
+                let alloc = layer.plan(&mut ctx).unwrap();
+                let mut qc = ParameterizedCircuit::new(2 * n + 1);
+                // Every feature `1.0`: the basis encoder's most gates.
+                layer.emit(&mut qc, &alloc, &vec![1.0; f]).unwrap();
+                assert_eq!(
+                    ctx.gate_count,
+                    qc.gates().len(),
+                    "n = {n}, {f} feature(s): {layer:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn linear_pairs_form_a_chain() {

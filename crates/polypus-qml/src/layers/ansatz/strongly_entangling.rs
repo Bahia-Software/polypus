@@ -83,15 +83,18 @@ impl LayerOps for StronglyEntanglingAnsatz {
                 }
             }
         }
-        // Three fresh θ per (layer, active qubit). The num_params == 0 case is
-        // caught model-wide by NoTrainableParams.
-        let count = n
+        // Three fresh θ, each its own rotation gate, per (layer, active
+        // qubit), and with two or more active qubits one entangler per
+        // position per layer. The num_params == 0 case is caught model-wide by
+        // NoTrainableParams.
+        let params = n
             .checked_mul(3)
-            .and_then(|per_layer| per_layer.checked_mul(self.reps))
-            .ok_or(ValidationError::TooManyParams {
-                layer: ctx.layers_planned,
-            })?;
-        let params = ctx.reserve(count)?;
+            .and_then(|per_layer| per_layer.checked_mul(self.reps));
+        let ring = if n >= 2 { n } else { 0 };
+        let gates = ring
+            .checked_mul(self.reps)
+            .and_then(|entanglers| params?.checked_add(entanglers));
+        let params = ctx.reserve(gates, params)?;
         Ok(LayerAllocation {
             params,
             active: ctx.active.clone(),
@@ -143,6 +146,8 @@ impl LayerOps for StronglyEntanglingAnsatz {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::SizeLimit;
+    use crate::model::MAX_MODEL_GATES;
 
     fn ctx(num_qubits: usize) -> LayerContext {
         LayerContext {
@@ -150,6 +155,7 @@ mod tests {
             num_features: 0,
             param_cursor: 0,
             layers_planned: 0,
+            gate_count: 0,
         }
     }
 
@@ -346,10 +352,12 @@ mod tests {
     }
 
     #[test]
-    fn plan_rejects_a_param_count_that_does_not_fit() {
+    fn plan_rejects_a_gate_count_that_does_not_fit() {
+        let too_large = |layer, reason| ValidationError::ModelTooLarge { layer, reason };
         // 3 × 2 qubits × reps overflows.
         let mut c = LayerContext {
             param_cursor: 7,
+            gate_count: 11,
             layers_planned: 3,
             ..ctx(2)
         };
@@ -357,20 +365,34 @@ mod tests {
             StronglyEntanglingAnsatz::new(usize::MAX)
                 .plan(&mut c)
                 .unwrap_err(),
-            ValidationError::TooManyParams { layer: 3 }
+            too_large(3, SizeLimit::Overflow)
         );
-        assert_eq!(c.param_cursor, 7);
-        // A count that fits on its own but not after the earlier layers'.
+        // A rejected layer counts nothing.
+        assert_eq!((c.param_cursor, c.gate_count), (7, 11));
+        // 3·reps = usize::MAX gates on one qubit fit in a usize but not in
+        // the budget; after one earlier gate they no longer fit in a usize
+        // either.
+        let ansatz = StronglyEntanglingAnsatz::new(usize::MAX / 3);
+        assert_eq!(
+            ansatz.plan(&mut ctx(1)).unwrap_err(),
+            too_large(
+                0,
+                SizeLimit::Budget {
+                    gates: usize::MAX,
+                    max_gates: MAX_MODEL_GATES,
+                }
+            )
+        );
         let mut c = LayerContext {
-            param_cursor: usize::MAX - 5,
+            gate_count: 1,
             layers_planned: 1,
-            ..ctx(2)
+            ..ctx(1)
         };
         assert_eq!(
-            StronglyEntanglingAnsatz::new(1).plan(&mut c).unwrap_err(),
-            ValidationError::TooManyParams { layer: 1 }
+            ansatz.plan(&mut c).unwrap_err(),
+            too_large(1, SizeLimit::Overflow)
         );
-        assert_eq!(c.param_cursor, usize::MAX - 5);
+        assert_eq!((c.param_cursor, c.gate_count), (0, 1));
     }
 
     #[test]

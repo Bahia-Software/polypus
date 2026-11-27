@@ -12,13 +12,16 @@
 //!   `q[k] -> c[k]` of every qubit in order are written, and read back, as
 //!   `barrier q;` and `measure q -> c;` (the canonical form; `normalized`),
 //!   in OpenQASM 2.0 as in OpenQASM 3; any other barrier or measurement is
-//!   kept as built.
+//!   kept as built. A built-in gate's angles, as `GateInstruction::angles`
+//!   numbers them (the order of `AngleRef`), are its OpenQASM 2.0 arguments
+//!   in order.
 //! - **C-4 · Terminal measurement placement.** A gate acting on an
 //!   already-measured qubit is rejected by the builder, the QASM importer and
 //!   the QIR exporter (the simulator half lives in the `polypus-sim` tests).
 
 use polypus_circuit::{
-    CircuitError, GateInstruction, GateParam, Param, ParamExpr, ParameterizedCircuit,
+    CircuitError, ConcreteCircuit, GateInstruction, GateParam, Param, ParamExpr,
+    ParameterizedCircuit,
 };
 use std::collections::BTreeSet;
 
@@ -283,6 +286,63 @@ fn c2_every_instruction_kind_is_inverted_or_refused() {
     assert!(
         missing.is_empty(),
         "instruction kinds not inverted: {missing:?}"
+    );
+}
+
+/// A built-in gate's angles, in the order `GateInstruction::angles` lists
+/// them — the order of `AngleRef` — are its OpenQASM 2.0 arguments, in
+/// order: with angle `k` set to `(k + 1) / 8` (exact, and written that way),
+/// every exported statement reads `name(0.125, 0.25, …)`, as many as the gate
+/// has angles, and a gate with none has no argument list. The exporter writes
+/// each gate's fields by hand, so it is the reference the order is held to.
+/// Every kind is exercised (the call of a declared gate, whose arguments are
+/// not angles, is skipped), so a new instruction fails here until
+/// `full_vocabulary` has it.
+#[test]
+fn c2_angles_follow_the_qasm_argument_order() {
+    let declared = declared_gate_call().kind_index();
+    let mut seen = [false; GateInstruction::KINDS];
+    for gate in full_vocabulary()
+        .gates()
+        .iter()
+        .chain([&GateInstruction::MeasureAll])
+    {
+        seen[gate.kind_index()] = true;
+        if gate.kind_index() == declared {
+            assert_eq!(gate.angles().count(), 0, "{gate:?}");
+            continue;
+        }
+        let mut gate = gate.clone();
+        for (k, angle) in gate.angles_mut().enumerate() {
+            *angle = GateParam::Fixed((k + 1) as f64 / 8.0);
+        }
+        let expected: Vec<f64> = (0..gate.angles().count())
+            .map(|k| (k + 1) as f64 / 8.0)
+            .collect();
+        let qasm = ConcreteCircuit::try_new(5, vec![gate.clone()])
+            .unwrap()
+            .try_to_qasm2()
+            .unwrap();
+        let statement = qasm
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap();
+        let head = statement.split_whitespace().next().unwrap();
+        let arguments: Vec<f64> = match head.split_once('(') {
+            Some((_, rest)) => rest
+                .trim_end_matches(')')
+                .split(',')
+                .map(|a| a.trim().parse().unwrap())
+                .collect(),
+            None => Vec::new(),
+        };
+        assert_eq!(arguments, expected, "{gate:?}: {statement}");
+    }
+    let missing: Vec<usize> = (0..GateInstruction::KINDS).filter(|&k| !seen[k]).collect();
+    assert!(
+        missing.is_empty(),
+        "instruction kinds not checked: {missing:?}"
     );
 }
 

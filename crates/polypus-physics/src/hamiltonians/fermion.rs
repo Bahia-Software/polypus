@@ -148,7 +148,7 @@ impl FermionOperator {
 
 /// Applies a product of ladder operators (rightmost first) to basis state
 /// `b`. Returns the resulting state and sign, or `None` if it vanishes.
-fn apply_term(ops: &[(usize, Ladder)], b: usize) -> Option<(usize, f64)> {
+pub(super) fn apply_term(ops: &[(usize, Ladder)], b: usize) -> Option<(usize, f64)> {
     let mut state = b;
     let mut sign = 1.0;
     for &(mode, kind) in ops.iter().rev() {
@@ -303,7 +303,9 @@ impl FermionHamiltonian {
         2 * self.num_spatial
     }
 
-    /// Nuclear repulsion energy `E_nuc`.
+    /// The constant energy `E_nuc`: the nuclear repulsion, or, for
+    /// integrals read from an FCIDUMP file, its core energy (the nuclear
+    /// repulsion plus any frozen core).
     pub fn nuclear_repulsion(&self) -> f64 {
         self.nuclear_repulsion
     }

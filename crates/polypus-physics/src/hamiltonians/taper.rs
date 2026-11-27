@@ -22,9 +22,11 @@
 //! - **Consequence and fix.** An ansatz that conserves the number of
 //!   electrons stays in the right sector, so VQE is unaffected; but an exact
 //!   reference energy from the tapered sum is only valid when every other
-//!   sector with the same parities lies higher. The fix is to diagonalize in
-//!   the `(N↑, N↓)` sector (planned in issue #535, together with the generic
-//!   detection of `Z₂` symmetries).
+//!   sector with the same parities lies higher. The exact reference of a
+//!   sector is
+//!   [`FermionHamiltonian::sector_ground_energy`](super::FermionHamiltonian::sector_ground_energy)
+//!   (issue #535); the generic detection of `Z₂` symmetries is still to come
+//!   (also issue #535).
 //! - **Only fixed `Z` qubits.** Qubits are removed only when the caller
 //!   names them and every term acts on them with `I` or `Z`; symmetries that
 //!   need a Clifford rotation first are not detected (also issue #535).

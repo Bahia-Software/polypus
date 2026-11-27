@@ -486,8 +486,12 @@ bridge sends `{"op":"hello","protocol":1}` and the worker must answer `{"op":"re
 Circuits arrive as **OpenQASM 2.0** text (a provider-native `Foreign` object cannot
 cross a process boundary and is rejected before it reaches the worker). Return one
 counts map per circuit, in order. `seed`, when present, is this run request's own
-seed, already different on every request of a training run (C-7): pass it to your
-SDK as is.
+seed, already different on every request of a training run (C-7), and any 64-bit
+value: pass it to your SDK as is, or, for an SDK that takes fewer bits, masked to
+them — Qiskit Aer's `seed_simulator` takes a seed below `2**63`, so
+`seed & (2**63 - 1)` (as `examples/python-backend-template/worker.py` shows). Two
+request seeds that differ only in bit 63 then sample alike; derived seeds almost
+never do, and run seeds `s` and `s + 2**63` share only their first request.
 
 ### Polluted stdout and the frame-size cap
 

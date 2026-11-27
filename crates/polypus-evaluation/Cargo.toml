@@ -27,6 +27,10 @@ pyo3 = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
+# The Pauli-sum oracle's acceptance tests (#531): H2's Hamiltonian and exact
+# energy, and the simulator to check the test ansatz without shots.
+polypus-physics = { workspace = true }
+polypus-sim = { workspace = true }
 # The oracle's tests build a problem whose templates hold gates no layer emits
 # (issue #561); the feature only exists for tests, never for a library build.
 polypus-qml = { workspace = true, features = ["test-support"] }

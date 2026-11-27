@@ -13,7 +13,8 @@ use std::collections::{BTreeMap, HashMap};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
 
-use super::{reject_aer_only_args, validate_cunqa_allocation, OptionsArg};
+use super::backend_config::{reject_aer_only_args, validate_cunqa_allocation};
+use super::options::OptionsArg;
 use crate::exceptions::configuration_error;
 use crate::infrastructure::OptionValue;
 
@@ -468,7 +469,9 @@ pub(crate) fn target_from_strings(
         "qmio" => {
             #[cfg(not(feature = "qmio"))]
             {
-                Err(configuration_error(super::QMIO_NOT_COMPILED))
+                Err(configuration_error(
+                    super::backend_config::QMIO_NOT_COMPILED,
+                ))
             }
             #[cfg(feature = "qmio")]
             {
@@ -640,7 +643,7 @@ impl Selection {
     /// Check the CUNQA allocation (defaults where not given), as before
     /// targets; a `Cunqa` target checked its own when built.
     pub(crate) fn validate_allocation(&self) -> PyResult<()> {
-        super::validate_cunqa_allocation(
+        validate_cunqa_allocation(
             &self.infrastructure,
             self.strings.nodes.unwrap_or(DEFAULT_NODES),
             self.strings.cores_per_qpu.unwrap_or(DEFAULT_CORES_PER_QPU),
@@ -1053,7 +1056,7 @@ mod tests {
         .unwrap();
         for target in [typed, strings] {
             let crate::infrastructure::BackendConfig::Registered { name, options } =
-                crate::bindings::build_backend_config(target).unwrap()
+                crate::bindings::backend_config::build_backend_config(target).unwrap()
             else {
                 panic!("qmio must build a Registered config");
             };

@@ -1,6 +1,6 @@
 # Typing stubs for `polypus.qml`, a submodule the compiled extension creates at
 # import time (it is not a file). Mirrors `qml_train` / `qml_predict` in
-# `crates/polypus/src/bindings/mod.rs` and the native classes in
+# `crates/polypus/src/bindings/qml_entry.rs` and the native classes in
 # `crates/polypus/src/bindings/qml.rs`; see `__init__.pyi` for how the stubs
 # are checked.
 

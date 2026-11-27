@@ -15,7 +15,7 @@
 use polypus_circuit::{GateInstruction, Param, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
-use crate::layers::even_pairs;
+use crate::layers::{even_pair_count, even_pairs};
 use crate::model::{InputTrace, LayerAllocation, LayerContext, LayerOps};
 
 /// The two-qubit block emitted on every pooled pair.
@@ -84,23 +84,27 @@ impl LayerOps for PoolLayer {
         if active < 2 {
             return Err(ValidationError::PoolNeedsTwoQubits { active });
         }
-        // Parameter sharing: reserve the block's θ once for the whole layer.
-        let params = ctx.reserve(self.param_count())?;
+        // Parameter sharing: reserve the block's θ once for the whole layer,
+        // while every pair gets the block's four gates ([`emit_basic`]).
+        let gates = even_pair_count(active).checked_mul(4);
+        let params = ctx.reserve(gates, Some(self.param_count()))?;
 
         // The allocation snapshots the active set *before* pooling — `emit`
         // needs it to map every logical position to its physical qubit.
         let snapshot = ctx.active.clone();
 
         // Every pair discards one logical position; remove those, preserving
-        // the relative order of the survivors (and any odd leftover).
-        let discarded: Vec<usize> = even_pairs(active)
-            .into_iter()
-            .map(|(a, b)| self.discard_keep(a, b).0)
-            .collect();
+        // the relative order of the survivors (and any odd leftover). The pairs
+        // are those of `even_pairs`, so position `p` belongs to the pair that
+        // starts at `p - p % 2`, and an odd count's last position to none: one
+        // pass, linear in the active qubits.
         ctx.active = snapshot
             .iter()
             .enumerate()
-            .filter(|(position, _)| !discarded.contains(position))
+            .filter(|&(position, _)| {
+                let first = position - position % 2;
+                first + 1 >= active || self.discard_keep(first, first + 1).1 == position
+            })
             .map(|(_, &qubit)| qubit)
             .collect();
 
@@ -160,6 +164,7 @@ fn emit_basic(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::SizeLimit;
 
     fn ctx(num_qubits: usize) -> LayerContext {
         LayerContext {
@@ -167,6 +172,7 @@ mod tests {
             num_features: 0,
             param_cursor: 0,
             layers_planned: 0,
+            gate_count: 0,
         }
     }
 
@@ -264,7 +270,26 @@ mod tests {
     }
 
     #[test]
-    fn plan_rejects_parameters_that_do_not_fit_after_the_earlier_ones() {
+    fn plan_rejects_counts_that_do_not_fit_after_the_earlier_ones() {
+        let overflow = ValidationError::ModelTooLarge {
+            layer: 4,
+            reason: SizeLimit::Overflow,
+        };
+        // The 8 gates of two pairs after the earlier ones'.
+        let mut c = LayerContext {
+            gate_count: usize::MAX - 7,
+            layers_planned: 4,
+            ..ctx(4)
+        };
+        assert_eq!(
+            PoolLayer::new(PoolBlock::Basic).plan(&mut c).unwrap_err(),
+            overflow
+        );
+        // Neither the counts nor the active qubits change.
+        assert_eq!((c.param_cursor, c.gate_count), (0, usize::MAX - 7));
+        assert_eq!(c.active, vec![0, 1, 2, 3]);
+        // The shared θ after the earlier ones' (a state `compile` cannot
+        // reach, see `LayerContext::reserve`): refused the same way.
         let mut c = LayerContext {
             param_cursor: usize::MAX - 1,
             layers_planned: 4,
@@ -272,11 +297,75 @@ mod tests {
         };
         assert_eq!(
             PoolLayer::new(PoolBlock::Basic).plan(&mut c).unwrap_err(),
-            ValidationError::TooManyParams { layer: 4 }
+            overflow
         );
-        // Neither the cursor nor the active qubits change.
-        assert_eq!(c.param_cursor, usize::MAX - 1);
+        assert_eq!((c.param_cursor, c.gate_count), (usize::MAX - 1, 0));
         assert_eq!(c.active, vec![0, 1, 2, 3]);
+        // Within the budget, the pool counts its gates.
+        let mut c = ctx(4);
+        PoolLayer::new(PoolBlock::Basic).plan(&mut c).unwrap();
+        assert_eq!(c.gate_count, 8);
+    }
+
+    /// The active set pooling leaves, computed the slow, obvious way: list the
+    /// discarded positions, then drop every position found in that list.
+    fn reference_survivors(layer: &PoolLayer, active: &[usize]) -> Vec<usize> {
+        let discarded: Vec<usize> = even_pairs(active.len())
+            .into_iter()
+            .map(|(a, b)| layer.discard_keep(a, b).0)
+            .collect();
+        active
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| !discarded.contains(position))
+            .map(|(_, &qubit)| qubit)
+            .collect()
+    }
+
+    #[test]
+    fn plan_leaves_the_same_active_set_as_the_reference() {
+        for keep in [KeepRule::EvenPositions, KeepRule::OddPositions] {
+            let layer = PoolLayer {
+                block: PoolBlock::Basic,
+                keep,
+            };
+            for n in 2..=9 {
+                // Non-contiguous physical qubits, as after an earlier pooling.
+                let active: Vec<usize> = (0..n).map(|q| 3 * q + 1).collect();
+                let mut c = LayerContext {
+                    active: active.clone(),
+                    ..ctx(0)
+                };
+                let alloc = layer.plan(&mut c).unwrap();
+                assert_eq!(alloc.active, active, "{keep:?}, n = {n}");
+                assert_eq!(
+                    c.active,
+                    reference_survivors(&layer, &active),
+                    "{keep:?}, n = {n}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plan_is_linear_in_the_active_qubits() {
+        // A quadratic plan would make ~2.5·10^11 comparisons here; a linear one
+        // takes milliseconds.
+        let n = 1_000_000;
+        for (keep, first_kept) in [(KeepRule::EvenPositions, 0), (KeepRule::OddPositions, 1)] {
+            let layer = PoolLayer {
+                block: PoolBlock::Basic,
+                keep,
+            };
+            let mut c = ctx(n);
+            layer.plan(&mut c).unwrap();
+            assert_eq!(c.active.len(), n / 2);
+            assert!(c
+                .active
+                .iter()
+                .enumerate()
+                .all(|(i, &q)| q == 2 * i + first_kept));
+        }
     }
 
     #[test]

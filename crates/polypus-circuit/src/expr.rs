@@ -23,6 +23,7 @@
 //! dropping a flat vector.
 
 use crate::error::CircuitError;
+use crate::rng::SplitMix64;
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::BuildHasherDefault;
@@ -879,13 +880,11 @@ fn same_nodes(a: &[Node<Input>], b: &[Node<Input>]) -> bool {
 }
 
 /// The next checksum to try after `check` is taken by a different
-/// expression: a fixed bijective mix (SplitMix64's finaliser) of
-/// `check + 1`, so the sequence is the same on every run.
+/// expression: one SplitMix64 step from state `check`, that is
+/// `SplitMix64::mix(check + SplitMix64::GAMMA)` (wrapping), a fixed bijection,
+/// so the sequence is the same on every run.
 fn probe(check: u64) -> u64 {
-    let mut z = check.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
+    SplitMix64::new(check).next_u64()
 }
 
 /// Map an evaluation failure of a circuit expression to the error binding
@@ -1115,6 +1114,13 @@ mod tests {
         // `0.0` and `-0.0` are different numbers, so different expressions.
         let (zero, minus_zero) = (x(0) * 0.0, x(0) * -0.0);
         assert!(!same_nodes(zero.nodes(), minus_zero.nodes()));
+    }
+
+    /// The probe sequence is pinned: an expression's id after a collision
+    /// must not move between builds.
+    #[test]
+    fn probe_is_pinned() {
+        assert_eq!(probe(42), 0xBDD7_3226_2FEB_6E95);
     }
 
     #[test]

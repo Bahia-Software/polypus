@@ -1,0 +1,5 @@
+# Versions used to generate the committed files (Python 3.13).
+pyscf==2.14.0
+numpy==2.5.5
+scipy==1.18.1
+h5py==3.16.0

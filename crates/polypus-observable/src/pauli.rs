@@ -7,49 +7,12 @@ use std::collections::HashMap;
 
 use rayon::prelude::*;
 
+use crate::bound::check_weight_bound;
 use crate::{CostObservable, ObservableError};
 
 /// The largest number of qubits a [`PauliMask`] or [`ParityObservable`] can
 /// address: one bit of a `u64` per qubit.
 pub const MAX_QUBITS: usize = 64;
-
-/// The largest accepted `Σ_k |c_k| · |scale|`: `f64::MAX / 2⁶⁵`, about
-/// `4.9e288`.
-///
-/// It bounds every value the reducers compute, so none overflows:
-///
-/// - The value of one bitstring is at most the bound: rounding is monotonic,
-///   so each partial sum of `±c_k` stays within the matching partial sum of
-///   `|c_k|`, and the same holds after the multiplication by `scale`.
-/// - A count-weighted sum weighs those values by counts whose total is at most
-///   `u64::MAX < 2⁶⁴` (a larger total is an error, see
-///   [`ParityObservable`]'s `CostObservable` implementation), and an exact
-///   expectation weighs them by probabilities of at most `1`, at most `2⁶⁴`
-///   of them. Without rounding, either sum is below `bound · 2⁶⁴`.
-/// - Rounding (of each count to `f64`, of each product and of each addition)
-///   multiplies that by at most `(1 + 2⁻⁵³)^(k + 2)` for `k` summed terms,
-///   which stays below `2` for any `k` below `2⁵¹`, far more keys or
-///   probabilities than fit in memory. The extra factor `2` in the bound
-///   absorbs it, so both sums stay below `bound · 2⁶⁵ = f64::MAX`.
-pub const MAX_WEIGHT_BOUND: f64 = f64::MAX / 36_893_488_147_419_103_232.0;
-
-/// `Σ |c|` over `coefficients`, summed in order, times `|scale|`; an error
-/// unless it is at most [`MAX_WEIGHT_BOUND`] (a non-finite or `NaN` input
-/// fails too).
-fn check_weight_bound(
-    coefficients: impl Iterator<Item = f64>,
-    scale: f64,
-) -> Result<(), ObservableError> {
-    let bound = coefficients.fold(0.0, |sum, c| sum + c.abs()) * scale.abs();
-    if bound <= MAX_WEIGHT_BOUND {
-        Ok(())
-    } else {
-        Err(ObservableError::Invalid(format!(
-            "Σ|c|·|scale| = {bound:e} exceeds {MAX_WEIGHT_BOUND:e}: a value or \
-             a weighted mean of counts could overflow"
-        )))
-    }
-}
 
 /// A single-qubit Pauli operator. The identity is not a variant: it is the
 /// absence of an operator on that qubit.
@@ -192,7 +155,7 @@ impl ParityObservable {
     /// [`ObservableError::Invalid`] if `num_qubits` is `0` or above
     /// [`MAX_QUBITS`], a mask selects a qubit `>= num_qubits`, a coefficient
     /// or `scale` is not finite, or `Σ|c|·|scale|` exceeds
-    /// [`MAX_WEIGHT_BOUND`], above which a result could overflow.
+    /// [`MAX_WEIGHT_BOUND`](crate::MAX_WEIGHT_BOUND), above which a result could overflow.
     pub fn new(
         num_qubits: usize,
         terms: Vec<(f64, u64)>,
@@ -407,7 +370,7 @@ impl Grouping {
 ///
 /// [`ObservableError::Invalid`] if `num_qubits > MAX_QUBITS`, a term acts on a
 /// qubit `>= num_qubits`, a coefficient is not finite, or `Σ|c|` over all
-/// terms exceeds [`MAX_WEIGHT_BOUND`], so neither the constant nor the total
+/// terms exceeds [`MAX_WEIGHT_BOUND`](crate::MAX_WEIGHT_BOUND), so neither the constant nor the total
 /// (the constant plus every group's value) can overflow.
 pub fn group_qubit_wise(
     num_qubits: usize,
@@ -488,6 +451,7 @@ fn low_bits(n: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MAX_WEIGHT_BOUND;
 
     fn counts(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
         pairs.iter().map(|(k, n)| (k.to_string(), *n)).collect()
@@ -634,9 +598,9 @@ mod tests {
         assert_eq!(mean, -MAX_WEIGHT_BOUND);
         // The worst case for the sum: two keys of the same sign (qubit 0 set
         // in both; opposite signs would cancel) whose counts total exactly
-        // u64::MAX and both round up when converted to f64, so the sum before
-        // dividing exceeds MAX_WEIGHT_BOUND · 2⁶⁴: the case the factor 2 of
-        // the bound is for.
+        // u64::MAX and both round up when converted to f64, so the rounded
+        // counts add up to more than 2⁶⁴: the case the factor 2 of the bound
+        // is for.
         let a: u64 = (1 << 63) + 1025;
         let b: u64 = u64::MAX - a;
         assert!((a as f64) as u128 > a as u128 && (b as f64) as u128 > b as u128);
@@ -649,11 +613,10 @@ mod tests {
         let mean = obs2
             .expectation_batch(&[counts(&[("01", a), ("11", b)])])
             .unwrap()[0];
-        assert!(mean.is_finite());
-        assert!(
-            (mean + MAX_WEIGHT_BOUND).abs() <= 1e-15 * MAX_WEIGHT_BOUND,
-            "{mean}"
-        );
+        // Exact: here the value times each rounded count rounds down, and
+        // their sum rounds back to −MAX_WEIGHT_BOUND · 2⁶⁴, which the total
+        // (2⁶⁴ as f64) divides.
+        assert_eq!(mean, -MAX_WEIGHT_BOUND);
         // And an exact expectation with every probability at its largest, 1.
         // Exact: ±MAX_WEIGHT_BOUND times 0 or 1, and a sum with 0 or ±B.
         let exact = obs.expectation_from_probabilities(&[1.0, 1.0]).unwrap();

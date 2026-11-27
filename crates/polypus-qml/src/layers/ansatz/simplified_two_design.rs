@@ -43,16 +43,17 @@ impl SimplifiedTwoDesignAnsatz {
 impl LayerOps for SimplifiedTwoDesignAnsatz {
     fn plan(&self, ctx: &mut LayerContext) -> Result<LayerAllocation, ValidationError> {
         let n = ctx.active.len();
-        // n initial weights, then two per pair (n − 1 pairs) per block.
-        let count = n
-            .saturating_sub(1)
+        // n initial weights, then two per pair (n − 1 pairs) per block, each
+        // the angle of its own `Ry`; every pair of a block adds one `CZ`.
+        let pairs = n.saturating_sub(1);
+        let params = pairs
             .checked_mul(2)
             .and_then(|per_block| per_block.checked_mul(self.reps))
-            .and_then(|blocks| blocks.checked_add(n))
-            .ok_or(ValidationError::TooManyParams {
-                layer: ctx.layers_planned,
-            })?;
-        let params = ctx.reserve(count)?;
+            .and_then(|blocks| blocks.checked_add(n));
+        let gates = pairs
+            .checked_mul(self.reps)
+            .and_then(|cz| params?.checked_add(cz));
+        let params = ctx.reserve(gates, params)?;
         Ok(LayerAllocation {
             params,
             active: ctx.active.clone(),
@@ -106,6 +107,8 @@ impl LayerOps for SimplifiedTwoDesignAnsatz {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::SizeLimit;
+    use crate::model::MAX_MODEL_GATES;
 
     fn ctx(num_qubits: usize) -> LayerContext {
         LayerContext {
@@ -113,6 +116,7 @@ mod tests {
             num_features: 0,
             param_cursor: 0,
             layers_planned: 0,
+            gate_count: 0,
         }
     }
 
@@ -264,10 +268,12 @@ mod tests {
     }
 
     #[test]
-    fn plan_rejects_a_param_count_that_does_not_fit() {
+    fn plan_rejects_a_gate_count_that_does_not_fit() {
+        let too_large = |layer, reason| ValidationError::ModelTooLarge { layer, reason };
         // 2 × 1 pair × reps overflows on 2 qubits…
         let mut c = LayerContext {
             param_cursor: 7,
+            gate_count: 11,
             layers_planned: 3,
             ..ctx(2)
         };
@@ -275,9 +281,10 @@ mod tests {
             SimplifiedTwoDesignAnsatz::new(usize::MAX)
                 .plan(&mut c)
                 .unwrap_err(),
-            ValidationError::TooManyParams { layer: 3 }
+            too_large(3, SizeLimit::Overflow)
         );
-        assert_eq!(c.param_cursor, 7);
+        // A rejected layer counts nothing.
+        assert_eq!((c.param_cursor, c.gate_count), (7, 11));
         // …and so does adding the n initial weights to a block total that
         // just fits: 2 × (2^63 − 1) + 2 = 2^64.
         let mut c = ctx(2);
@@ -285,20 +292,33 @@ mod tests {
             SimplifiedTwoDesignAnsatz::new(usize::MAX / 2)
                 .plan(&mut c)
                 .unwrap_err(),
-            ValidationError::TooManyParams { layer: 0 }
+            too_large(0, SizeLimit::Overflow)
         );
-        assert_eq!(c.param_cursor, 0);
-        // A count that fits on its own but not after the earlier layers'.
+        assert_eq!((c.param_cursor, c.gate_count), (0, 0));
+        // 2 + 3·reps = usize::MAX − 1 gates on 2 qubits fit in a usize but
+        // not in the budget; after two earlier gates they no longer fit in a
+        // usize either.
+        let ansatz = SimplifiedTwoDesignAnsatz::new((usize::MAX - 2) / 3);
+        assert_eq!(
+            ansatz.plan(&mut ctx(2)).unwrap_err(),
+            too_large(
+                0,
+                SizeLimit::Budget {
+                    gates: usize::MAX - 1,
+                    max_gates: MAX_MODEL_GATES,
+                }
+            )
+        );
         let mut c = LayerContext {
-            param_cursor: usize::MAX - 3,
+            gate_count: 2,
             layers_planned: 1,
             ..ctx(2)
         };
         assert_eq!(
-            SimplifiedTwoDesignAnsatz::new(1).plan(&mut c).unwrap_err(),
-            ValidationError::TooManyParams { layer: 1 }
+            ansatz.plan(&mut c).unwrap_err(),
+            too_large(1, SizeLimit::Overflow)
         );
-        assert_eq!(c.param_cursor, usize::MAX - 3);
+        assert_eq!((c.param_cursor, c.gate_count), (0, 2));
     }
 
     #[test]

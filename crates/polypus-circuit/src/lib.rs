@@ -49,6 +49,7 @@ mod qasm3;
 mod qasm3_import;
 mod qasm_import;
 mod qir;
+pub mod rng;
 mod single_frequency;
 pub mod templates;
 

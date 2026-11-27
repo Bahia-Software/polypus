@@ -142,17 +142,19 @@ Everything after `y` is keyword-only. The execution arguments have defaults (`sh
 
 `Encoder(num_qubits)` and `Ansatz(num_qubits)` declare their width, which must match. Each method appends a layer and returns the same object, so calls chain. A layer that cannot work is rejected where you write it: pooling below two qubits raises `ValueError` at that `.pool(...)`, and the object keeps its previous layers.
 
+A model is also bounded in size, before any circuit is built. It has at most 1 000 000 qubits (`Encoder(num_qubits)` and `Ansatz(num_qubits)` refuse more), and its layers emit at most 4 000 000 gates in all. The layer that would pass that budget raises `ValueError` where you add it, naming the gate count it would reach; a `reps` so large that the count does not even fit in 64 bits gets its own message. Encoders count their gates for the features they carry, so a model with many features can only pass the budget once it meets the data: in `fit`, `predict` or `run` the error is then a `polypus.ConfigurationError`. The readout's basis change and measurements are not counted. An amplitude encoder emits `2^(n+1) − 3` gates on `n` qubits, so it takes at most 20.
+
 | Layer | Method | Trainable parameters |
 |---|---|---|
 | Angle encoding: feature `j` as a rotation of qubit `j` | `angle_encoder("rx" \| "ry" \| "rz")` | none |
-| Amplitude encoding: up to `2^n` features in the amplitudes (must come first) | `amplitude_encoder()` (`Encoder` only) | none |
+| Amplitude encoding: up to `2^n` features in the amplitudes (must come first; `n` at most 20) | `amplitude_encoder()` (`Encoder` only) | none |
 | Basis encoding: `X` on qubit `j` when feature `j` is `1.0` | `basis_encoder()` | none |
 | IQP (`ZZFeatureMap`) encoding | `iqp_encoder(entanglement="full")` | none |
 | Hardware-efficient block (Qiskit's `TwoLocal`) | `hardware_efficient(reps, rotations=["ry", "rz"], entangler="cx", entanglement="linear", final_rotation_layer=True)` (`Ansatz` only) | one per rotation gate |
 | `RealAmplitudes` | `real_amplitudes(reps)` (`Ansatz` only) | one per rotation gate |
 | PennyLane's `StronglyEntanglingLayers`: per layer, `Rz(φ)`, `Ry(θ)`, `Rz(ω)` (in that order) on every qubit, then an entangler from each qubit `i` to `(i + r) mod n` | `strongly_entangling(reps, ranges=None, entangler="cx")` (`Ansatz` only) | `3·n·reps` (`n`: qubits active at that point) |
 | PennyLane's `SimplifiedTwoDesign`: an `Ry` on every qubit, then per block `CZ` + `Ry` on the even and then the odd pairs | `simplified_two_design(reps)` (`Ansatz` only) | `n + 2·(n − 1)·reps` (`n`: qubits active at that point) |
-| QCNN convolution, one block shared by every pair | `conv("basic" \| "cartan", pairing="alternating")` (`Ansatz` only) | 4 (`"basic"`) or 3 (`"cartan"`) |
+| QCNN convolution, one block shared by every pair; `"odd_pairs"` needs at least 3 active qubits, the other pairings at least 2 | `conv("basic" \| "cartan", pairing="alternating")` (`Ansatz` only) | 4 (`"basic"`) or 3 (`"cartan"`) |
 | QCNN pooling: each pair of active qubits becomes one | `pool("basic", keep="even_positions")` (`Ansatz` only) | 3 |
 
 In `strongly_entangling`, `ranges` gives each layer's `r`: one per layer, each from `1` to `n − 1`, or `None` for PennyLane's default `r = (layer mod (n − 1)) + 1` (`1, 2, …`). A range outside those bounds, or a count other than `reps`, raises `ValueError` at the call. One active qubit gets no entanglers, only the rotations. The parameters go layer by layer, qubit by qubit, `(φ, θ, ω)` each: PennyLane's `(reps, n, 3)` weights flattened in C order.

@@ -10,8 +10,9 @@ from qiskit.exceptions import MissingOptionalLibraryError, QiskitError
 from qiskit.qpy import dump, load
 from qiskit.qpy.exceptions import QpyError
 
-# Contract C-9, mirrored from `validate_id` in crates/polypus/src/bindings/mod.rs:
-# same charset, same length bound, same order of checks and same messages.
+# Contract C-9, mirrored from `validate_id` in
+# crates/polypus/src/bindings/backend_config.rs: same charset, same length
+# bound, same order of checks and same messages.
 _ID_MAX_LEN = 64
 # Spelled out rather than `str.isalnum()`, which also accepts non-ASCII letters
 # and digits (e.g. "ñ", "١").
@@ -253,10 +254,6 @@ def _deserialize_quantum_circuit(id, *, directory=None):
     except Exception as e:
         log_message(id, f"Unexpected error during deserialization: {e}", "error")
         raise
-
-
-def test_connection():
-    print("Testing connection to the QASM simulator backend...")
 
 
 def serialize_quantum_circuit(id, qc, *, directory=None):

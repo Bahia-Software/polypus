@@ -31,7 +31,7 @@ def disconnect_from_infrastructure(infrastructure: str, **kwargs):
 
 def run_qcs(infrastructure, **args):
     if infrastructure == "local":
-        local = Local(num_qpus=1, qubits_per_qpu=[32], qpu_types=["AerSimulator"])
+        local = Local()
         return local.run_qcs(**args)
     elif infrastructure == "cunqa":
         # CUNQA is an optional dependency; import it only when this path runs.

@@ -9,8 +9,8 @@
 //!
 //! - **s orbitals only.** p and d orbitals need higher Boys functions and
 //!   angular factors that are not implemented. Molecules beyond H₂-like
-//!   systems (e.g. LiH, H₂O) are meant to enter through FCIDUMP files
-//!   (issue #535), not through this engine.
+//!   systems (e.g. LiH, H₂O) enter through FCIDUMP files
+//!   ([`super::Fcidump`], issue #535), not through this engine.
 //! - Units are atomic: positions in bohr, energies in hartree.
 
 use crate::error::PhysicsError;

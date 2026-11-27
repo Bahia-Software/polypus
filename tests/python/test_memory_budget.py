@@ -124,6 +124,59 @@ def test_a_result_that_leaves_no_room_for_its_statevectors_is_refused_alike(tmp_
     assert "fits: kernel" in result.stdout
 
 
+def test_an_exact_run_whose_probabilities_do_not_fit_is_refused_alike(tmp_path):
+    # Issue #628: an exact run keeps a map of up to 2^n probabilities beside its
+    # statevector. 14 qubits in uniform superposition give all 16384 states: a
+    # 256 KiB statevector fits in 1 MiB, but its map (about 1.5 MiB) does not,
+    # and the run is refused instead of being left to the OOM-killer. A sparse
+    # output of the same width still runs.
+    code = """
+    import math
+    import polypus
+    from polypus.qml import Ansatz, Encoder, Model, Readout, Z
+    n = 14
+    model = Model(Encoder(n).angle_encoder("ry"), Ansatz(n).real_amplitudes(1),
+                  Readout([Z(0)], decision="sign"))
+    trained = model.bind([0.0] * model.num_params)
+    try:
+        trained.run([[math.pi / 2] * n], exact=True)
+    except polypus.PolypusError as exc:  # C-1: catchable at the base class
+        assert type(exc) is polypus.InsufficientMemoryError, type(exc)
+        message = str(exc)
+        for needle in ("exact probabilities of a circuit (16384 basis states)",
+                       "the 14-qubit statevector (256.00 KiB)", "1.00 MiB",
+                       "set by POLYPUS_MEM_BUDGET", "POLYPUS_MEM_BUDGET=64G"):
+            assert needle in message, (needle, message)
+        print("refused: dense")
+    else:
+        raise AssertionError("expected InsufficientMemoryError")
+    # The same width with a sparse output (all angles 0: the one state |0...0>)
+    # keeps a one-entry map, and runs under the same budget.
+    sparse = trained.run([[0.0] * n], exact=True).probabilities[0]
+    assert sparse == {"0" * n: 1.0}, sparse
+    print("fits: sparse")
+    """
+    result = _run_child(code, "1M", tmp_path)
+    _assert_ok(result)
+    assert "refused: dense" in result.stdout
+    assert "fits: sparse" in result.stdout
+    # With room for the map, the same run returns every state.
+    code_fits = """
+    import math
+    from polypus.qml import Ansatz, Encoder, Model, Readout, Z
+    n = 14
+    model = Model(Encoder(n).angle_encoder("ry"), Ansatz(n).real_amplitudes(1),
+                  Readout([Z(0)], decision="sign"))
+    trained = model.bind([0.0] * model.num_params)
+    result = trained.run([[math.pi / 2] * n], exact=True)
+    assert len(result.probabilities[0]) == 2 ** n, len(result.probabilities[0])
+    print("fits: dense")
+    """
+    result = _run_child(code_fits, "4M", tmp_path)
+    _assert_ok(result)
+    assert "fits: dense" in result.stdout
+
+
 def test_the_qubit_ceiling_value_error_still_comes_first(tmp_path):
     # Above `MAX_QUBITS` (40) the ceiling's ValueError is unchanged, even under a
     # budget that would also refuse the circuit.

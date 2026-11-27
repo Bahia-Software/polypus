@@ -4,7 +4,7 @@
 use polypus_circuit::{GateInstruction, Param, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
-use crate::layers::{entanglement_pairs, RotationAxis};
+use crate::layers::{entanglement_pair_count, entanglement_pairs, RotationAxis};
 use crate::model::{InputTrace, LayerAllocation, LayerContext, LayerOps};
 
 /// The two-qubit entangling gate used between rotation blocks.
@@ -78,19 +78,22 @@ impl HardwareEfficientAnsatz {
 
 impl LayerOps for HardwareEfficientAnsatz {
     fn plan(&self, ctx: &mut LayerContext) -> Result<LayerAllocation, ValidationError> {
-        // One fresh θ per (rotation-block, axis, active qubit). Blocks =
-        // `reps` + one more if a final rotation layer is requested. The
-        // num_params == 0 case is caught model-wide by NoTrainableParams; the
-        // only check here is that a huge `reps` still gives a countable total.
-        let count = self
+        // One fresh θ, and one rotation gate, per (rotation-block, axis, active
+        // qubit). Blocks = `reps` + one more if a final rotation layer is
+        // requested. Each of the `reps` entangling blocks adds one gate per
+        // pair. The num_params == 0 case is caught model-wide by
+        // NoTrainableParams; the gates, even with no rotation, are what
+        // `reserve` bounds.
+        let n = ctx.active.len();
+        let params = self
             .reps
             .checked_add(self.final_rotation_layer as usize)
-            .and_then(|blocks| blocks.checked_mul(ctx.active.len()))
-            .and_then(|per_axis| per_axis.checked_mul(self.rotations.len()))
-            .ok_or(ValidationError::TooManyParams {
-                layer: ctx.layers_planned,
-            })?;
-        let params = ctx.reserve(count)?;
+            .and_then(|blocks| blocks.checked_mul(n))
+            .and_then(|per_axis| per_axis.checked_mul(self.rotations.len()));
+        let gates = entanglement_pair_count(n, self.entanglement)
+            .and_then(|pairs| pairs.checked_mul(self.reps))
+            .and_then(|entanglers| params?.checked_add(entanglers));
+        let params = ctx.reserve(gates, params)?;
         Ok(LayerAllocation {
             params,
             active: ctx.active.clone(),
@@ -104,6 +107,12 @@ impl LayerOps for HardwareEfficientAnsatz {
         _x: &[f64],
         _trace: &mut InputTrace,
     ) -> Result<(), QmlError> {
+        // No rotation and no pair: every block, the final one included, would
+        // be empty. Return now rather than loop `reps` times for nothing
+        // (`plan` counts no gate here, so it accepts any `reps`).
+        if self.rotations.is_empty() && alloc.active.len() < 2 {
+            return Ok(());
+        }
         // Fresh θ indices are handed out from the start of this layer's range.
         let mut next_param = alloc.params.start;
         for _ in 0..self.reps {
@@ -164,6 +173,8 @@ fn emit_entangling_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::SizeLimit;
+    use crate::model::MAX_MODEL_GATES;
 
     fn ctx(num_qubits: usize) -> LayerContext {
         LayerContext {
@@ -171,6 +182,7 @@ mod tests {
             num_features: 0,
             param_cursor: 0,
             layers_planned: 0,
+            gate_count: 0,
         }
     }
 
@@ -321,37 +333,94 @@ mod tests {
     }
 
     #[test]
-    fn plan_rejects_a_param_count_that_does_not_fit() {
-        let unbounded = |final_rotation_layer| HardwareEfficientAnsatz {
+    fn plan_rejects_a_gate_count_that_does_not_fit() {
+        let too_large = |layer, reason| ValidationError::ModelTooLarge { layer, reason };
+        let unbounded = |final_rotation_layer, rotations| HardwareEfficientAnsatz {
             final_rotation_layer,
+            rotations,
             ..HardwareEfficientAnsatz::new(usize::MAX)
         };
         // reps × 2 axes × 2 qubits overflows; with the final layer, so does
-        // reps + 1 alone.
-        for final_layer in [false, true] {
+        // reps + 1 alone; and with no rotation, so does reps × 3 circular
+        // pairs on 3 qubits.
+        for (final_layer, rotations) in [
+            (false, vec![RotationAxis::Ry, RotationAxis::Rz]),
+            (true, vec![RotationAxis::Ry, RotationAxis::Rz]),
+            (false, vec![]),
+        ] {
+            let ansatz = HardwareEfficientAnsatz {
+                entanglement: Entanglement::Circular,
+                ..unbounded(final_layer, rotations)
+            };
             let mut c = LayerContext {
                 param_cursor: 7,
+                gate_count: 11,
                 layers_planned: 3,
-                ..ctx(2)
+                ..ctx(3)
             };
             assert_eq!(
-                unbounded(final_layer).plan(&mut c).unwrap_err(),
-                ValidationError::TooManyParams { layer: 3 }
+                ansatz.plan(&mut c).unwrap_err(),
+                too_large(3, SizeLimit::Overflow)
             );
-            // A rejected layer reserves nothing.
-            assert_eq!(c.param_cursor, 7);
+            // A rejected layer counts nothing.
+            assert_eq!((c.param_cursor, c.gate_count), (7, 11));
         }
-        // A count that fits on its own but not after the earlier layers'.
-        let mut c = LayerContext {
-            param_cursor: usize::MAX - 2,
-            layers_planned: 1,
-            ..ctx(3)
+        // usize::MAX gates on one qubit (reps + 1 rotations) fit in a usize
+        // but not in the budget; after one earlier gate they no longer fit in
+        // a usize either.
+        let one_qubit = HardwareEfficientAnsatz {
+            rotations: vec![RotationAxis::Ry],
+            ..HardwareEfficientAnsatz::new(usize::MAX - 1)
         };
         assert_eq!(
-            linear_ansatz().plan(&mut c).unwrap_err(),
-            ValidationError::TooManyParams { layer: 1 }
+            one_qubit.plan(&mut ctx(1)).unwrap_err(),
+            too_large(
+                0,
+                SizeLimit::Budget {
+                    gates: usize::MAX,
+                    max_gates: MAX_MODEL_GATES,
+                }
+            )
         );
-        assert_eq!(c.param_cursor, usize::MAX - 2);
+        let mut c = LayerContext {
+            gate_count: 1,
+            layers_planned: 1,
+            ..ctx(1)
+        };
+        assert_eq!(
+            one_qubit.plan(&mut c).unwrap_err(),
+            too_large(1, SizeLimit::Overflow)
+        );
+        assert_eq!((c.param_cursor, c.gate_count), (0, 1));
+    }
+
+    #[test]
+    fn no_rotation_on_one_qubit_emits_nothing_whatever_the_reps() {
+        // No rotation and no pair: `plan` counts no gate for any `reps`, so
+        // the emission must not take time in `reps` either. Run it on a thread
+        // with a deadline, so that a regression fails instead of hanging.
+        for final_rotation_layer in [false, true] {
+            let ansatz = HardwareEfficientAnsatz {
+                rotations: vec![],
+                final_rotation_layer,
+                // `reps + 1` blocks must still fit in a usize.
+                ..HardwareEfficientAnsatz::new(usize::MAX - usize::from(final_rotation_layer))
+            };
+            let mut c = ctx(1);
+            let alloc = ansatz.plan(&mut c).unwrap();
+            assert_eq!((alloc.params.len(), c.gate_count), (0, 0));
+            let (done, result) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut qc = ParameterizedCircuit::new(1);
+                let emitted = ansatz.emit(&mut qc, &alloc, &[]).map(|()| qc.gates().len());
+                // The receiver is gone only if the deadline already failed.
+                let _ = done.send(emitted);
+            });
+            let emitted = result
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the emission did not finish within 30 s");
+            assert_eq!(emitted, Ok(0), "final = {final_rotation_layer}");
+        }
     }
 
     #[test]

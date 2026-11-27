@@ -107,6 +107,25 @@ class TestInference:
         assert all(type(value) is float for value in values)
         assert values == pytest.approx([1.0, 0.0], abs=1e-12)
 
+    def test_exact_raw_decisions_are_the_exact_expectations_bit_for_bit(self):
+        # #645: `predict(exact=True)` reads each row's decision as soon as its
+        # probabilities are computed; with a raw readout the decision is
+        # ⟨O₀⟩, which `qml.expval(exact=True)` reads from the same
+        # probabilities by the same estimator: equal, not just close.
+        from polypus import qml
+        from polypus.qml import Ansatz, Encoder, Model, Readout, Z
+
+        model = Model(
+            Encoder(3).angle_encoder("ry"),
+            Ansatz(3).hardware_efficient(1),
+            Readout([Z(0) @ Z(2)], decision="raw"),
+        )
+        params = [0.3 - 0.11 * k for k in range(model.num_params)]
+        rows = [[0.2 + 0.37 * i + 0.13 * j for j in range(3)] for i in range(7)]
+        values = model.bind(params).predict(rows, exact=True)
+        expectations = qml.expval(model, rows, params, exact=True)
+        assert values == [float(row[0]) for row in expectations.tolist()]
+
     def test_argmax_decisions_are_class_indices(self):
         from polypus.qml import Ansatz, Encoder, Model, Readout, Z
 
@@ -224,7 +243,33 @@ class TestSaveLoad:
         ]
         entry["reps"] = 2**64 - 1
         path.write_text(json.dumps(saved))
-        with pytest.raises(ValueError, match="layer 1 needs more trainable parameters"):
+        with pytest.raises(
+            ValueError, match="layer 1 needs more gates than fit in a usize"
+        ):
+            load(path)
+        # 2**40 blocks fit in a usize, not in the gate budget.
+        entry["reps"] = 2**40
+        path.write_text(json.dumps(saved))
+        with pytest.raises(
+            ValueError, match="layer 1 takes the model to .* past the limit of 4000000"
+        ):
+            load(path)
+
+    def test_an_edited_qubit_count_past_the_limit_is_a_value_error(
+        self, trained, tmp_path
+    ):
+        import json
+
+        from polypus.qml import load
+
+        path = tmp_path / "model.json"
+        trained.save(path)
+        saved = json.loads(path.read_text())
+        saved["spec"]["num_qubits"] = 10**6 + 1
+        path.write_text(json.dumps(saved))
+        with pytest.raises(
+            ValueError, match="model has 1000001 qubits, past the limit of 1000000"
+        ):
             load(path)
 
     @pytest.mark.parametrize(
@@ -332,12 +377,15 @@ class TestSaveLoadStronglyEntangling:
         path = tmp_path / "model.json"
         _strongly_entangling_trained().save(path)
         saved = json.loads(path.read_text())
-        # 3 × 2 qubits × 2**62 parameters do not fit in a usize. The default
-        # ranges, so the count is the first thing that fails.
+        # 3 × 2 qubits × 2**62 parameters (and more gates) do not fit in a
+        # usize. The default ranges, so the count is the first thing that
+        # fails.
         entry = _strongly_entangling_entry(saved)
         entry["reps"], entry["ranges"] = 2**62, None
         path.write_text(json.dumps(saved))
-        with pytest.raises(ValueError, match="layer 1 needs more trainable parameters"):
+        with pytest.raises(
+            ValueError, match="layer 1 needs more gates than fit in a usize"
+        ):
             load(path)
 
 
@@ -397,10 +445,12 @@ class TestSaveLoadSimplifiedTwoDesign:
         path = tmp_path / "model.json"
         _simplified_two_design_trained().save(path)
         saved = json.loads(path.read_text())
-        # 2 × 3 pairs × 2**62 blocks do not fit in a usize.
+        # 2 × 3 pairs × 2**62 blocks (and more gates) do not fit in a usize.
         _simplified_two_design_entry(saved)["reps"] = 2**62
         path.write_text(json.dumps(saved))
-        with pytest.raises(ValueError, match="layer 1 needs more trainable parameters"):
+        with pytest.raises(
+            ValueError, match="layer 1 needs more gates than fit in a usize"
+        ):
             load(path)
 
     def test_a_single_qubit_loads_any_reps(self, tmp_path):

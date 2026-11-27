@@ -30,6 +30,7 @@ use std::fmt;
 
 use polypus_circuit::CircuitError;
 
+use crate::layers::Pairing;
 use crate::loss::Loss;
 use crate::observables::Pauli;
 use crate::readout::Decision;
@@ -118,18 +119,34 @@ pub enum ValidationError {
     /// is rejected at compile time rather than discovered as an optimizer that
     /// "converges" trivially.
     NoTrainableParams,
-    /// A layer reserves more trainable parameters than fit in a `usize`, on
-    /// its own or after those of the layers before it (only a huge `reps` gets
-    /// there). Raised by the layer's `plan`, which then reserves nothing.
-    TooManyParams {
-        /// The layer (0-based, in the model) whose parameters do not fit.
+    /// A layer would emit more gates than the model may hold: its own count,
+    /// or the model's after it, does not fit in a `usize`, or passes
+    /// [`MAX_MODEL_GATES`](crate::MAX_MODEL_GATES). Raised by the layer's
+    /// `plan`, before any gate of it exists, which then counts neither gates
+    /// nor parameters.
+    ModelTooLarge {
+        /// The layer (0-based, in the model) that takes the model too far.
         layer: usize,
+        /// Which limit it passes.
+        reason: SizeLimit,
     },
-    /// A layer needs more active qubits than are available at its position in
-    /// the model. Raised by an encoder whose feature count exceeds the number
-    /// of active qubits.
+    /// A model was compiled over more than
+    /// [`MAX_MODEL_QUBITS`](crate::MAX_MODEL_QUBITS) qubits. Raised before any
+    /// layer is planned, so nothing proportional to the qubit count is
+    /// allocated.
+    TooManyQubits {
+        /// The qubit count asked for.
+        num_qubits: usize,
+        /// The limit, [`MAX_MODEL_QUBITS`](crate::MAX_MODEL_QUBITS).
+        max_qubits: usize,
+    },
+    /// An encoder has more features to load than there are active qubits at
+    /// its position in the model. Raised by the angle, basis and IQP encoders,
+    /// which load one feature per qubit, when their feature count exceeds the
+    /// number of active qubits.
     NotEnoughQubits {
-        /// The number of active qubits the layer requires.
+        /// The number of active qubits the encoder requires (its feature
+        /// count).
         needed: usize,
         /// The number of active qubits available at this position.
         active: usize,
@@ -152,6 +169,21 @@ pub enum ValidationError {
     /// fewer are available at its position in the model. Raised by
     /// [`PoolLayer`](crate::PoolLayer)'s `plan`.
     PoolNeedsTwoQubits {
+        /// The number of active qubits available at this position.
+        active: usize,
+    },
+    /// A convolution layer's [`Pairing`](crate::Pairing) selects no pair of
+    /// the active qubits available at its position in the model, so no gate
+    /// would read the parameters it reserves:
+    /// [`OddPairs`](crate::Pairing::OddPairs) needs at least three active
+    /// qubits, [`EvenPairs`](crate::Pairing::EvenPairs) and
+    /// [`Alternating`](crate::Pairing::Alternating) at least two. Raised by
+    /// [`ConvLayer`](crate::ConvLayer)'s `plan`, which then reserves nothing.
+    ConvNeedsQubits {
+        /// The layer's pairing.
+        pairing: Pairing,
+        /// The fewest active qubits on which `pairing` selects a pair.
+        needed: usize,
         /// The number of active qubits available at this position.
         active: usize,
     },
@@ -320,6 +352,22 @@ pub enum ValidationError {
     },
 }
 
+/// Why [`ValidationError::ModelTooLarge`] refused a layer.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeLimit {
+    /// The gate count (the layer's own, or the model's after it) does not fit
+    /// in a `usize`.
+    Overflow,
+    /// The model's gate count after this layer, `gates`, exceeds `max_gates`.
+    Budget {
+        /// The model's gate count with this layer's gates added.
+        gates: usize,
+        /// The limit, [`MAX_MODEL_GATES`](crate::MAX_MODEL_GATES).
+        max_gates: usize,
+    },
+}
+
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -371,9 +419,26 @@ impl fmt::Display for ValidationError {
                 f,
                 "model has no trainable parameters: add at least one ansatz layer"
             ),
-            ValidationError::TooManyParams { layer } => write!(
+            ValidationError::ModelTooLarge {
+                layer,
+                reason: SizeLimit::Overflow,
+            } => write!(
                 f,
-                "layer {layer} needs more trainable parameters than fit in a usize (reduce reps)"
+                "layer {layer} needs more gates than fit in a usize (reduce reps, qubits or features)"
+            ),
+            ValidationError::ModelTooLarge {
+                layer,
+                reason: SizeLimit::Budget { gates, max_gates },
+            } => write!(
+                f,
+                "layer {layer} takes the model to {gates} gates, past the limit of {max_gates} (reduce reps, qubits or features)"
+            ),
+            ValidationError::TooManyQubits {
+                num_qubits,
+                max_qubits,
+            } => write!(
+                f,
+                "model has {num_qubits} qubits, past the limit of {max_qubits}"
             ),
             ValidationError::NotEnoughQubits { needed, active } => write!(
                 f,
@@ -393,6 +458,15 @@ impl fmt::Display for ValidationError {
             ValidationError::PoolNeedsTwoQubits { active } => write!(
                 f,
                 "pooling layer needs at least 2 active qubit(s) but only {active} are available"
+            ),
+            ValidationError::ConvNeedsQubits {
+                pairing,
+                needed,
+                active,
+            } => write!(
+                f,
+                "convolution layer with pairing \"{}\" needs at least {needed} active qubit(s) but only {active} are available",
+                pairing.python_name()
             ),
             ValidationError::StronglyEntanglingRangesLength { reps, got } => write!(
                 f,
@@ -571,6 +645,13 @@ pub enum QmlError {
     /// A slice of counts maps handed to
     /// [`fitness_from_counts`](crate::QmlProblem::fitness_from_counts) has a
     /// length different from the number of training circuits.
+    ///
+    /// Also a circuit's reading of the wrong width for the exact readers that
+    /// take expectations instead of maps (issue #645), such as
+    /// [`fitness_from_expectations`](crate::QmlProblem::fitness_from_expectations):
+    /// `expected` is then the width (or, for one too short, the entries it
+    /// must have at least) and `got` the reading's. The message still speaks
+    /// of counts maps.
     CountsLengthMismatch {
         /// The number of circuits (and hence counts maps) expected.
         expected: usize,
@@ -935,9 +1016,45 @@ mod tests {
     }
 
     #[test]
-    fn too_many_params_displays_its_layer() {
-        let s = ValidationError::TooManyParams { layer: 3 }.to_string();
-        assert!(s.contains("layer 3") && s.contains("usize"), "{s}");
+    fn size_limits_display_their_values_and_differ() {
+        let overflow = ValidationError::ModelTooLarge {
+            layer: 3,
+            reason: SizeLimit::Overflow,
+        }
+        .to_string();
+        assert!(
+            overflow.contains("layer 3") && overflow.contains("usize"),
+            "{overflow}"
+        );
+        let budget = ValidationError::ModelTooLarge {
+            layer: 2,
+            reason: SizeLimit::Budget {
+                gates: 4_000_007,
+                max_gates: 4_000_000,
+            },
+        }
+        .to_string();
+        assert!(
+            budget.contains("layer 2")
+                && budget.contains("4000007")
+                && budget.contains("4000000")
+                && !budget.contains("usize"),
+            "{budget}"
+        );
+        // The hint fits an encoder too, which has no `reps`.
+        for message in [&overflow, &budget] {
+            assert!(message.contains("features"), "{message}");
+        }
+        let qubits = ValidationError::TooManyQubits {
+            num_qubits: 1_000_001,
+            max_qubits: 1_000_000,
+        }
+        .to_string();
+        assert!(
+            qubits.contains("1000001") && qubits.contains("1000000") && qubits.contains("qubits"),
+            "{qubits}"
+        );
+        assert!(!qubits.contains("gates"), "{qubits}");
     }
 
     #[test]
@@ -945,6 +1062,33 @@ mod tests {
         assert!(ValidationError::PoolNeedsTwoQubits { active: 1 }
             .to_string()
             .contains('1'));
+    }
+
+    #[test]
+    fn conv_needs_qubits_names_the_layer_and_the_pairing() {
+        let s = ValidationError::ConvNeedsQubits {
+            pairing: Pairing::OddPairs,
+            needed: 3,
+            active: 2,
+        }
+        .to_string();
+        assert!(s.contains("convolution"), "{s}");
+        assert!(s.contains("\"odd_pairs\""), "{s}");
+        assert!(s.contains("at least 3 active"), "{s}");
+        assert!(s.contains("only 2 are"), "{s}");
+        // The Python spelling, never the Rust variant name.
+        for (pairing, name) in [
+            (Pairing::EvenPairs, "\"even_pairs\""),
+            (Pairing::Alternating, "\"alternating\""),
+        ] {
+            let s = ValidationError::ConvNeedsQubits {
+                pairing,
+                needed: 2,
+                active: 1,
+            }
+            .to_string();
+            assert!(s.contains("convolution") && s.contains(name), "{s}");
+        }
     }
 
     #[test]
