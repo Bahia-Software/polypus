@@ -9,7 +9,4 @@ from .qaoa_utils import (
     expectation_values,
     qaoa_params_to_dict,
 )
-from .running_functions import (
-    serialize_quantum_circuit,
-    test_connection,
-)
+from .running_functions import serialize_quantum_circuit

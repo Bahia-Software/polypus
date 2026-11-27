@@ -57,7 +57,9 @@ KNOWN_ACTIONS = {
 
 # Recipes CI calls that `ci-all` does not reach, with why.
 NOT_IN_CI_ALL = {
-    "build-wheel": "the platform smoke test; `wheel` builds the same wheel and installs it",
+    "build-wheel": "the floors job's build; `wheel` builds the same wheel and installs it",
+    "test-portable": "the macOS and Windows legs; `test-features` runs the same tests",
+    "pytest-portable": "every platform's wheel; `pytest` runs the same tests and the rest",
 }
 
 # What an "Install ..." step's lines may start with.

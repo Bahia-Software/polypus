@@ -19,7 +19,7 @@ log = { workspace = true, features = ["std"] }
 # more than one thread. Default features only: they resolve the system zone
 # (`/usr/share/zoneinfo` on Unix, the bundled tzdb on Windows); never enable
 # `logging`, which would route jiff's diagnostics back into this very logger.
-jiff = "0.2.46"
+jiff = "1.0.1"
 # JSON output built via `serde_json::Map`, so message content is always escaped
 # correctly and every line is valid JSON.
 serde_json = { workspace = true }

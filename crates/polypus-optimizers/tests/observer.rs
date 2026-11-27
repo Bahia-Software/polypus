@@ -10,6 +10,7 @@
 //! an outcome that meets every postcondition of C-5 with no oracle call (and,
 //! for External, no `ask`) after it.
 
+use polypus_circuit::rng::SplitMix64;
 use polypus_optimizers::{
     AdamRule, AlgorithmAdam, AlgorithmAdamArgs, AlgorithmCmaEs, AlgorithmCmaEsArgs,
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmExternal,
@@ -101,7 +102,7 @@ impl VarianceOracle for ConstVariance {
 /// A seeded random search in `[0, 2π)³`, four candidates a batch, that ends
 /// the run with `None` after `batches` asks, and counts its asks and tells.
 struct RandomSearch {
-    state: u64,
+    rng: SplitMix64,
     left: usize,
     asks: Arc<AtomicUsize>,
     tells: Arc<AtomicUsize>,
@@ -110,12 +111,7 @@ struct RandomSearch {
 impl RandomSearch {
     fn uniform(&mut self) -> f64 {
         // SplitMix64, then the top 53 bits as a fraction of 2π.
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        (z >> 11) as f64 / (1u64 << 53) as f64 * TAU
+        self.rng.next_f64() * TAU
     }
 }
 
@@ -292,7 +288,7 @@ fn run(
             let args = AlgorithmExternalArgs {
                 oracle,
                 optimizer: Box::new(RandomSearch {
-                    state: seed,
+                    rng: SplitMix64::new(seed),
                     left: 6,
                     asks: Arc::clone(&asks),
                     tells: Arc::clone(&tells),

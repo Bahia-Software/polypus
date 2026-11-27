@@ -23,6 +23,16 @@ use pyo3::prelude::*;
 /// Optimizers **maximise** fitness — pass `scale=-1.0` for a minimisation
 /// problem. Bit ordering matches the simulator/Qiskit read-out (MSB left; the
 /// right-most bit is variable 0).
+///
+/// Raises `ValueError` at construction when `num_vars` is 0, an index is out
+/// of range, a quadratic term names one variable twice (fold `(i, i)` into
+/// `linear`, since `x_i² = x_i`), a coefficient, `constant` or `scale` is not
+/// finite, or `(|constant| + Σ|linear| + Σ|quadratic|)·|scale|` exceeds
+/// `sys.float_info.max / 2**65` (about 4.9e288). That bound keeps every value
+/// and every count-weighted mean finite. The sums run over the entries as
+/// given, before repeated ones accumulate. During `train`, counts of one
+/// candidate that add up to more than `2**64 - 1` raise
+/// `polypus.EvaluationError`.
 #[pyclass(module = "polypus", name = "Qubo", frozen)]
 pub struct Qubo {
     pub(crate) inner: Arc<QuboObservable>,
@@ -33,8 +43,9 @@ impl Qubo {
     /// Build from sparse coefficients.
     ///
     /// `linear`: list of `(index, coefficient)`. `quadratic`: list of
-    /// `(i, j, weight)` with `i != j`. Raises `ValueError` on an out-of-range
-    /// index, a self-quadratic term, or a non-finite coefficient.
+    /// `(i, j, weight)` with `i != j`; repeated entries accumulate. The errors
+    /// are in the class docstring, which Python shows (PyO3 does not expose
+    /// this one, issue #641).
     #[new]
     #[pyo3(signature = (num_vars, linear=None, quadratic=None, constant=0.0, scale=1.0))]
     fn new(
@@ -58,6 +69,10 @@ impl Qubo {
     }
 
     /// Build from a dense square matrix `Q`, evaluating `f(x) = xᵀ·Q·x`.
+    ///
+    /// Raises `ValueError` when `matrix` is empty or not square, an entry or
+    /// `scale` is not finite, or the coefficients it folds into (`Q_ii`
+    /// linear, `Q_ij + Q_ji` quadratic) exceed the bound of the constructor.
     #[staticmethod]
     #[pyo3(signature = (matrix, scale=1.0))]
     fn from_matrix(matrix: Vec<Vec<f64>>, scale: f64) -> PyResult<Self> {
@@ -82,7 +97,20 @@ impl Qubo {
 /// An Ising cost `f(s) = Σ_i fields[i]·z_i + Σ_(i,j) J·z_i·z_j + constant`, times
 /// `scale`, over spins `z_i = 1 - 2·x_i ∈ {+1, -1}` (bit `0 → +1`, `1 → -1`).
 ///
-/// Same sign convention and bit ordering as [`Qubo`].
+/// Same sign convention and bit ordering as `Qubo`. A coupling `(i, i)` is
+/// allowed and adds `J` to the constant, since `z_i² = 1`.
+///
+/// The cost is expanded into a QUBO at construction (`h·z_i = h - 2h·x_i`,
+/// `J·z_i·z_j = J - 2J·x_i - 2J·x_j + 4J·x_i·x_j`), and the bound of `Qubo`
+/// applies to that QUBO: each field `h` adds up to `3·|h|` to its
+/// `Σ|c|·|scale|`, and each coupling `J` up to `9·|J|`. Raises `ValueError`
+/// at construction when `num_vars` is 0, an index is out of range, a field,
+/// coupling, `constant` or `scale` is not finite, an expanded coefficient
+/// overflows (`-2h`, `-2J`, `4J`, or the constant once the fields and
+/// couplings are folded into it), or the expanded QUBO's `Σ|c|·|scale|` exceeds
+/// `sys.float_info.max / 2**65` (about 4.9e288). During `train`, counts of
+/// one candidate that add up to more than `2**64 - 1` raise
+/// `polypus.EvaluationError`.
 #[pyclass(module = "polypus", name = "Ising", frozen)]
 pub struct Ising {
     pub(crate) inner: Arc<IsingObservable>,
@@ -92,8 +120,9 @@ pub struct Ising {
 impl Ising {
     /// Build from sparse fields and couplings.
     ///
-    /// `fields`: list of `(index, h)`. `couplings`: list of `(i, j, J)`. Raises
-    /// `ValueError` on an out-of-range index or a non-finite coefficient.
+    /// `fields`: list of `(index, h)`. `couplings`: list of `(i, j, J)`. The
+    /// errors are in the class docstring, which Python shows (PyO3 does not
+    /// expose this one, issue #641).
     #[new]
     #[pyo3(signature = (num_vars, fields=None, couplings=None, constant=0.0, scale=1.0))]
     fn new(

@@ -8,16 +8,15 @@
 //! one seed per call to an SDK (Aer, CUNQA, the subprocess bridge) takes it from
 //! [`CallSeeds`].
 
+use polypus_circuit::rng::SplitMix64;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// SplitMix64 increment (the golden-ratio gamma).
-const SPLITMIX64_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+const SPLITMIX64_GAMMA: u64 = SplitMix64::GAMMA;
 
 /// SplitMix64 output finaliser: a bijective 64-bit mixer.
-fn splitmix64_mix(mut z: u64) -> u64 {
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
+fn splitmix64_mix(z: u64) -> u64 {
+    SplitMix64::mix(z)
 }
 
 /// Output `index` of a SplitMix64 stream whose state starts at the mixed

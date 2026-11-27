@@ -10,7 +10,7 @@
 use polypus_circuit::{GateInstruction, Param, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
-use crate::layers::{even_pairs, odd_pairs};
+use crate::layers::{even_pair_count, even_pairs, odd_pair_count, odd_pairs};
 use crate::model::{InputTrace, LayerAllocation, LayerContext, LayerOps};
 
 /// The two-qubit block emitted on every pair of a [`ConvLayer`].
@@ -69,6 +69,24 @@ impl ConvLayer {
         }
     }
 
+    /// The gates the block emits on one pair ([`emit_basic`] and
+    /// [`emit_cartan`]).
+    fn block_gates(&self) -> usize {
+        match self.block {
+            ConvBlock::Basic => 5,
+            ConvBlock::Cartan => 7,
+        }
+    }
+
+    /// How many pairs [`pairs`](Self::pairs) gives over `n` active qubits.
+    fn pair_count(&self, n: usize) -> usize {
+        match self.pairing {
+            Pairing::EvenPairs => even_pair_count(n),
+            Pairing::OddPairs => odd_pair_count(n),
+            Pairing::Alternating => even_pair_count(n) + odd_pair_count(n),
+        }
+    }
+
     /// The pairs, over logical positions of `n` active qubits, this layer's
     /// [`Pairing`] selects.
     fn pairs(&self, n: usize) -> Vec<(usize, usize)> {
@@ -91,8 +109,10 @@ impl LayerOps for ConvLayer {
             return Err(ValidationError::NotEnoughQubits { needed: 2, active });
         }
         // Parameter sharing: the block reserves its θ once for the whole layer,
-        // *not* per pair. The cursor advances by the block width only.
-        let params = ctx.reserve(self.param_count())?;
+        // *not* per pair. The cursor advances by the block width only, while
+        // the gates are the block's on every pair.
+        let gates = self.pair_count(active).checked_mul(self.block_gates());
+        let params = ctx.reserve(gates, Some(self.param_count()))?;
         Ok(LayerAllocation {
             params,
             active: ctx.active.clone(),
@@ -182,6 +202,7 @@ fn emit_cartan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::SizeLimit;
 
     fn ctx(num_qubits: usize) -> LayerContext {
         LayerContext {
@@ -189,6 +210,7 @@ mod tests {
             num_features: 0,
             param_cursor: 0,
             layers_planned: 0,
+            gate_count: 0,
         }
     }
 
@@ -308,18 +330,29 @@ mod tests {
     }
 
     #[test]
-    fn plan_rejects_parameters_that_do_not_fit_after_the_earlier_ones() {
+    fn plan_rejects_counts_that_do_not_fit_after_the_earlier_ones() {
+        let overflow = ValidationError::ModelTooLarge {
+            layer: 4,
+            reason: SizeLimit::Overflow,
+        };
         for block in [ConvBlock::Basic, ConvBlock::Cartan] {
+            // The gates of the one pair after the earlier ones'.
+            let mut c = LayerContext {
+                gate_count: usize::MAX - 2,
+                layers_planned: 4,
+                ..ctx(2)
+            };
+            assert_eq!(ConvLayer::new(block).plan(&mut c).unwrap_err(), overflow);
+            assert_eq!((c.param_cursor, c.gate_count), (0, usize::MAX - 2));
+            // The shared θ after the earlier ones' (a state `compile` cannot
+            // reach, see `LayerContext::reserve`): refused the same way.
             let mut c = LayerContext {
                 param_cursor: usize::MAX - 2,
                 layers_planned: 4,
                 ..ctx(2)
             };
-            assert_eq!(
-                ConvLayer::new(block).plan(&mut c).unwrap_err(),
-                ValidationError::TooManyParams { layer: 4 }
-            );
-            assert_eq!(c.param_cursor, usize::MAX - 2);
+            assert_eq!(ConvLayer::new(block).plan(&mut c).unwrap_err(), overflow);
+            assert_eq!((c.param_cursor, c.gate_count), (usize::MAX - 2, 0));
         }
     }
 

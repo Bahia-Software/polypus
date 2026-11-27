@@ -23,7 +23,9 @@
 //!   complex matrix, which this module does not build.
 //! - **Size.** At most [`MAX_DENSE_QUBITS`] qubits; the whole spectrum is
 //!   computed from the full `2^n × 2^n` matrix, with no restriction to a
-//!   particle-number sector.
+//!   particle-number sector. For a molecule, the energy of one sector
+//!   `(N↑, N↓)` comes from a much smaller matrix:
+//!   [`FermionHamiltonian::sector_eigenvalues`](super::FermionHamiltonian::sector_eigenvalues).
 //! - **Eigenvalues only.** No eigenvectors are computed.
 //!
 //! The eigensolver is the classic Householder tridiagonalization followed by

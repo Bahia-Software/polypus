@@ -1,15 +1,18 @@
 //! # polypus-evaluation
 //!
 //! **How a candidate is evaluated** — the oracles that turn a parameter vector
-//! into a scalar fitness. Holds [`VqcOracle`], [`QmlOracle`],
+//! into a scalar fitness. Holds [`VqcOracle`], [`QmlOracle`], the Pauli-sum
+//! [`PauliSumOracle`] (a Hamiltonian measured with one circuit per
+//! qubit-wise-commuting group; `docs/adr/0009-pauli-sum-oracle.md`),
 //! [`PyVarianceOracle`], the Python-callback observable [`PyCallbackObservable`],
 //! the supervised QML objectives ([`SupervisedObjective`]: [`PyLabelledCost`],
 //! [`PySampleCost`]), the [`CircuitSource`] binding boundary and the evaluation
 //! error type.
 //!
 //! It also holds the [`OracleFactory`](polypus_orchestration::OracleFactory)
-//! implementations — [`VqcOracleFactory`] and [`QmlOracleFactory`] — that assemble
-//! those oracles for a training flow. The training *order* itself
+//! implementations — [`VqcOracleFactory`], [`QmlOracleFactory`] and
+//! [`PauliSumOracleFactory`] — that assemble those oracles for a training
+//! flow. The training *order* itself
 //! ([`TrainFlow`](polypus_orchestration::TrainFlow)) lives in `polypus-orchestration`
 //! with the scheduler that runs it; only the `pyo3`-touching *assembly* (binding
 //! circuit templates, wiring observables) lives here.
@@ -21,6 +24,7 @@
 //! (`polypus::exceptions::evaluation_error_to_pyerr`).
 
 pub mod error;
+pub mod pauli_sum_oracle;
 pub mod py_callback_observable;
 pub mod qml_oracle;
 pub mod supervised;
@@ -28,6 +32,7 @@ pub mod variance_oracle;
 pub mod vqc_oracle;
 
 pub use error::EvaluationError;
+pub use pauli_sum_oracle::{PauliSumOracle, PauliSumOracleError, PauliSumOracleFactory};
 pub use py_callback_observable::PyCallbackObservable;
 pub use qml_oracle::{
     candidate_window_size, window_size, FullDataset, MinibatchConfig, QmlObjective, QmlOracle,

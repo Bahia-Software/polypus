@@ -6,6 +6,7 @@
 //! | [`pauli`] | Multi-qubit [`PauliString`], [`PauliTerm`], [`PauliSum`]: the common representation |
 //! | [`exact`] | Dense matrix and exact eigenvalues of a small [`PauliSum`] (the reference for everything else) |
 //! | [`fermion`] | [`FermionOperator`] and the electronic [`FermionHamiltonian`] from spatial integrals |
+//! | [`sector`] | Exact eigenvalues of a [`FermionHamiltonian`] within one electron sector `(N↑, N↓)` |
 //! | [`mapping`] | Jordan–Wigner and parity mappings ([`QubitMapping`]) |
 //! | [`taper`] | Removing qubits with a fixed `Z` value |
 //! | [`photon_polarization`] | Single-photon polarization Hamiltonian |
@@ -19,6 +20,7 @@ pub mod fermion;
 pub mod mapping;
 pub mod pauli;
 pub mod photon_polarization;
+pub mod sector;
 pub mod taper;
 
 pub use exact::{DenseMatrix, MAX_DENSE_QUBITS, SYMMETRY_TOLERANCE};
@@ -27,6 +29,7 @@ pub use fermion::{
 };
 pub use mapping::{QubitMapping, HERMITICITY_TOLERANCE};
 pub use pauli::{PauliAxis, PauliString, PauliSum, PauliTerm, Phase};
+pub use sector::{sector_dimension, MAX_SECTOR_DIMENSION};
 pub use taper::parity_reduction_qubits;
 
 /// Trait for any physical system that can express its quantum Hamiltonian as a

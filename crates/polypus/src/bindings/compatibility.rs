@@ -131,7 +131,7 @@ struct Report {
 /// `resources` is set.
 fn reasons(circuit: &Bound<'_, PyAny>, resources: bool) -> PyResult<Report> {
     let py = circuit.py();
-    let bound = match super::extract_bound_circuit(circuit) {
+    let bound = match super::extract::extract_bound_circuit(circuit) {
         Ok(bound) => bound,
         // A circuit with free parameters: no backend can run it. Each entry
         // also keeps what binding would not fix.
@@ -142,9 +142,9 @@ fn reasons(circuit: &Bound<'_, PyAny>, resources: bool) -> PyResult<Report> {
             let mut qmio = vec![reason.clone()];
             qmio.extend(qmio_not_compiled());
             if let Some(qc) = foreign {
-                native.push(super::NATIVE_REJECTS_QISKIT.to_string());
+                native.push(super::prepare::NATIVE_REJECTS_QISKIT.to_string());
                 native.extend(dynamic_features(qc)?);
-                qmio.push(super::QMIO_REJECTS_QISKIT.to_string());
+                qmio.push(super::prepare::QMIO_REJECTS_QISKIT.to_string());
             }
             let mut cunqa = vec![reason.clone()];
             cunqa.extend(cunqa_missing(py));
@@ -159,10 +159,10 @@ fn reasons(circuit: &Bound<'_, PyAny>, resources: bool) -> PyResult<Report> {
     };
     if bound.is_foreign() {
         let qc = quantum_circuit(circuit)?;
-        let mut native = vec![super::NATIVE_REJECTS_QISKIT.to_string()];
+        let mut native = vec![super::prepare::NATIVE_REJECTS_QISKIT.to_string()];
         native.extend(dynamic_features(qc)?);
         let mut qmio = qmio_not_compiled();
-        qmio.push(super::QMIO_REJECTS_QISKIT.to_string());
+        qmio.push(super::prepare::QMIO_REJECTS_QISKIT.to_string());
         return Ok(Report {
             aer: aer_quantum_circuit_rejections(qc)?,
             native,
@@ -343,7 +343,7 @@ fn cunqa_seal(py: Python<'_>) -> Result<Bound<'_, PyModule>, String> {
 fn qmio_not_compiled() -> Vec<String> {
     #[cfg(not(feature = "qmio"))]
     {
-        vec![super::QMIO_NOT_COMPILED.to_string()]
+        vec![super::backend_config::QMIO_NOT_COMPILED.to_string()]
     }
     #[cfg(feature = "qmio")]
     {

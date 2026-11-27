@@ -3,7 +3,7 @@ use crate::error::BackendError;
 use crate::execution_config::AER_SEED_LIMIT;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::{record_cleanup_failure, BoundCircuit, CallSeeds, QuantumBackend, RunParams};
-use polypus_backend::stream_seed;
+use polypus_backend::{shot_groups, stream_seed};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
@@ -142,24 +142,6 @@ fn qpu_seed(call_seed: u64, qpu: usize) -> u64 {
         k => stream_seed(stream_seed(call_seed, 0), k),
     };
     seed & (AER_SEED_LIMIT - 1)
-}
-
-/// Groups consecutive replicas that request the same shot count, as
-/// `(first replica index, shots, replica count)`. The first index is the
-/// group's QPU and seed offset within the replicas (contract C-7).
-fn shot_groups(shot_batches: &[u32]) -> Vec<(usize, u32, usize)> {
-    let mut groups = Vec::new();
-    let mut i = 0;
-    while i < shot_batches.len() {
-        let shots = shot_batches[i];
-        let mut j = i + 1;
-        while j < shot_batches.len() && shot_batches[j] == shots {
-            j += 1;
-        }
-        groups.push((i, shots, j - i));
-        i = j;
-    }
-    groups
 }
 
 impl CunqaBackend {
@@ -688,14 +670,6 @@ mod tests {
             Python::try_attach(|_py| ()).is_none(),
             "a seam must never initialize the interpreter"
         );
-    }
-
-    #[test]
-    fn shot_groups_give_each_batch_size_its_first_replica_index() {
-        assert_eq!(shot_groups(&[4, 3, 3]), vec![(0, 4, 1), (1, 3, 2)]);
-        assert_eq!(shot_groups(&[1, 1, 0]), vec![(0, 1, 2), (2, 0, 1)]);
-        assert_eq!(shot_groups(&[5, 5]), vec![(0, 5, 2)]);
-        assert!(shot_groups(&[]).is_empty());
     }
 
     /// Set if the release operation of the test below ever runs.

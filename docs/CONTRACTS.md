@@ -338,7 +338,7 @@ shutdown); `interpreter_unavailable_in_external_maps_to_keyboard_interrupt`,
 (`create_backend_with_a_noise_model_fails_typed_when_attaching_is_forbidden`
 among them); `signal_polling_cancels_when_the_interpreter_is_unavailable` and
 `statevector_cancellation_raises_keyboard_interrupt` in
-`crates/polypus/src/bindings/mod.rs`.
+`crates/polypus/src/bindings/interrupt.rs`.
 An external optimizer: `an_exception_is_recorded_with_its_class`,
 `a_failed_run_calls_neither_method` and
 `an_unavailable_interpreter_is_recorded_without_calling_python` in
@@ -475,7 +475,11 @@ simulator's adjoint gradient (`StatevectorSimulator::adjoint_gradient`)
 differentiates the Pauli rotations and the adjoint-only kinds above, each
 angle through the generator `G = i·(∂U)·U†` of the matrix it simulates (the
 table of generators, `family` in `crates/polypus-sim/src/adjoint.rs`; a
-gate's angles are numbered as `polypus_circuit::AngleRef` documents), and
+gate's angles are numbered in the order `GateInstruction::angles` lists
+them — the one definition of that order in the workspace, which
+`polypus-qml`'s untying also follows, and which
+`c2_angles_follow_the_qasm_argument_order` holds to the OpenQASM 2.0
+argument order; a call of a declared gate has none), and
 steps back through the inverse of every other instruction
 (`Statevector::push_inverse`, which takes `GateInstruction::push_inverse`'s
 table below, the one table of the workspace, and itself only keeps the
@@ -733,8 +737,30 @@ as unobserved bitstrings are, and the result is the same bit for bit on every
 run. It reads every qubit, so it accepts only a full-register read-out (no
 measurement, or `measure_all`) and refuses a circuit that measures individual
 qubits (`UnsupportedCircuit`). It is not part of the `QuantumBackend` trait:
-"exact" means nothing for a noisy simulator or hardware. Enforced by the
-`exact_*` tests in `crates/polypus-infrastructure/src/native.rs`.
+"exact" means nothing for a noisy simulator or hardware. Its memory counts
+against the budget (#628): the widest statevector is checked before anything
+runs (`InsufficientMemory`), and the result maps of the whole call count
+beside the statevectors in flight, each sized from its circuit's non-zero
+states before it is built (`exact_map_bytes`: the hash table and the keys'
+buffers) and refused with `InsufficientMemoryForResult` instead of being
+allocated, after the batch has dropped to one circuit at a time; no `2^n`
+probabilities vector is held beside the statevector. A map handed to
+`run_circuits_exact_with`'s reader counts only while it is built and read.
+`run_circuits_exact_on_states` builds no map: its reader gets each
+circuit's amplitudes and key width, which `polypus_qml::ExactState` reads as
+the map they would make, bit for bit, so it needs only the statevector
+budget; the native QML oracle and the exact `expval`, `jacobian`, `vjp` and
+`predict` read their circuits this way (C-11 (f)). Under the fallback budget
+no map is refused. Enforced by the `exact_*`, `a_read_map_*`, `a_window_*`,
+`a_released_reservation_*` and `states_*` tests in
+`crates/polypus-infrastructure/src/native.rs`,
+`states_read_as_their_maps_do_bit_for_bit` and
+`states_raise_the_errors_their_maps_raise` in
+`crates/polypus-qml/src/problem.rs`,
+`test_an_exact_run_whose_probabilities_do_not_fit_is_refused_alike` in
+`tests/python/test_memory_budget.py`, and the adjoint-versus-shift tests of
+`tests/python/test_qml_adjoint.py`, whose shift runs in a budget of one
+statevector.
 
 **Enforcing test:** shot-conservation assertion in the orchestration tests
 (`crates/polypus/tests/running_quantum_circuits_local.rs`, plus the Python
@@ -945,11 +971,12 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   - `EvaluationOracle::evaluate_batch_with_shots(candidates, shots)` has
     `evaluate_batch`'s contract (exactly `candidates.len()` finite values, in
     order) with every circuit measured with `shots` shots. Its default calls
-    `evaluate_batch`, which is exact for an oracle without shots; `VqcOracle`
-    and `QmlOracle` put `shots` in every `CircuitTask` of the batch, every
-    training circuit of each candidate for QML, and the Planner reads them
-    from the tasks. `Arc<T>` and the walltime watch forward it. No optimizer
-    calls it.
+    `evaluate_batch`, which is exact for an oracle without shots; `VqcOracle`,
+    `QmlOracle` and `PauliSumOracle` put `shots` in every `CircuitTask` of the
+    batch, every training circuit of each candidate for QML and every
+    measurement group's circuit of each candidate for a Pauli sum, and the
+    Planner reads them from the tasks. `Arc<T>` and the walltime watch
+    forward it. No optimizer calls it.
   - Seed: the batch is the run's last call to the backend, which gives it a
     sampling stream of its own (C-7), so its shot noise is independent of
     the training's even for a candidate re-evaluated at the position it was
@@ -1012,9 +1039,13 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     shots and the expected candidates) with the error, interrupt, optimizer
     error, failing final batch, its warning and `Some(0)` tests there,
     `a_batch_with_shots_is_forwarded_untimed` in `src/walltime.rs`, the
-    `a_batch_with_shots_puts_them_in_every_task` tests of `VqcOracle` and
-    `QmlOracle` (the shots and the run's seed in every wave), the trait's
-    tests in
+    `a_batch_with_shots_puts_them_in_every_task` tests of `VqcOracle`,
+    `QmlOracle` and `PauliSumOracle` (the shots and the run's seed in every
+    wave), `a_final_shots_batch_does_not_repeat_the_training_noise` and
+    `de_trains_h2_to_within_three_sigma_of_fci` in
+    `crates/polypus-evaluation/tests/pauli_sum_h2.rs` (new noise for the
+    same candidate, and a final batch through `TrainFlow` that does not
+    repeat `best_fitness`), the trait's tests in
     `crates/polypus-optimizers/src/objective.rs`, and
     `tests/python/test_final_shots.py` (the `ValueError`s and `TypeError`s
     before the CUNQA seam, the final batch of every optimizer through both
@@ -1126,7 +1157,7 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `TypeError` for any other value; an exception recorded as itself; a
     failed run not calling Python; the `TypeError` for a non-callable) and
     `a_callback_is_checked_after_final_shots_and_before_the_backend` in
-    `bindings/mod.rs`, `tests/python/test_callback.py` (the `TypeError`
+    `bindings/entry_tests.rs`, `tests/python/test_callback.py` (the `TypeError`
     before the CUNQA seam in all three entry points and after `final_shots`;
     keyword-only; one call per iteration for every optimizer through `train`,
     `qml.train` and `Model.fit`, with `evaluations` equal to the circuits
@@ -2075,9 +2106,10 @@ counts and a mocked-backend `qml.train` on any platform, native `train`
 trajectories on the fixture's build only, opt-in with
 `POLYPUS_DETERMINISM_STRICT=1`, and the same trajectories replayed in a fresh
 process on every CI leg, #407), plus the Rust tests in
-`crates/polypus/src/bindings/mod.rs` (native seed round-trip through
-`run_quantum_circuit`, the `qmio` rejection path, the seed-resolution
-precedence / optimizer determinism, the default-seed entropy-failure path
+`crates/polypus/src/bindings/run.rs` (native seed round-trip through
+`run_quantum_circuit`, the `qmio` rejection path) and
+`crates/polypus/src/bindings/seeds.rs` (the seed-resolution precedence /
+optimizer determinism, the default-seed entropy-failure path
 (`seed_or_entropy`, `resolve_optimizer_seed`), and the run-id entropy-failure
 path and id format (`unique_id_from`)), `crates/polypus/src/exceptions.rs`
 (the entropy-failure `polypus.BackendError` mapping),
@@ -2512,11 +2544,12 @@ batching and distribution are the oracle's concern.
     `cu`/`cu3` relative to the control included, `u0` with derivative `0`. A
     model with one is built like any other; its occurrences are its trainable
     angles, numbered in gate order and, within a gate, in angle order
-    (`AngleRef`: `θ, φ, λ`, then `cu`'s `γ`; `u2`'s `φ, λ`), and `adjoint_runs`
-    / `gradient_from_adjoint` give its exact gradient — the derivative of the
-    fitness, a parameter several angles share summed — while every
-    parameter-shift method (`num_gradient_circuits`, `gradient_circuits`,
-    `gradient_from_counts`, `gradient_from_probabilities`) fails with
+    (`GateInstruction::angles`: `θ, φ, λ`, then `cu`'s `γ`; `u2`'s `φ, λ`),
+    and `adjoint_runs` / `gradient_from_adjoint` give its exact gradient —
+    the derivative of the fitness, a parameter several angles share summed —
+    while every parameter-shift method (`num_gradient_circuits`,
+    `gradient_circuits`, `gradient_from_counts`,
+    `gradient_from_probabilities`) fails with
     `NoExactGradient`. One that reads the sample, an expression angle, or the
     call of a declared gate still has no exact gradient at all, and that
     error comes first. No layer emits these gates today, so no model built
@@ -2524,8 +2557,36 @@ batching and distribution are the oracle's concern.
 - **(f) The oracle.** The `QmlOracle` scores a native problem
   (`QmlSource::Native`) through the same candidate windows as the Qiskit form:
   one finite fitness per candidate (C-5), sampled through the planner or, in
-  exact mode, from `NativeStatevectorBackend::run_circuits_exact` (C-3's exact
-  probabilities, same memory budget and windows). It is also the run's
+  exact mode, from `NativeStatevectorBackend::run_circuits_exact_on_states`
+  (C-3's exact probabilities, read from each circuit's statevector, same
+  windows). In exact mode each circuit is read as soon as it is simulated, by
+  `QmlProblem::read_state` (`⟨O₀⟩` for a scalar loss, every readout observable
+  for the categorical one), straight from its amplitudes through
+  `ExactState`, with no map of its probabilities built (#628): fitness, the
+  shift gradient and the adjoint runs come from those readings
+  (`fitness_from_expectations`, `gradient_from_expectations`,
+  `adjoint_runs_from_expectations`), so the exact path needs no memory beyond
+  its statevectors (#645, #628), and the shift fallback below needs one
+  statevector, as it says. Each reading is computed by the arithmetic the
+  `*_from_probabilities` readers use, on the same states in the same order, so
+  every value is theirs bit for bit; enforced by
+  `readings_of_the_maps_give_what_the_maps_give_bit_for_bit` and
+  `states_read_as_their_maps_do_bit_for_bit` in
+  `crates/polypus-qml/src/problem.rs` and the oracle's exact tests, which
+  compare with the map readers. The exact `qml.expval`, `qml.jacobian` and
+  `qml.vjp` read their circuits the same way (`CompiledModel::expectations_from_state`,
+  `ExpectationJacobian::jacobian_from_expectations`;
+  `exact_primitives_read_expectations_that_match_the_maps_bit_for_bit` in
+  `crates/polypus/src/bindings/qml.rs`, and, in
+  `crates/polypus-qml/tests/jacobian.rs`, every Jacobian `crate_jacobian`
+  computes and every block of `blocks_concatenate_to_the_whole_jacobian`);
+  `TrainedModel.predict(exact=True)` reads each row's decision the same way
+  (`CompiledModel::predict_from_state`;
+  `exact_predictions_are_the_maps_decisions_bit_for_bit`).
+  `TrainedModel.run(exact=True)`, which returns the probabilities, keeps the
+  maps (`run_circuits_exact`), and the exact kernel builds none
+  (`fidelity_matrix`). It is
+  also the run's
   `GradientOracle`, for Adam. Its exact gradient is the adjoint one ((e)):
   `θ`'s base circuits run exactly, giving the value and the chain rule, then
   one adjoint run per sample on `NativeStatevectorBackend::run_adjoint`, which
@@ -2716,10 +2777,25 @@ that does not depend on the data is checked where it is written, as a plain
   refused at the call, before the layer is checked: `reps`, the
   `num_qubits` of `Encoder`/`Ansatz` (where `0` is refused too, with its own
   message), and a Pauli position, in `Z`/`X`/`Y` and in the
-  `[(pauli, position), …]` list (below). A parameter count that does not fit
-  in a `usize` (a huge `reps`, or any layer after one) is
-  `ValidationError::TooManyParams`. Both are a `ValueError` that leaves the
-  object as it was, never PyO3's `OverflowError` or a panic. A count of
+  `[(pauli, position), …]` list (below). A model has at most
+  `MAX_MODEL_QUBITS` (1 000 000) qubits: `Encoder`/`Ansatz` refuse more at
+  construction, and `compile` (so `qml.load` and the kernel's `FeatureMap`)
+  with `ValidationError::TooManyQubits`. The gates a model's layers emit
+  are counted in each layer's `plan`, before any gate or parameter of it
+  exists, against `MAX_MODEL_GATES` (4 000 000): a layer that takes the
+  model past it is `ValidationError::ModelTooLarge` with
+  `SizeLimit::Budget`, and one whose count does not fit in a `usize` (a
+  huge `reps`) the same variant with `SizeLimit::Overflow`; the two
+  messages differ. Encoders are counted for the feature count `compile` is
+  given: none at the builder; the samples' wherever the model meets data,
+  where the error is that call's own (a `polypus.ConfigurationError` in
+  `fit`, `predict`, `run`, `qml.expval`/`jacobian`/`vjp` and
+  `qml.kernel_matrix`, a `ValueError` in `circuit(x)`). The basis encoder
+  is counted as if every feature were `1.0`; the readout's basis change and
+  measurements are not counted. An amplitude encoder emits `2^(n+1) − 3`
+  gates, so it takes at most 20 qubits. All of these are a `ValueError`
+  that leaves the object as it was, never PyO3's `OverflowError` or a
+  panic. A count of
   another type (a `bool`, a `str`, a `float`) is a `TypeError`; an object
   with `__index__` (a NumPy integer) is the integer it returns, which an
   out-of-range message shows.

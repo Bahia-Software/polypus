@@ -55,7 +55,7 @@
 //! log::info!("logger ready");
 //! ```
 
-use jiff::Zoned;
+use jiff::ZonedDateTime;
 use log::{LevelFilter, Metadata, Record, SetLoggerError};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -326,7 +326,7 @@ impl log::Log for Logger {
             let timestamp = self
                 .config
                 .include_timestamp
-                .then(|| line_timestamp(&Zoned::now()));
+                .then(|| line_timestamp(&ZonedDateTime::now()));
             let thread_id = self
                 .config
                 .include_thread_id
@@ -463,9 +463,9 @@ fn resolve_log_dir(env_dir: Option<std::ffi::OsString>) -> PathBuf {
 /// (e.g. `2026-07-02 14:35:12`). The single source of that format: both the
 /// text prefix and the JSON `"timestamp"` field use it.
 ///
-/// Built from the civil fields rather than `Zoned::strftime`, so there is no
+/// Built from the civil fields rather than `ZonedDateTime::strftime`, so there is no
 /// `Display` error that `to_string` could turn into a panic inside `log`.
-fn line_timestamp(now: &Zoned) -> String {
+fn line_timestamp(now: &ZonedDateTime) -> String {
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         now.year(),
@@ -479,7 +479,7 @@ fn line_timestamp(now: &Zoned) -> String {
 
 /// Local wall-clock stamp for default log file names, `%Y%m%d_%H%M%S`
 /// (e.g. `20260702_143512`). See [`default_log_path`].
-fn file_timestamp(now: &Zoned) -> String {
+fn file_timestamp(now: &ZonedDateTime) -> String {
     format!(
         "{:04}{:02}{:02}_{:02}{:02}{:02}",
         now.year(),
@@ -514,7 +514,7 @@ fn build_log_file_name(base: &str, timestamp: &str, pid: u32, counter: u64) -> S
 /// or creates anything; the caller decides when to create the directory/file.
 pub fn default_log_path(base_name: Option<&str>) -> PathBuf {
     let base = base_name.unwrap_or("polypus");
-    let timestamp = file_timestamp(&Zoned::now());
+    let timestamp = file_timestamp(&ZonedDateTime::now());
     let pid = std::process::id();
     let counter = LOG_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     default_log_dir().join(build_log_file_name(base, &timestamp, pid, counter))
@@ -811,13 +811,13 @@ mod tests {
 
     /// 2026-07-02T12:35:12Z seen from a fixed UTC+2 zone: 14:35:12 local. A
     /// fixed offset keeps the test independent of the machine's tzdb.
-    fn fixed_instant_at_utc_plus_2() -> jiff::Zoned {
+    fn fixed_instant_at_utc_plus_2() -> jiff::ZonedDateTime {
         at_utc_plus_2("2026-07-02T12:35:12Z")
     }
 
-    fn at_utc_plus_2(instant: &str) -> jiff::Zoned {
+    fn at_utc_plus_2(instant: &str) -> jiff::ZonedDateTime {
         let instant: jiff::Timestamp = instant.parse().unwrap();
-        instant.to_zoned(jiff::tz::TimeZone::fixed(jiff::tz::offset(2)))
+        instant.to_zoned_datetime(jiff::tz::TimeZone::fixed(jiff::tz::offset(2)))
     }
 
     /// The log-line stamp is the wall-clock time of the zone it is given, not
@@ -864,13 +864,17 @@ mod tests {
     /// `[before, after]`. `before` is floored to the second because the stamp
     /// carries no sub-second part. Both readings of a repeated local hour (DST
     /// fall-back) are accepted, so the check can't flake once a year.
-    fn assert_local_stamp_within(stamp: &str, before: &jiff::Zoned, after: &jiff::Zoned) {
+    fn assert_local_stamp_within(
+        stamp: &str,
+        before: &jiff::ZonedDateTime,
+        after: &jiff::ZonedDateTime,
+    ) {
         assert!(
             has_shape(stamp, "DDDD-DD-DD DD:DD:DD"),
             "unexpected timestamp shape: {stamp:?}"
         );
         let civil = jiff::civil::DateTime::strptime("%Y-%m-%d %H:%M:%S", stamp).unwrap();
-        let ambiguous = jiff::tz::TimeZone::system().to_ambiguous_zoned(civil);
+        let ambiguous = jiff::tz::TimeZone::system().to_ambiguous_zoned_datetime(civil);
         let lo = jiff::Timestamp::from_second(before.timestamp().as_second()).unwrap();
         let hi = after.timestamp();
         let readings = [ambiguous.clone().earlier(), ambiguous.later()];
@@ -912,9 +916,9 @@ mod tests {
             .include_module_path(false)
             .build();
 
-        let before = jiff::Zoned::now();
+        let before = jiff::ZonedDateTime::now();
         log_message!(logger, "stamped");
-        let after = jiff::Zoned::now();
+        let after = jiff::ZonedDateTime::now();
 
         let contents = std::fs::read_to_string(&path).unwrap();
         let line = contents.lines().next().unwrap();
@@ -944,9 +948,9 @@ mod tests {
             .include_module_path(false)
             .build();
 
-        let before = jiff::Zoned::now();
+        let before = jiff::ZonedDateTime::now();
         log_message!(logger, "stamped");
-        let after = jiff::Zoned::now();
+        let after = jiff::ZonedDateTime::now();
 
         let contents = std::fs::read_to_string(&path).unwrap();
         let line = contents.lines().next().unwrap();
