@@ -3,12 +3,21 @@
 //!
 //! The electronic Hamiltonian conserves the number of spin-up and spin-down
 //! electrons, so its matrix is block-diagonal: one block per sector `(N↑, N↓)`.
-//! The energy of a molecule with given charge and spin is the lowest
-//! eigenvalue of **its** block, which is much smaller than the whole matrix
+//! The energy of a molecule with given charge and spin projection
+//! `M_S = (N↑ − N↓)/2` is the lowest eigenvalue of **its** block, which is
+//! much smaller than the whole matrix
 //! (`C(K, N↑) · C(K, N↓)` determinants against `4^K`; for BeH₂ in STO-3G,
 //! `K = 7`, `N↑ = N↓ = 3`: 1225 against 16384). The lowest eigenvalue of the
 //! whole matrix may belong to another number of electrons (an ion's neighbour,
 //! or a sector the parity tapering of [`super::taper`] keeps).
+//!
+//! A sector fixes `N` and `M_S`, **not** the total spin `S²` nor the spatial
+//! symmetry: its lowest eigenvalue is the lowest state with that `M_S` and
+//! any total spin `S ≥ |M_S|`, in any irreducible representation. For
+//! `N↑ = N↓` that is the singlet only when no triplet (or higher spin) lies
+//! below it; to pick a given `S` or symmetry, look further up
+//! [`FermionHamiltonian::sector_eigenvalues`]. The ground states of H₂, LiH
+//! and BeH₂ are singlets.
 //!
 //! # Method
 //!
@@ -31,9 +40,13 @@ use crate::error::PhysicsError;
 /// diagonalizes: 2500 determinants, two 2500 × 2500 matrices (about 100 MB),
 /// a few seconds in an optimized build. The dense solver grows as `d³`: 4096
 /// determinants take minutes. The fermionic operator the matrix is built
-/// from has up to `4K⁴` terms besides, so with many orbitals building it
-/// costs more than the matrix (with dense integrals at `K = 32`, a few
-/// hundred MB for a sector of 1024 determinants).
+/// from has up to `4K⁴` terms besides, and each is applied to every
+/// determinant, so with many orbitals building the matrix costs more than
+/// diagonalizing it: `terms × d` applications (with dense integrals at
+/// `K = 32`, about 4·10⁶ terms, a few hundred MB, and ~10¹⁰ applications
+/// for a sector of 2500 determinants, minutes). Building the block straight
+/// from the integrals (Slater–Condon rules) would avoid it; not implemented.
+/// Molecules of a few orbitals, as in this crate's tests, take milliseconds.
 pub const MAX_SECTOR_DIMENSION: usize = 2500;
 
 /// The number of determinants of the sector `(n_up, n_down)` in `num_spatial`
@@ -153,7 +166,9 @@ impl FermionHamiltonian {
     }
 
     /// The lowest eigenvalue of the sector `(n_up, n_down)`: the FCI energy
-    /// of the system with that many electrons of each spin.
+    /// of the lowest state with that many electrons of each spin, of any total
+    /// spin `S ≥ |N↑ − N↓|/2` and any spatial symmetry (see the
+    /// [module docs](super::sector)).
     ///
     /// # Errors
     /// As [`sector_eigenvalues`](Self::sector_eigenvalues).

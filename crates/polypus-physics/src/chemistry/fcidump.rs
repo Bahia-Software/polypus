@@ -20,19 +20,28 @@
 //! ```
 //!
 //! - **Header.** `&FCI … &END` (or `/` instead of `&END`), keys in any case,
-//!   values separated by commas or blanks, over any number of lines. `NORB`
-//!   (spatial orbitals, at most [`MAX_FCIDUMP_ORBITALS`]) and `NELEC` are
-//!   required; `MS2` (`N↑ − N↓`) defaults to 0. `ORBSYM`, `ISYM` and any other
-//!   key (`OCC`, `CLOSED`, `TREL=.FALSE.`, `UHF=.FALSE.`, …) are accepted and
-//!   ignored, except those that change the meaning of the integrals:
+//!   values separated by commas or blanks, over any number of lines; the
+//!   end marker must be separated from the last value by a comma or a blank
+//!   (`ISYM=1/` and `MS2=0&END` are rejected, which no known writer
+//!   produces). `NORB` (spatial orbitals, at most [`MAX_FCIDUMP_ORBITALS`])
+//!   and `NELEC` are required; `MS2` (`N↑ − N↓`) defaults to 0. `ORBSYM`,
+//!   `ISYM` and any other key (`OCC`, `CLOSED`, `TREL=.FALSE.`,
+//!   `UHF=.FALSE.`, …) are accepted and ignored, except those that change
+//!   the meaning of the integrals:
 //!   `IUHF` other than 0, `UHF=.TRUE.` (unrestricted orbitals) and
-//!   `TREL=.TRUE.` (complex integrals) are rejected.
+//!   `TREL=.TRUE.` (complex integrals) are rejected. `ISYM` is not applied:
+//!   [`FermionHamiltonian::sector_ground_energy`] gives the lowest state of
+//!   the sector in **any** spatial symmetry, which is lower than or equal to
+//!   the energy of a state of symmetry `ISYM ≠ 1` the file was written for.
 //! - **Integrals.** `value i j k l`, indices 1-based. All four `> 0`: the
 //!   two-electron integral `(ij|kl)`; `k = l = 0`: the one-electron `h_ij`;
 //!   all `0`: the core energy (nuclear repulsion, plus any frozen core),
 //!   which becomes [`FermionHamiltonian::nuclear_repulsion`]; `j = k = l = 0`:
 //!   an orbital energy, which is not needed and is ignored. A value may use a
-//!   Fortran exponent (`1.0D-02`). Blank lines are skipped.
+//!   Fortran exponent (`1.0D-02`); a three-digit exponent written without its
+//!   letter (`0.1-100`, from Fortran's `ES23.16` below `1e-99`) is rejected
+//!   as not a number, since writers omit integrals that small. Blank lines
+//!   are skipped.
 //! - **Symmetry.** A file lists one integral of each group of equal ones (8
 //!   permutations of `(ij|kl)`, 2 of `h_ij`) or more of them; PySCF's default
 //!   lists both `(ij|kl)` and `(kl|ij)`, which may differ in the last digit.
@@ -196,7 +205,10 @@ impl Fcidump {
         self.ms2
     }
 
-    /// The electron sector `(N↑, N↓)` of the file's `NELEC` and `MS2`.
+    /// The electron sector `(N↑, N↓)` of the file's `NELEC` and `MS2`. `MS2`
+    /// is twice the spin **projection** `M_S`, not the multiplicity: the
+    /// sector's lowest state has any total spin `S ≥ |M_S|` and any spatial
+    /// symmetry (`ISYM` is not applied; see the [module docs](self)).
     pub fn sector(&self) -> (usize, usize) {
         let n = self.num_electrons as i64;
         // `parse` checked that both are whole and between 0 and NORB.
