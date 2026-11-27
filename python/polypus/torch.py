@@ -43,9 +43,10 @@ PyTorch: import it as ``polypus.torch``.
   The input is converted there at the boundary, and the output comes back in
   the input's dtype and device (``float64`` for a non-floating input), each
   gradient in its tensor's: a ``float32`` network needs no ``.double()``, at
-  the cost of a rounding at the boundary. The parameter is ``float64`` unless
-  the layer is converted (``layer.float()``). GPU tensors are moved to the CPU
-  and back; that path is not tested in CI.
+  the cost of a rounding at the boundary. A complex input is a ``TypeError``,
+  rather than losing its imaginary part in the conversion. The parameter is
+  ``float64`` unless the layer is converted (``layer.float()``). GPU tensors
+  are moved to the CPU and back; that path is not tested in CI.
 - **Seeds.** With ``seed``, every call to the backend gets its own seed,
   derived from ``(seed, number of the forward pass, forward or backward)``
   and kept below ``2**63``, the range Qiskit Aer takes (contract C-7, #393):
@@ -286,6 +287,12 @@ class QuantumLayer(nn.Module):
         sample, 1-D, gives ``(num_observables,)``."""
         if not isinstance(x, torch.Tensor):
             raise TypeError(f"x must be a torch.Tensor, got {type(x).__name__}")
+        # Before the conversion to float64, which would drop the imaginary part.
+        if x.is_complex():
+            raise TypeError(
+                f"x must hold real numbers, got a complex tensor ({x.dtype}); the "
+                "imaginary part is never dropped"
+            )
         if x.dim() == 1:
             return self.forward(x.unsqueeze(0)).squeeze(0)
         if x.dim() != 2:

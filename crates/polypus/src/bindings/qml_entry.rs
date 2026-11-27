@@ -280,7 +280,10 @@ pub fn qml_train<'py>(
     let callback = validate_callback(callback.as_ref())?;
     // Type-checked before any circuit is composed; the count is checked once
     // `x_train` has been read (contract C-8).
-    let labels = y_train.as_ref().map(extract_labels).transpose()?;
+    let labels = y_train
+        .as_ref()
+        .map(|y| extract_labels(y, "y_train"))
+        .transpose()?;
     let py = feature_map.py();
 
     // Rotosolve needs a fitness that averages a cost per bitstring, which a

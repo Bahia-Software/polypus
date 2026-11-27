@@ -357,11 +357,6 @@ class TestNativeQmlChecksRaiseIt:
                 id="vjp-cotangent-1d",
             ),
             pytest.param(
-                lambda: _primitive("vjp", cotangent=[[1.0 + 2.0j]] * 6),
-                "real values",
-                id="vjp-cotangent-complex",
-            ),
-            pytest.param(
                 lambda: _primitive("vjp", cotangent=[[1.0]] * 5 + [[1.0, 2.0]]),
                 r"\(rows, observables\) = \(6, 1\)",
                 id="vjp-cotangent-ragged",
@@ -464,11 +459,24 @@ class TestNativeQmlChecksRaiseIt:
         self, monkeypatch
     ):
         # A value that is not a real number is the `TypeError` `x` raises for
-        # one (DBFerPra's review of #577), still before any backend exists.
+        # one (DBFerPra's review of #577), still before any backend exists; a
+        # complex one too, whatever holds it (#602).
+        import numpy as np
+
         fake = FakeCunqa().install(monkeypatch)
-        for bad in ([["a"]] * 6, [[None]] * 6):
+        for bad in (
+            [["a"]] * 6,
+            [[None]] * 6,
+            [[1.0 + 2.0j]] * 6,
+            np.ones((6, 1), dtype=complex),
+        ):
             with pytest.raises(TypeError, match="cotangent must hold real numbers"):
                 _primitive("vjp", cotangent=bad)
+        # In an object array, read value by value: the message names the value.
+        complex_scalars = np.ones((6, 1), dtype=object)
+        complex_scalars[3, 0] = np.complex128(1)
+        with pytest.raises(TypeError, match=r"cotangent\[3\]\[0\] is .+, a complex"):
+            _primitive("vjp", cotangent=complex_scalars)
         assert fake.calls == []
 
     def test_vjp_takes_the_model_type_error_first(self, monkeypatch):

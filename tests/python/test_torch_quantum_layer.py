@@ -20,6 +20,7 @@ import copy
 import math
 import os
 import sys
+import warnings
 
 import numpy as np
 import polypus
@@ -169,6 +170,32 @@ class TestForward:
             layer(torch.zeros(2, 5, dtype=torch.float64))
         with pytest.raises(polypus.ConfigurationError):
             layer(torch.tensor([[0.1, math.nan]], dtype=torch.float64))
+
+    @pytest.mark.parametrize(
+        "x",
+        [
+            lambda: torch.tensor(ROWS, dtype=torch.complex128),
+            lambda: torch.tensor(ROWS[0], dtype=torch.complex64),
+            lambda: torch.tensor(ROWS, dtype=torch.complex128) + 0.5j,
+            # Its shape is wrong too: the dtype is checked first.
+            lambda: torch.zeros(1, 2, 2, dtype=torch.complex128),
+        ],
+        ids=["complex128-2d", "complex64-1d", "imaginary-part", "bad-shape"],
+    )
+    def test_a_complex_input_is_a_type_error(self, x, monkeypatch):
+        # #602: the conversion to float64 would drop the imaginary part, with
+        # torch's "Casting complex values to real" warning. Refused before
+        # `qml.expval` is called and before the shape is looked at, the input
+        # being a tensor checked first.
+        model = models()["angle-ry"]
+        layer = QuantumLayer(model, initial_params=point(model), exact=True)
+        spy = Spy(monkeypatch, "expval")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(TypeError, match=r"complex tensor \(torch\.complex"):
+                layer(x())
+        assert spy.calls == []
+        assert not [w for w in caught if "complex" in str(w.message).lower()]
 
     def test_execution_arguments_are_expvals_checked_at_the_first_forward(self):
         model = models()["angle-ry"]
