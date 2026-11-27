@@ -144,7 +144,7 @@ impl DenseMatrix {
     }
 }
 
-/// Largest amplitude, relative to `Σ|c|`, that
+/// Largest amplitude, relative to `Σ|c|` of the non-identity terms, that
 /// [`PauliSum::restricted_eigenvalues`] accepts outside the given span: the
 /// terms that leave it must cancel to rounding.
 pub const RESTRICTION_TOLERANCE: f64 = 1e-12;
@@ -258,15 +258,19 @@ impl PauliSum {
     /// eigenvalues of the sum, not of a projection. Single terms may leave
     /// the span (a hopping `(X₀X₁ + Y₀Y₁)/2` conserves the electrons, `X₀X₁`
     /// alone does not): what they send outside must cancel, to within
-    /// [`RESTRICTION_TOLERANCE`]` · Σ|c|` per amplitude.
+    /// [`RESTRICTION_TOLERANCE`]` · Σ|c|` per amplitude, the sum over the
+    /// non-identity terms (the identity never leaves the span).
     ///
     /// # Errors
-    /// - [`PhysicsError::UnsupportedOperation`] if the sum has more qubits
-    ///   than a `usize` has bits, `basis` is not strictly ascending, a state is outside the `2^n` basis states, the span is not
-    ///   invariant (an amplitude sent outside does not cancel), it has more
-    ///   than
-    ///   [`MAX_SECTOR_DIMENSION`](super::MAX_SECTOR_DIMENSION) states, or a
-    ///   term has an odd number of `Y` (its matrix is not real).
+    /// - [`PhysicsError::UnsupportedOperation`] if
+    ///   - the sum has more qubits than a `usize` has bits;
+    ///   - `basis` is not strictly ascending, or a state is outside the `2^n`
+    ///     basis states;
+    ///   - the span is not invariant (an amplitude sent outside does not
+    ///     cancel);
+    ///   - the span has more than
+    ///     [`MAX_SECTOR_DIMENSION`](super::MAX_SECTOR_DIMENSION) states; or
+    ///   - a term has an odd number of `Y` (its matrix is not real).
     /// - As [`DenseMatrix::symmetric_eigenvalues`].
     pub fn restricted_eigenvalues(&self, basis: &[usize]) -> Result<Vec<f64>, PhysicsError> {
         let unsupported = |message: String| PhysicsError::UnsupportedOperation { message };
@@ -313,7 +317,15 @@ impl PauliSum {
                 }
             }
         }
-        let tolerance = RESTRICTION_TOLERANCE * self.coefficient_norm();
+        // The identity maps every state to itself, so it never leaks: a large
+        // constant (a molecule's energy offset) must not widen the tolerance.
+        let tolerance = RESTRICTION_TOLERANCE
+            * self
+                .terms()
+                .iter()
+                .filter(|t| !t.string.is_identity())
+                .map(|t| t.coefficient.abs())
+                .sum::<f64>();
         if let Some((&(image, column), &amplitude)) =
             outside.iter().find(|(_, a)| a.abs() > tolerance)
         {

@@ -573,10 +573,14 @@ impl Tapering {
             });
         }
         // Every determinant is enumerated: refuse a sector so large that the
-        // tapered block (about 2^-k of it) would exceed the dense limit
-        // anyway, before enumerating it.
-        let cap = super::MAX_SECTOR_DIMENSION
+        // tapered block (about 2^-s of it, `s` the number of symmetries)
+        // would exceed the dense limit anyway, before enumerating it.
+        // `checked_shl` alone fails only for a shift of 64 or more, not when
+        // bits fall off the top, so the factor `2^s` is multiplied with an
+        // overflow check; past `usize::MAX` there is no cap.
+        let cap = 1usize
             .checked_shl(self.symmetries.len() as u32)
+            .and_then(|factor| super::MAX_SECTOR_DIMENSION.checked_mul(factor))
             .unwrap_or(usize::MAX);
         match super::sector_dimension(k, n_up, n_down) {
             Some(d) if d <= cap => {}
@@ -1001,6 +1005,23 @@ mod tests {
             leak.restricted_eigenvalues(&[0b00, 0b11]),
             Err(PhysicsError::UnsupportedOperation { .. })
         ));
+        // The identity never leaves the span, so it does not widen the
+        // tolerance: a constant shift of 10⁶ (as a molecule's energy offset
+        // may be) must not hide a leak of 10⁻⁷, which is the whole of the
+        // non-identity part (with Σ|c| over all terms the tolerance would be
+        // 10⁻⁶ and the leak would pass).
+        let shifted_leak = PauliSum::new(
+            1,
+            vec![
+                PauliTerm::new(1e6, PauliString::identity()),
+                PauliTerm::new(1e-7, "X0".parse().unwrap()),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            shifted_leak.restricted_eigenvalues(&[0]),
+            Err(PhysicsError::UnsupportedOperation { .. })
+        ));
         // More qubits than a usize has bits: an error, not a panic.
         let wide = PauliSum::new(65, vec![PauliTerm::new(1.0, z(&[64]))]).unwrap();
         assert!(matches!(
@@ -1126,5 +1147,23 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(tapering.cnots(), &[(1, 0)]);
+    }
+
+    #[test]
+    fn the_sector_cap_does_not_wrap_with_many_symmetries() {
+        // 63 symmetries: 2500 · 2⁶³ is above usize::MAX, so there is no cap,
+        // but shifting 2500 left by 63 bits drops every bit and gives 0,
+        // which would refuse this sector of 32 determinants. Z_1 … Z_63 at
+        // +1 keep only the determinant with its electron on qubit 0, the one
+        // qubit left after tapering.
+        let symmetries: Vec<PauliString> = (1..64).map(|q| z(&[q])).collect();
+        let tapering = Tapering::new(64, &symmetries, 0).unwrap();
+        assert_eq!(tapering.num_tapered_qubits(), 1);
+        assert_eq!(
+            tapering
+                .sector_basis(QubitMapping::JordanWigner, 1, 0)
+                .unwrap(),
+            vec![1]
+        );
     }
 }
