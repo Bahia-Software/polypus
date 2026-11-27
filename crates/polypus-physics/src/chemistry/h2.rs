@@ -14,7 +14,8 @@
 //!
 //! The molecular orbitals are exact by symmetry only for a homonuclear
 //! diatomic; there is no iterative Hartree–Fock, so this does not extend to
-//! other molecules (they enter through FCIDUMP, issue #535).
+//! other molecules (they enter through FCIDUMP, [`super::Fcidump`], issue
+//! #535).
 
 use super::sto3g::{
     electron_repulsion, kinetic, nuclear_attraction, overlap, ContractedGaussian, Nucleus,
