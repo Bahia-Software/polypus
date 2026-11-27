@@ -2704,9 +2704,9 @@ that does not depend on the data is checked where it is written, as a plain
   in a `usize` (a huge `reps`, or any layer after one) is
   `ValidationError::TooManyParams`. Both are a `ValueError` that leaves the
   object as it was, never PyO3's `OverflowError` or a panic. A count of
-  another type (a `bool`, a `str`, a `float`) is a `TypeError`; an object
-  with `__index__` (a NumPy integer) is the integer it returns, which an
-  out-of-range message shows.
+  another type (a `bool`, NumPy's `bool_` included, a `str`, a `float`) is a
+  `TypeError`; an object with `__index__` (a NumPy integer) is the integer
+  it returns, which an out-of-range message shows.
   `simplified_two_design(reps)` takes only `reps`: it reserves
   `n + 2·(n − 1)·reps` parameters for the `n` qubits active where it sits
   (one `Ry` per qubit, then two per pair per block), has no string options
@@ -2790,15 +2790,17 @@ holds, is the same `ValueError` at the call.
   must be an integer >= 0 or None, got -1`, `polypus.torch`'s words. `nodes`
   and `cores_per_qpu` are refused on every infrastructure, although `0` is
   refused on `cunqa` only;
-- a `bool` (`True` is not one shot) or another type (a `float` such as
+- a `bool` (`True` is not one shot), NumPy's `bool_` included, or another
+  type (a `float` such as
   `16.0`, a `str`, `None` except for `seed`) is a `TypeError`, raised as the
   arguments are read, before any check of the call; an object with
   `__index__` (a NumPy integer) is the integer it returns, which an
   out-of-range message shows;
-- each range is checked at its place in the order of the checks: `shots`
-  then `n_qpus`, right before their `>= 1` check; `nodes` then
-  `cores_per_qpu`, right before the CUNQA allocation (on `cunqa`, their
-  `>= 1` and `walltime`); `seed` right before a `seed` on `qmio` is refused,
+- each range is checked at its place in the order of the checks, one
+  argument after the other: `shots`'s range then its `>= 1`, then `n_qpus`'s
+  range then its `>= 1`; `nodes`'s range then, on `cunqa`, its `>= 1`, then
+  the same for `cores_per_qpu`, then `walltime` (on `cunqa`); `seed` right
+  before a `seed` on `qmio` is refused,
   and in `fit`, which has no such refusal, after `id` and `loss`, before the
   optimizer seed is resolved (C-7). The narrower range of Aer and CUNQA
   (below `2**63`, C-7 **Seed range**) is checked later, once the backend's
@@ -2984,9 +2986,10 @@ Python, for a training loop of the caller's own:
   rounding: the rows are summed in row order whatever the blocks).
 - **Checks.** Every one runs before a backend exists and raises
   `polypus.ConfigurationError`, the cotangent's values excepted (`x`'s
-  `TypeError`, below), in order: `wrt`; `shots` and `n_qpus` (their range,
-  then `>= 1`), `nodes` and `cores_per_qpu` (their range, on every
-  infrastructure), the CUNQA allocation and `exact`; the rows against the
+  `TypeError`, below), in order: `wrt`; `shots`, then `n_qpus` (each its
+  range, then `>= 1`), `nodes`, then `cores_per_qpu` (each its range, on
+  every infrastructure, then its part of the CUNQA allocation), the rest of
+  the CUNQA allocation and `exact`; the rows against the
   model; `params`; for
   `vjp`, the `cotangent` (its rows not ragged, real, then its shape, the
   error naming the expected and the received one; then each value read as a
@@ -3052,9 +3055,10 @@ seed=None, exact=False)` exposes (h) to Python:
   integer (a `bool` included) comes first, as the arguments are read, then
   the `TypeError` for `encoder`. Then each of these is
   a `polypus.ConfigurationError` raised before a backend exists, in order:
-  `shots` and `n_qpus` (their range, then `>= 1`), `nodes` and
-  `cores_per_qpu` (their range, on every infrastructure), the CUNQA
-  allocation and `exact`; the rows of `x1`
+  `shots`, then `n_qpus` (each its range, then `>= 1`), `nodes`, then
+  `cores_per_qpu` (each its range, on every infrastructure, then its part of
+  the CUNQA allocation), the rest of the CUNQA allocation and `exact`; the
+  rows of `x1`
   (empty, zero-width, ragged, non-finite), an `Encoder` with no layers, the
   feature count against the encoder and every sample the encoders reject (a
   zero sample for amplitude encoding, a non-binary one for basis encoding);
@@ -3286,15 +3290,17 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   cotangent checked right after `params`, and a primitive, the kernel
   included, runs every block on one allocation),
   `test_qml_native_execution_ints.py` (the execution integers of the same
-  entry points: a `bool`, a `float`, a `str`, a complex and `None` a
-  `TypeError` before any CUNQA call, NumPy integers reaching CUNQA as the
-  integers they hold and refused by their value, where each range sits in
-  the order of the checks, `0` keeping its message and its acceptance off
+  entry points: a `bool` (NumPy's too), a `float`, a `str`, a complex and
+  `None` a `TypeError` before any CUNQA call, NumPy integers reaching CUNQA
+  as the integers they hold and refused by their value, where each range
+  sits in the order of the checks, an argument's range and minimum before
+  the next argument's range, the largest value of each type passing its
+  range, `0` keeping its message and its acceptance off
   CUNQA, a negative `nodes` or `cores_per_qpu` with the message of `0` on
   CUNQA and its type's bound elsewhere, the signatures still showing their
   defaults, and
   `Dataset.train_test_split`'s `seed`: a plain `ValueError`, a `TypeError`
-  for a `bool`, a NumPy seed giving the same split), and
+  for a `bool`, NumPy's too, a NumPy seed giving the same split), and
   the `Model.fit` cases of `test_callback.py` (its
   `callback`'s `TypeError` before the CUNQA seam and after `final_shots`, one
   call per iteration for every optimizer, Adam's `evaluations`, a stop that

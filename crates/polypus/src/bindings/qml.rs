@@ -120,16 +120,18 @@ fn extract_count(ob: &Bound<'_, PyAny>) -> PyResult<Result<usize, OutOfRangeCoun
 /// PyO3's own error for anything else (a `TypeError` for another type).
 ///
 /// A `bool` is not an integer here, although Python makes it an `int`: it is a
-/// `TypeError`, as `final_shots` treats one. An object with `__index__` (a
-/// NumPy integer, say) is the integer it returns: an out-of-range one is
-/// described by that integer, never compared or printed as the object itself,
-/// which may support neither.
+/// `TypeError`, as `final_shots` treats one. So is a NumPy `bool_`, which is
+/// not a Python `bool` and which NumPy 2.0 still reads through `__index__` as
+/// `1`/`0`, with a `DeprecationWarning`. An object with `__index__` (a NumPy
+/// integer, say) is the integer it returns: an out-of-range one is described
+/// by that integer, never compared or printed as the object itself, which may
+/// support neither.
 fn extract_unsigned<'py, T>(ob: &Bound<'py, PyAny>) -> PyResult<Result<T, OutOfRangeCount>>
 where
     T: for<'a> FromPyObject<'a, 'py, Error = PyErr>,
 {
     let py = ob.py();
-    if ob.is_instance_of::<PyBool>() {
+    if ob.is_instance_of::<PyBool>() || is_numpy_bool(ob) {
         return Err(PyTypeError::new_err(format!(
             "expected an integer, got a bool ({})",
             ob.str()?
@@ -146,6 +148,16 @@ where
         }
         Err(err) => Err(err),
     }
+}
+
+/// Whether `ob` is a NumPy boolean scalar (`numpy.bool_`, named `numpy.bool`
+/// from NumPy 2), recognised by its type without importing NumPy, as the
+/// training callback recognises its return value.
+fn is_numpy_bool(ob: &Bound<'_, PyAny>) -> bool {
+    let kind = ob.get_type();
+    let module = kind.module().map(|m| m.to_string()).unwrap_or_default();
+    let name = kind.name().map(|n| n.to_string()).unwrap_or_default();
+    module == "numpy" && (name == "bool_" || name == "bool")
 }
 
 /// A count argument, such as `reps` or `num_qubits`: a Python `int` that fits
@@ -255,10 +267,11 @@ const CUNQA_AT_LEAST_ONE: &str = ">= 1 for the 'cunqa' infrastructure";
 /// What a negative `seed` must be, in the words of `polypus.torch`'s check.
 const SEED_LOWEST: &str = "an integer >= 0 or None";
 
-/// `shots` and `n_qpus` checked as every native entry point checks them, in
-/// this order: each within a `u32` (a negative one with the message of `0`),
-/// then both `>= 1` ([`validate_shots_and_qpus`]). Each refusal a
-/// `polypus.ConfigurationError` naming the argument and the value.
+/// `shots` and `n_qpus` checked as every native entry point checks them, one
+/// after the other: `shots` within a `u32` (a negative one with the message
+/// of `0`), then `>= 1` ([`validate_shots_and_qpus`]), then `n_qpus` the same
+/// way. Each refusal a `polypus.ConfigurationError` naming the argument and
+/// the value.
 fn checked_shots_and_qpus(
     shots: &UnsignedArg<u32>,
     n_qpus: &UnsignedArg<u32>,
@@ -266,6 +279,8 @@ fn checked_shots_and_qpus(
     let shots = shots
         .in_range("shots", AT_LEAST_ONE, u32::MAX)
         .map_err(configuration_error)?;
+    // `shots`' own `>= 1` before `n_qpus`'s range: an `n_qpus` of 1 passes it.
+    validate_shots_and_qpus(shots, 1)?;
     let n_qpus = n_qpus
         .in_range("n_qpus", AT_LEAST_ONE, u32::MAX)
         .map_err(configuration_error)?;
@@ -274,8 +289,9 @@ fn checked_shots_and_qpus(
 }
 
 /// `nodes` and `cores_per_qpu` checked as every native entry point checks
-/// them: each within a `u32` on any infrastructure, then the CUNQA allocation
-/// ([`validate_cunqa_allocation`], which refuses `0` on `cunqa` only). Each
+/// them, one after the other: each within a `u32` on any infrastructure, then
+/// its part of the CUNQA allocation ([`validate_cunqa_allocation`], which
+/// refuses `0` on `cunqa` only), and `walltime` last. Each
 /// refusal a `polypus.ConfigurationError` naming the argument and the value;
 /// a negative one says what `0`'s refusal says on `cunqa`
 /// (`nodes must be >= 1 for the 'cunqa' infrastructure, got -1`) and
@@ -294,6 +310,9 @@ fn checked_allocation(
     let nodes = nodes
         .in_range("nodes", lowest, u32::MAX)
         .map_err(configuration_error)?;
+    // `nodes`' own part of the allocation before `cores_per_qpu`'s range: a
+    // `cores_per_qpu` of 1 and no `walltime` pass the rest of it.
+    validate_cunqa_allocation(infrastructure, nodes, 1, None)?;
     let cores_per_qpu = cores_per_qpu
         .in_range("cores_per_qpu", lowest, u32::MAX)
         .map_err(configuration_error)?;

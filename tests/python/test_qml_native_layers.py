@@ -878,6 +878,18 @@ class TestBoolIsNotACount:
         ):
             _qml(name)(flag)
 
+    @pytest.mark.parametrize("flag", ["True_", "False_"])
+    @pytest.mark.parametrize("name", ["Encoder", "Ansatz", "Z", "X", "Y"])
+    def test_a_numpy_bool_neither(self, name, flag):
+        # `numpy.bool_` is not a Python `bool`, and NumPy 2.0 still reads it
+        # through `__index__` as 1/0.
+        np = pytest.importorskip("numpy")
+        value = getattr(np, flag)
+        with pytest.raises(
+            TypeError, match=f"expected an integer, got a bool \\({value}\\)"
+        ):
+            _qml(name)(value)
+
     @pytest.mark.parametrize("flag", [True, False], ids=_BOOL_IDS)
     @pytest.mark.parametrize(
         "build",

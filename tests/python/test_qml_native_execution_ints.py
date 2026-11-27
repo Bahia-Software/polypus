@@ -28,11 +28,16 @@ from test_configuration_errors import (  # noqa: E402
 
 INTEGERS = ["shots", "n_qpus", "nodes", "cores_per_qpu", "seed"]
 
+# Python's bools and NumPy's: `numpy.bool_` is not a Python `bool`, and NumPy
+# 2.0 still reads it through `__index__` as 1/0.
+BOOLS = [True, False, np.True_, np.False_]
+BOOL_IDS = ["True", "False", "np.True_", "np.False_"]
+
 
 class TestTypes:
     @pytest.mark.parametrize("entry", list(NATIVE_ENTRY_POINTS))
     @pytest.mark.parametrize("argument", INTEGERS)
-    @pytest.mark.parametrize("value", [True, False])
+    @pytest.mark.parametrize("value", BOOLS, ids=BOOL_IDS)
     def test_a_bool_is_a_type_error_before_any_cunqa_call(
         self, monkeypatch, entry, argument, value
     ):
@@ -123,6 +128,31 @@ class TestOrder:
         assert fake.calls == []
 
     @pytest.mark.parametrize("entry", list(NATIVE_ENTRY_POINTS))
+    def test_the_minimum_of_shots_comes_before_the_range_of_n_qpus(
+        self, monkeypatch, entry
+    ):
+        # One argument after the other: `shots`'s range and `>= 1`, then
+        # `n_qpus`'s.
+        fake = FakeCunqa().install(monkeypatch)
+        with pytest.raises(
+            polypus.ConfigurationError, match=r"^shots must be >= 1, got 0$"
+        ):
+            NATIVE_ENTRY_POINTS[entry](shots=0, n_qpus=-1)
+        assert fake.calls == []
+
+    @pytest.mark.parametrize("entry", list(NATIVE_ENTRY_POINTS))
+    def test_the_minimum_of_nodes_comes_before_the_range_of_cores_on_cunqa(
+        self, monkeypatch, entry
+    ):
+        fake = FakeCunqa().install(monkeypatch)
+        with pytest.raises(
+            polypus.ConfigurationError,
+            match=r"^nodes must be >= 1 for the 'cunqa' infrastructure, got 0$",
+        ):
+            NATIVE_ENTRY_POINTS[entry](nodes=0, cores_per_qpu=-1)
+        assert fake.calls == []
+
+    @pytest.mark.parametrize("entry", list(NATIVE_ENTRY_POINTS))
     def test_nodes_and_cores_come_before_the_rest_of_the_cunqa_allocation(
         self, monkeypatch, entry
     ):
@@ -177,6 +207,43 @@ class TestOrder:
         NATIVE_ENTRY_POINTS[entry](
             infrastructure="local", exact=True, nodes=0, cores_per_qpu=0
         )
+
+
+class TestLargestValues:
+    """The largest value each type holds passes its range: the call goes on
+    to the next check, which refuses it, before any CUNQA call."""
+
+    @pytest.mark.parametrize("entry", list(NATIVE_ENTRY_POINTS))
+    @pytest.mark.parametrize(
+        "integers",
+        [
+            {"shots": 2**32 - 1, "n_qpus": 2**32 - 1},
+            {"nodes": 2**32 - 1, "cores_per_qpu": 2**32 - 1},
+        ],
+        ids=["shots-and-n_qpus", "nodes-and-cores_per_qpu"],
+    )
+    def test_the_largest_u32_reaches_the_walltime_check(
+        self, monkeypatch, entry, integers
+    ):
+        # A `walltime` that is not HH:MM:SS is the last check of the CUNQA
+        # allocation.
+        fake = FakeCunqa().install(monkeypatch)
+        with pytest.raises(polypus.ConfigurationError, match="walltime"):
+            NATIVE_ENTRY_POINTS[entry](walltime="soon", **integers)
+        assert fake.calls == []
+
+    @pytest.mark.parametrize("entry", list(NATIVE_ENTRY_POINTS))
+    def test_the_largest_u64_seed_reaches_the_seed_range_of_cunqa(
+        self, monkeypatch, entry
+    ):
+        # CUNQA's QPUs run on Aer, which takes a seed below 2**63 (C-7).
+        fake = FakeCunqa().install(monkeypatch)
+        with pytest.raises(
+            polypus.ConfigurationError,
+            match=rf"^seed {2**64 - 1} is out of range for",
+        ):
+            NATIVE_ENTRY_POINTS[entry](seed=2**64 - 1)
+        assert fake.calls == []
 
 
 class TestNegativeAllocation:
@@ -248,7 +315,7 @@ class TestTrainTestSplitSeed:
             polypus.qml.Dataset(self.ROWS).train_test_split(0.5, seed=seed)
         assert not isinstance(raised.value, polypus.ConfigurationError)
 
-    @pytest.mark.parametrize("seed", [True, False])
+    @pytest.mark.parametrize("seed", BOOLS, ids=BOOL_IDS)
     def test_a_bool_is_a_type_error(self, seed):
         with pytest.raises(TypeError, match="got a bool"):
             polypus.qml.Dataset(self.ROWS).train_test_split(0.5, seed=seed)
