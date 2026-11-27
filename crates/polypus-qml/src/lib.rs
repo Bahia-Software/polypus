@@ -14,10 +14,11 @@
 //! ## Reproducibility
 //!
 //! All randomness in this crate takes an explicit `u64` seed and runs through
-//! a crate-local `SplitMix64`; the pure crate never reads OS entropy. Resolving
-//! `None → OS entropy` is the responsibility of the bindings layer. In this
-//! phase the only randomness is the dataset split; parameter initialization
-//! joins it later.
+//! the workspace's `SplitMix64` ([`polypus_circuit::rng`]); the pure crate
+//! never reads OS entropy. Resolving `None → OS entropy` is the responsibility
+//! of the bindings layer. The randomness is the dataset split
+//! ([`Dataset::train_test_split`]) and the minibatch selection
+//! ([`minibatch_indices`]).
 //!
 //! ## Current scope
 //!
@@ -130,7 +131,7 @@ mod rng;
 
 pub use adjoint::{AdjointRun, DiagonalObservable};
 pub use dataset::Dataset;
-pub use error::{QmlError, ValidationError};
+pub use error::{QmlError, SizeLimit, ValidationError};
 pub use jacobian::{ExpectationJacobian, Jacobian, JacobianBlock, JacobianWrt, Vjp};
 pub use kernel::{FeatureMap, FeatureStates, FidelityKernel};
 pub use layers::{
@@ -139,7 +140,13 @@ pub use layers::{
     RotationAxis, SimplifiedTwoDesignAnsatz, StronglyEntanglingAnsatz,
 };
 pub use loss::Loss;
-pub use model::{CompiledModel, QuantumModel, TrainedModel};
-pub use observables::{Observable, Pauli, PauliString};
+pub use model::{CompiledModel, QuantumModel, TrainedModel, MAX_MODEL_GATES, MAX_MODEL_QUBITS};
+pub use observables::{ExactState, Observable, Pauli, PauliString};
 pub use problem::{minibatch_indices, QmlProblem};
 pub use readout::{Decision, Readout};
+
+/// Whether this build has the `test-support` feature, which only
+/// `[dev-dependencies]` may enable: the `polypus` crate refuses to compile the
+/// wheel while this is `true`.
+#[doc(hidden)]
+pub const TEST_SUPPORT_ENABLED: bool = cfg!(feature = "test-support");

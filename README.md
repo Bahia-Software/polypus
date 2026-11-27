@@ -264,7 +264,7 @@ Polypus is a Cargo workspace of 14 crates, all published on [crates.io](https://
 | [`polypus-optimizers`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-optimizers) | DE (classic, SHADE, L-SHADE), PSO, QNG, CMA-ES, Adam (or momentum), SPSA and Rotosolve, and a bridge to ask/tell optimizers |
 | [`polypus-observable`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-observable) | QUBO and Ising cost observables, and Pauli-sum measurement (qubit-wise grouping and a parity reducer) |
 | [`polypus-qml`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-qml) | Quantum machine learning models: datasets, layers, readout and losses |
-| [`polypus-physics`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-physics) | Monte Carlo transport, Pauli-sum Hamiltonians (Jordan–Wigner and parity mappings, tapering, exact diagonalization) and molecular Hamiltonians (H₂, STO-3G) |
+| [`polypus-physics`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-physics) | Monte Carlo transport, Pauli-sum Hamiltonians (Jordan–Wigner and parity mappings, tapering, exact diagonalization, also per electron sector) and molecular Hamiltonians (H₂ in STO-3G, any molecule from FCIDUMP) |
 | [`polypus-backend`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-backend) | The `QuantumBackend` trait that backends implement and the `Planner` that sizes circuit waves |
 | [`polypus-backend-conformance`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-backend-conformance) | Conformance tests for backends |
 | [`polypus-subprocess-backend`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-subprocess-backend) | Bridge for backends written in Python |
@@ -281,7 +281,7 @@ Design notes: [contracts](https://github.com/Bahia-Software/polypus/blob/main/do
 ## Engineering
 
 - **Released and versioned.** Every release ships to PyPI, crates.io and Zenodo; public Rust APIs are checked with `cargo-semver-checks`, and breaking changes come with upgrade notes in the [CHANGELOG](https://github.com/Bahia-Software/polypus/blob/main/CHANGELOG.md).
-- **Tested beyond unit tests.** CI runs clippy with warnings as errors, the MSRV build, Miri on the simulator kernels, fuzzing of the OpenQASM 2 and 3 importers, a `cargo-deny` licence and advisory audit, and wheel builds on Linux, macOS and Windows; mutation testing runs weekly.
+- **Tested beyond unit tests.** CI runs clippy with warnings as errors, the MSRV build, Miri on the simulator kernels, fuzzing of the OpenQASM 2 and 3 importers, a `cargo-deny` licence and advisory audit, wheel builds that are installed and tested on Linux, macOS and Windows, and the Rust tests of the simulator and the circuit IR on macOS and Windows; mutation testing runs weekly.
 - **Specified.** Cross-layer behaviour is written down as [contracts](https://github.com/Bahia-Software/polypus/blob/main/docs/CONTRACTS.md), each backed by tests, and design choices as [architecture decisions](https://github.com/Bahia-Software/polypus/tree/main/docs/adr). New backends are checked by the `polypus-backend-conformance` suite.
 
 ## Citing Polypus

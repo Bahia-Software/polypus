@@ -9,7 +9,7 @@ use polypus_infrastructure::{
 };
 use polypus_optimizers::GradientOracle;
 use polypus_orchestration::{OracleFactory, Oracles, Resources};
-use polypus_qml::{minibatch_indices, QmlError, QmlProblem};
+use polypus_qml::{minibatch_indices, ExactState, QmlError, QmlProblem};
 use pyo3::prelude::*;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -716,12 +716,13 @@ impl QmlOracle {
 
     /// Run `bound` on the exact native backend, after the cancellation and
     /// interrupt checks the planner would make between waves, and read each
-    /// circuit with `problem`'s [`read_probabilities`] as soon as its map is
-    /// built: only those few numbers are kept, never a map beyond the circuits
-    /// in flight (issue #645). Hand them to the `*_from_expectations` readers,
-    /// which give what the maps would, bit for bit.
+    /// circuit with `problem`'s [`read_state`] straight from its statevector:
+    /// only those few numbers are kept (issue #645), and no map of the
+    /// probabilities is ever built (issue #628), so the run needs no memory
+    /// beyond its statevectors. Hand them to the `*_from_expectations`
+    /// readers, which give what the maps would, bit for bit.
     ///
-    /// [`read_probabilities`]: QmlProblem::read_probabilities
+    /// [`read_state`]: QmlProblem::read_state
     fn run_exact(
         &self,
         native: &NativeStatevectorBackend,
@@ -732,11 +733,11 @@ impl QmlOracle {
             return Err(InfrastructureError::Cancelled.into());
         }
         self.cancel.poll_interrupt()?;
-        let readings = native.run_circuits_exact_with(bound, &self.config, |probabilities| {
-            problem
-                .read_probabilities(&probabilities)
-                .map_err(EvaluationError::from)
-        })?;
+        let readings =
+            native.run_circuits_exact_on_states(bound, &self.config, |amplitudes, width| {
+                let state = ExactState::new(amplitudes.len(), width, |s| amplitudes[s].norm_sqr());
+                problem.read_state(&state).map_err(EvaluationError::from)
+            })?;
         if readings.len() != bound.len() {
             return Err(EvaluationError::WrongLength {
                 expected: bound.len(),

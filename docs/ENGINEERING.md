@@ -22,7 +22,7 @@ with PyO3 Python bindings. The Cargo workspace has fourteen crates (the `fuzz/` 
 |---|---|---|
 | `polypus-circuit` | Circuit IR + OpenQASM 2.0 and OpenQASM 3 import/export + QIR export | No |
 | `polypus-sim` | Statevector simulator (GIL-free; optional rayon via the `parallel` feature) | No |
-| `polypus-physics` | Physics: classical Monte Carlo transport + quantum Hamiltonians as multi-qubit Pauli sums (fermion-to-qubit mappings, tapering, exact diagonalization) + molecular integrals and H₂ (`chemistry`); pure Rust | No |
+| `polypus-physics` | Physics: classical Monte Carlo transport + quantum Hamiltonians as multi-qubit Pauli sums (fermion-to-qubit mappings, tapering, exact diagonalization, also within one electron sector) + molecular integrals, H₂ and the FCIDUMP reader (`chemistry`); pure Rust | No |
 | `polypus-optimizers` | Variational optimizers (DE, PSO, QNG, CMA-ES, Adam, SPSA, Rotosolve) behind evaluation and gradient oracles, and `AlgorithmExternal`, the bridge that runs an `AskTell` optimizer (Optuna, Nevergrad, pycma through the Python bindings) | No |
 | `polypus-observable` | Cost observables reducing measurement counts to a cost: Qubo / Ising, and Pauli sums (qubit-wise-commuting grouping with basis rotations, and a parity reducer); pure math | No |
 | `polypus-qml` | Quantum machine learning: datasets, layered variational models (encoders, ansatz, convolution, pooling), Pauli readout and losses; produces `polypus-circuit` circuits and turns counts into fitness, never executes them | No |
@@ -31,7 +31,7 @@ with PyO3 Python bindings. The Cargo workspace has fourteen crates (the `fuzz/` 
 | `polypus-subprocess-backend` | A pyo3-free `QuantumBackend` bridging to a provider's Python SDK running in its **own subprocess** over a versioned length-prefixed JSON protocol; registered as the built-in `"subprocess"` backend. The interpreter runs in the child, never embedded here | No |
 | `polypus-infrastructure` | The concrete execution backends (`local`/Aer, `cunqa`, `qmio`, `native`), the `Infrastructure` factory (which routes unknown names through the registry and registers the built-in `subprocess`/`qmio` backends), the Qiskit boundary (`QiskitCircuit`, `to_py_object`) and the construction-time `ExecutionConfig`; re-exports the `polypus-backend` contract | GIL only |
 | `polypus-orchestration` | Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, the `Flow` trait + **all** flows (`RunCircuitFlow`, `TrainFlow`) with the `OracleFactory` seam, `dispatch_optimizer` and the type-erased `OracleErrorSlot`, and the `trace` module: the call trace's `CallTracer` and the decorators that record a run's batches, waves, iterations and QNG metric calls (contract C-12) | No |
-| `polypus-evaluation` | Candidate evaluation: the oracles (`VqcOracle`, `QmlOracle`) and the `OracleFactory` implementations that build them (`VqcOracleFactory`, `QmlOracleFactory`), plus `PyVarianceOracle`, `PyCallbackObservable`, the supervised QML objectives (`SupervisedObjective`: `PyLabelledCost`, `PySampleCost`; see `docs/adr/0002-qml-supervised-labels.md`), `CircuitSource` and `EvaluationError` | GIL only |
+| `polypus-evaluation` | Candidate evaluation: the oracles (`VqcOracle`, `QmlOracle`, and `PauliSumOracle` for Pauli-sum Hamiltonians, `docs/adr/0009-pauli-sum-oracle.md`) and the `OracleFactory` implementations that build them (`VqcOracleFactory`, `QmlOracleFactory`, `PauliSumOracleFactory`), plus `PyVarianceOracle`, `PyCallbackObservable`, the supervised QML objectives (`SupervisedObjective`: `PyLabelledCost`, `PySampleCost`; see `docs/adr/0002-qml-supervised-labels.md`), `CircuitSource` and `EvaluationError` | GIL only |
 | `polypus-logger` | `log::Log` sink shared by the workspace; installed only by the app layer | No |
 | `polypus` | The library + Python extension module; the FFI edge — `#[pyclass]`es, kwarg parsing, and error→`PyErr` conversion | **Yes** |
 
@@ -136,7 +136,7 @@ boundary stays out-of-process and explicit; see
     `Interrupt` trait, carried (optionally) on the `CancelToken`
     (`CancelToken::poll_interrupt`). The one implementation that actually calls
     `py.check_signals()` is `SignalInterrupt` in
-    `crates/polypus/src/bindings/mod.rs` (the edge). It runs while the thread is
+    `crates/polypus/src/bindings/interrupt.rs` (the edge). It runs while the thread is
     detached, so it attaches through `attach_or` rather than `Python::attach`
     and aborts the run with `InterpreterUnavailable` (raised as
     `KeyboardInterrupt`, like every other site reached while detached) when the
@@ -367,10 +367,13 @@ boundary stays out-of-process and explicit; see
   guarantees: there they need `/proc/meminfo`, which a Linux test environment
   must provide. Several processes sharing one cgroup (MPI ranks of a job step)
   each see the whole limit and must set `POLYPUS_MEM_BUDGET` per process.
-- **Reproducibility:** the RNG is seedable (`rng.rs` in `polypus-sim` and in
-  `polypus-optimizers`). Results must be deterministic given a seed. Don't
-  introduce nondeterminism: iteration order over a `HashMap` affecting
-  results, unseeded RNG, parallelism that changes reduction order, etc.
+- **Reproducibility:** the in-repo generators are seedable: the workspace's
+  SplitMix64 (`rng.rs` in `polypus-circuit`, for shots, seeds, splits and
+  minibatches) and the optimizers' `OptRng` (`rng.rs` in
+  `polypus-optimizers`); `polypus-physics` draws from the `rand::Rng` its
+  caller passes. Results must be deterministic given a seed. Don't introduce
+  nondeterminism: iteration order over a `HashMap` affecting results,
+  unseeded RNG, parallelism that changes reduction order, etc.
   A floating-point reduction over a `HashMap`/`HashSet` therefore accumulates
   in sorted-key order, never in iteration order (which differs per map and per
   process): the cost reducers sum a counts map in ascending bitstring order.
@@ -456,6 +459,17 @@ boundary stays out-of-process and explicit; see
   (`info-logs` et al., forwarded to `polypus-logger`) are global to a build and
   mutually exclusive, so only the final artifact picks one: the wheel uses
   `debug-logs` (`[tool.maturin] features` in `pyproject.toml`).
+- A feature that exists only for tests (today `polypus-qml`'s
+  `test-support`) is enabled from `[dev-dependencies]` only, never from
+  `[dependencies]`. The wheel enforces it: a const assertion in
+  `crates/polypus/src/lib.rs` fails a wheel build while `test-support` is on.
+  A wheel build is one with the `extension-module` feature or the
+  `PYO3_BUILD_EXTENSION_MODULE` environment variable, which maturin exports to
+  the builds it runs (the floor in `pyproject.toml`'s `[build-system]` is a
+  release that does), also when a `--features` on the command line replaces
+  `[tool.maturin] features`. Building test targets as a wheel build
+  (`--all-targets` or `--tests` with either signal) turns the
+  dev-dependencies' features on, so it trips the same guard.
 
 ## 7. Interoperability notes (beyond contract C-2)
 

@@ -18,11 +18,15 @@ Contract exercised here:
   * a secondary rank of a SLURM/OpenMPI job (``SLURM_PROCID`` /
     ``OMPI_COMM_WORLD_RANK`` set and not ``0``) skips calibration (issue #214),
     while rank 0 — or no launcher at all — still calibrates;
-  * a read-only cache dir does not break the run.
+  * a read-only cache dir does not break the run;
+  * with neither ``XDG_CACHE_HOME`` nor ``HOME`` (PowerShell, cmd), Windows
+    caches under ``%LOCALAPPDATA%\\polypus`` (issue #416).
 
 Calibration happens at most once per process, so every case runs in its own
-child interpreter with a private ``XDG_CACHE_HOME``. The opt-out and rank policy
-itself is unit-tested in Rust (``crates/polypus/src/bindings/calibration.rs``).
+child interpreter with a private ``XDG_CACHE_HOME`` (or, for the Windows case,
+``LOCALAPPDATA``). The opt-out and rank policy itself is unit-tested in Rust
+(``crates/polypus/src/bindings/calibration.rs``), and so is the order of the
+cache directory variables (``crates/polypus-sim/src/calibration.rs``).
 """
 
 import json
@@ -233,3 +237,45 @@ def test_readonly_cache_dir_does_not_break_the_first_run(tmp_path):
     )
     assert r.returncode == 0, r.stderr
     assert "RAN" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+
+
+def test_cache_without_xdg_or_home_uses_localappdata_on_windows(tmp_path):
+    # PowerShell and cmd define neither XDG_CACHE_HOME nor HOME (issue #416). On
+    # Windows the cache then lives in %LOCALAPPDATA%\polypus, so the first native
+    # run saves it once and the next process reuses it. Elsewhere LOCALAPPDATA
+    # means nothing: with no XDG_CACHE_HOME or HOME nothing is saved, and the
+    # runs still succeed.
+    env = os.environ.copy()
+    for var in ("XDG_CACHE_HOME", "HOME", "POLYPUS_NO_AUTOCALIBRATE", *_RANK_VARS):
+        env.pop(var, None)
+    env["LOCALAPPDATA"] = str(tmp_path)
+
+    def run_child(code: str) -> str:
+        r = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=env,
+        )
+        assert r.returncode == 0, r.stderr
+        return r.stdout
+
+    cache_file = tmp_path / _CACHE_REL[0] / _CACHE_REL[1]
+    run_child(f"import polypus\n{_STATEVECTOR}")
+    if sys.platform == "win32":
+        assert cache_file.is_file(), "the first native run must save the cache"
+    else:
+        assert list(tmp_path.iterdir()) == []
+
+    out = run_child(
+        "import polypus\n"
+        "r = polypus.calibrate_parallel_threshold()\n"
+        "print(r['reused_cache'], r['cache_written'], r['cache_path'], sep='|')"
+    )
+    reused, written, path = out.strip().split("|")
+    if sys.platform == "win32":
+        assert (reused, written, path) == ("True", "False", str(cache_file)), out
+    else:
+        assert (reused, written, path) == ("False", "False", "None"), out
+        assert list(tmp_path.iterdir()) == []

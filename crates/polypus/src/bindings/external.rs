@@ -190,12 +190,12 @@ fn check_optimizer(optimizer: &Bound<'_, PyAny>) -> PyResult<()> {
 
 /// `max_evaluations` as a `u64`: an integer from 1 to 2⁶⁴ − 1, otherwise
 /// `ValueError`, or `TypeError` for a value that is not an integer (see
-/// [`positive_index`](super::positive_index)).
+/// [`positive_index`](super::optimizer::positive_index)).
 fn parse_max_evaluations(value: &Bound<'_, PyAny>) -> PyResult<u64> {
-    let index = super::positive_index(value, "max_evaluations")?;
+    let index = super::optimizer::positive_index(value, "max_evaluations")?;
     index
         .extract::<u64>()
-        .map_err(|_| super::too_large(value, "max_evaluations", u64::MAX))
+        .map_err(|_| super::optimizer::too_large(value, "max_evaluations", u64::MAX))
 }
 
 /// The [`AskTell`] that calls a Python object's `ask()` and `tell()`.

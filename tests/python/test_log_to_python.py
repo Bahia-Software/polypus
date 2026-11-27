@@ -157,8 +157,9 @@ result([
         assert record["name"] == "polypus" or record["name"].startswith("polypus."), (
             record
         )
-    # The binding's own records land under `polypus.bindings`.
-    assert any(r["name"] == "polypus.bindings" for r in value), value
+    # The binding's own records land under `polypus.bindings`, one logger per
+    # module (`polypus.bindings.training`, `polypus.bindings.results`, ...).
+    assert any(r["name"].startswith("polypus.bindings.") for r in value), value
 
 
 def test_a_level_set_between_two_calls_applies_to_the_second():

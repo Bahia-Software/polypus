@@ -2,8 +2,8 @@
 //! (and, optionally, sampled measurement counts).
 
 use crate::error::SimError;
-use crate::rng::SplitMix64;
 use crate::statevector::Statevector;
+use polypus_circuit::rng::SplitMix64;
 use polypus_circuit::{ConcreteCircuit, GateInstruction};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

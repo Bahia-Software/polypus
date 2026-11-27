@@ -392,6 +392,7 @@ mod trace_tests;
 mod tests {
     use super::*;
     use crate::{Resources, Scheduler};
+    use polypus_circuit::rng::SplitMix64;
     use polypus_infrastructure::{
         BackendError, OptLevel, Planner, PlannerRequirements, QuantumBackend, RunParams,
     };
@@ -829,20 +830,14 @@ mod tests {
     /// A seeded random search over `[-π, π)²` as an external ask/tell
     /// optimizer: `rows` points per `ask()`, never ending on its own.
     struct RandomAskTell {
-        state: u64,
+        rng: SplitMix64,
         rows: usize,
     }
 
     impl RandomAskTell {
         /// SplitMix64, mapped to `[-π, π)`.
         fn next(&mut self) -> f64 {
-            self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^= z >> 31;
-            let unit = (z >> 11) as f64 / (1u64 << 53) as f64;
-            (2.0 * unit - 1.0) * std::f64::consts::PI
+            (2.0 * self.rng.next_f64() - 1.0) * std::f64::consts::PI
         }
     }
 
@@ -969,7 +964,10 @@ mod tests {
                     ExternalConfig {
                         max_evaluations: 20,
                     },
-                    Box::new(RandomAskTell { state: 5, rows: 4 }),
+                    Box::new(RandomAskTell {
+                        rng: SplitMix64::new(5),
+                        rows: 4,
+                    }),
                 ),
             ),
         ]);

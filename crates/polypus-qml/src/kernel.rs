@@ -873,6 +873,63 @@ mod tests {
             FeatureMap::compile(2, trainable, 2).unwrap_err(),
             ValidationError::TrainableLayerInFeatureMap { layer: 1 }
         );
+        // A convolution with no pair to act on is refused by its own `plan`,
+        // before the trainable-layer check; one with a pair is still a
+        // trainable layer.
+        let conv_after_iqp = |pairing| {
+            vec![
+                Layer::Iqp(IqpEncoder::new()),
+                Layer::Conv(crate::ConvLayer {
+                    block: crate::ConvBlock::Basic,
+                    pairing,
+                }),
+            ]
+        };
+        assert_eq!(
+            FeatureMap::compile(2, conv_after_iqp(crate::Pairing::OddPairs), 2).unwrap_err(),
+            ValidationError::ConvNeedsQubits {
+                pairing: crate::Pairing::OddPairs,
+                needed: 3,
+                active: 2
+            }
+        );
+        assert_eq!(
+            FeatureMap::compile(2, conv_after_iqp(crate::Pairing::EvenPairs), 2).unwrap_err(),
+            ValidationError::TrainableLayerInFeatureMap { layer: 1 }
+        );
+    }
+
+    #[test]
+    fn compile_bounds_the_qubits_and_the_gates() {
+        let angle = || vec![Layer::AngleEncoder(AngleEncoder::new(RotationAxis::Ry))];
+        for num_qubits in [crate::MAX_MODEL_QUBITS + 1, usize::MAX] {
+            assert_eq!(
+                FeatureMap::compile(num_qubits, angle(), 1).unwrap_err(),
+                ValidationError::TooManyQubits {
+                    num_qubits,
+                    max_qubits: 1_000_000,
+                }
+            );
+        }
+        // The limit itself compiles, with a feature on every qubit.
+        let map = FeatureMap::compile(crate::MAX_MODEL_QUBITS, angle(), 1_000_000).unwrap();
+        assert_eq!(map.num_qubits(), 1_000_000);
+        // 21 qubits of amplitude encoding are 2^22 − 3 gates, past the budget.
+        assert_eq!(
+            FeatureMap::compile(
+                21,
+                vec![Layer::AmplitudeEncoder(crate::AmplitudeEncoder)],
+                1
+            )
+            .unwrap_err(),
+            ValidationError::ModelTooLarge {
+                layer: 0,
+                reason: crate::SizeLimit::Budget {
+                    gates: 4_194_301,
+                    max_gates: crate::MAX_MODEL_GATES,
+                },
+            }
+        );
     }
 
     #[test]

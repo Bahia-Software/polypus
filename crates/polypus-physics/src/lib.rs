@@ -12,8 +12,8 @@
 //! | [`medium`] | Material properties |
 //! | [`interactions`] | Cross-sections and kinematic sampling |
 //! | [`monte_carlo`] | Classical MC transport engine |
-//! | [`hamiltonians`] | Quantum Hamiltonians as Pauli sums: fermionic operators, qubit mappings, tapering, exact diagonalization |
-//! | [`chemistry`] | Molecular integrals (STO-3G) and molecules (H₂) built on [`hamiltonians`] |
+//! | [`hamiltonians`] | Quantum Hamiltonians as Pauli sums: fermionic operators, qubit mappings, tapering, exact diagonalization (whole space, or one electron sector) |
+//! | [`chemistry`] | Molecular integrals (STO-3G, or read from FCIDUMP files) and molecules (H₂) built on [`hamiltonians`] |
 //!
 //! ## ENDF-6 photon data
 //!

@@ -23,7 +23,7 @@
 //! paper version of `qelib1.inc` may need Qiskit's
 //! `qasm2.LEGACY_CUSTOM_INSTRUCTIONS` to recognise them.
 
-use crate::custom_gate::{BodyOp, GateDefinition};
+use crate::custom_gate::{BodyOp, CustomGate, GateDefinition};
 use crate::error::CircuitError;
 use crate::expr::{fmt_number, print, Dialect, ExprArena};
 use crate::gate::{GateInstruction, GateParam};
@@ -264,253 +264,326 @@ pub(crate) fn write_qasm2(
         let _ = writeln!(out, "creg c[{num_clbits}];");
     }
 
+    let angles = Angles { params, exprs };
     let mut stack = Vec::new();
-    let mut angle = |p: &GateParam| -> Result<String, CircuitError> {
-        Ok(fmt_number(p.resolve(params, exprs, &mut stack)?))
-    };
-    // Calls of declared gates resolve their angles apart: `angle` holds `stack`.
-    let mut call_stack = Vec::new();
-
     for gate in normalized(gates, num_qubits) {
-        match &*gate {
-            GateInstruction::H(q) => {
-                let _ = writeln!(out, "h q[{q}];");
-            }
-            GateInstruction::X(q) => {
-                let _ = writeln!(out, "x q[{q}];");
-            }
-            GateInstruction::Y(q) => {
-                let _ = writeln!(out, "y q[{q}];");
-            }
-            GateInstruction::Z(q) => {
-                let _ = writeln!(out, "z q[{q}];");
-            }
-            GateInstruction::S(q) => {
-                let _ = writeln!(out, "s q[{q}];");
-            }
-            GateInstruction::T(q) => {
-                let _ = writeln!(out, "t q[{q}];");
-            }
-            GateInstruction::Sdg(q) => {
-                let _ = writeln!(out, "sdg q[{q}];");
-            }
-            GateInstruction::Tdg(q) => {
-                let _ = writeln!(out, "tdg q[{q}];");
-            }
-            GateInstruction::Id(q) => {
-                let _ = writeln!(out, "id q[{q}];");
-            }
-            GateInstruction::Rx { qubit, theta } => {
-                let _ = writeln!(out, "rx({}) q[{qubit}];", angle(theta)?);
-            }
-            GateInstruction::Ry { qubit, theta } => {
-                let _ = writeln!(out, "ry({}) q[{qubit}];", angle(theta)?);
-            }
-            GateInstruction::Rz { qubit, theta } => {
-                let _ = writeln!(out, "rz({}) q[{qubit}];", angle(theta)?);
-            }
-            GateInstruction::Cx(c, t) => {
-                let _ = writeln!(out, "cx q[{c}],q[{t}];");
-            }
-            GateInstruction::Cz(c, t) => {
-                let _ = writeln!(out, "cz q[{c}],q[{t}];");
-            }
-            GateInstruction::Swap(q0, q1) => {
-                let _ = writeln!(out, "swap q[{q0}],q[{q1}];");
-            }
-            GateInstruction::Rzz { q0, q1, theta } => {
-                let _ = writeln!(out, "rzz({}) q[{q0}],q[{q1}];", angle(theta)?);
-            }
-            GateInstruction::Rxx { q0, q1, theta } => {
-                let _ = writeln!(out, "rxx({}) q[{q0}],q[{q1}];", angle(theta)?);
-            }
-            GateInstruction::Cp { q0, q1, theta } => {
-                let _ = writeln!(out, "cp({}) q[{q0}],q[{q1}];", angle(theta)?);
-            }
-            GateInstruction::U {
-                qubit,
-                theta,
-                phi,
-                lam,
-            } => {
-                let _ = writeln!(
-                    out,
-                    "u3({},{},{}) q[{qubit}];",
-                    angle(theta)?,
-                    angle(phi)?,
-                    angle(lam)?
-                );
-            }
-            GateInstruction::Sx(q) => {
-                let _ = writeln!(out, "sx q[{q}];");
-            }
-            GateInstruction::Sxdg(q) => {
-                let _ = writeln!(out, "sxdg q[{q}];");
-            }
-            GateInstruction::Cy(c, t) => {
-                let _ = writeln!(out, "cy q[{c}],q[{t}];");
-            }
-            GateInstruction::Ch(c, t) => {
-                let _ = writeln!(out, "ch q[{c}],q[{t}];");
-            }
-            GateInstruction::Csx(c, t) => {
-                let _ = writeln!(out, "csx q[{c}],q[{t}];");
-            }
-            GateInstruction::Ccx(c0, c1, t) => {
-                let _ = writeln!(out, "ccx q[{c0}],q[{c1}],q[{t}];");
-            }
-            GateInstruction::Cswap(c, t0, t1) => {
-                let _ = writeln!(out, "cswap q[{c}],q[{t0}],q[{t1}];");
-            }
-            GateInstruction::Crx {
-                control,
-                target,
-                theta,
-            } => {
-                let _ = writeln!(out, "crx({}) q[{control}],q[{target}];", angle(theta)?);
-            }
-            GateInstruction::Cry {
-                control,
-                target,
-                theta,
-            } => {
-                let _ = writeln!(out, "cry({}) q[{control}],q[{target}];", angle(theta)?);
-            }
-            GateInstruction::Crz {
-                control,
-                target,
-                theta,
-            } => {
-                let _ = writeln!(out, "crz({}) q[{control}],q[{target}];", angle(theta)?);
-            }
-            GateInstruction::Cu1 { q0, q1, theta } => {
-                let _ = writeln!(out, "cu1({}) q[{q0}],q[{q1}];", angle(theta)?);
-            }
-            GateInstruction::Cu3 {
-                control,
-                target,
-                theta,
-                phi,
-                lam,
-            } => {
-                let _ = writeln!(
-                    out,
-                    "cu3({},{},{}) q[{control}],q[{target}];",
-                    angle(theta)?,
-                    angle(phi)?,
-                    angle(lam)?
-                );
-            }
-            GateInstruction::Cu {
-                control,
-                target,
-                theta,
-                phi,
-                lam,
-                gamma,
-            } => {
-                let _ = writeln!(
-                    out,
-                    "cu({},{},{},{}) q[{control}],q[{target}];",
-                    angle(theta)?,
-                    angle(phi)?,
-                    angle(lam)?,
-                    angle(gamma)?
-                );
-            }
-            GateInstruction::U0 { qubit, gamma } => {
-                let _ = writeln!(out, "u0({}) q[{qubit}];", angle(gamma)?);
-            }
-            GateInstruction::P { qubit, lam } => {
-                let _ = writeln!(out, "p({}) q[{qubit}];", angle(lam)?);
-            }
-            GateInstruction::U1 { qubit, lam } => {
-                let _ = writeln!(out, "u1({}) q[{qubit}];", angle(lam)?);
-            }
-            GateInstruction::U2 { qubit, phi, lam } => {
-                let _ = writeln!(out, "u2({},{}) q[{qubit}];", angle(phi)?, angle(lam)?);
-            }
-            GateInstruction::UGate {
-                qubit,
-                theta,
-                phi,
-                lam,
-            } => {
-                let _ = writeln!(
-                    out,
-                    "u({},{},{}) q[{qubit}];",
-                    angle(theta)?,
-                    angle(phi)?,
-                    angle(lam)?
-                );
-            }
-            GateInstruction::Rccx(a, b, c) => {
-                let _ = writeln!(out, "rccx q[{a}],q[{b}],q[{c}];");
-            }
-            GateInstruction::Rc3x(a, b, c, d) => {
-                let _ = writeln!(out, "rc3x q[{a}],q[{b}],q[{c}],q[{d}];");
-            }
-            GateInstruction::C3x(a, b, c, d) => {
-                let _ = writeln!(out, "c3x q[{a}],q[{b}],q[{c}],q[{d}];");
-            }
-            GateInstruction::C3sqrtx(a, b, c, d) => {
-                let _ = writeln!(out, "c3sqrtx q[{a}],q[{b}],q[{c}],q[{d}];");
-            }
-            GateInstruction::C4x(a, b, c, d, e) => {
-                let _ = writeln!(out, "c4x q[{a}],q[{b}],q[{c}],q[{d}],q[{e}];");
-            }
-            GateInstruction::Custom(call) => {
-                let operands: Vec<String> =
-                    call.qubits().iter().map(|q| format!("q[{q}]")).collect();
-                let values = call
-                    .params()
-                    .iter()
-                    .map(|p| p.resolve(params, exprs, &mut call_stack))
-                    .collect::<Result<Vec<f64>, _>>()?;
-                // A call with free angles is checked through its body for the
-                // values it is exported with.
-                if call.has_free_angles() {
-                    call.check_body(&values)?;
-                }
-                let name = declarations.names.gate(call.definition());
-                if values.is_empty() {
-                    let _ = writeln!(out, "{name} {};", operands.join(","));
-                } else {
-                    let angles: Vec<String> = values.iter().map(|&v| fmt_number(v)).collect();
-                    let _ = writeln!(out, "{name}({}) {};", angles.join(","), operands.join(","));
-                }
-            }
-            GateInstruction::Barrier(qubits) => {
-                if qubits.is_empty() {
-                    out.push_str("barrier q;\n");
-                } else {
-                    let args: Vec<String> = qubits.iter().map(|q| format!("q[{q}]")).collect();
-                    let _ = writeln!(out, "barrier {};", args.join(","));
-                }
-            }
-            GateInstruction::Measure { qubit, cbit } => {
+        match statement(&gate) {
+            Statement::Gate(name) => write_gate(&mut out, name, &gate, angles, &mut stack)?,
+            Statement::Call(call) => write_call(&mut out, call, &declarations, angles, &mut stack)?,
+            Statement::Barrier(qubits) => write_barrier(&mut out, qubits),
+            Statement::Measure { qubit, cbit } => {
                 let _ = writeln!(out, "measure q[{qubit}] -> c[{cbit}];");
             }
-            GateInstruction::MeasureAll => {
-                if num_clbits == num_qubits {
-                    out.push_str("measure q -> c;\n");
-                } else {
-                    // Register sizes differ (mixed Measure/MeasureAll usage):
-                    // `measure q -> c;` would be invalid, expand per qubit.
-                    for q in 0..num_qubits {
-                        let _ = writeln!(out, "measure q[{q}] -> c[{q}];");
-                    }
-                }
-            }
+            Statement::MeasureAll => write_measure_all(&mut out, num_qubits, num_clbits),
         }
     }
 
     Ok(out)
 }
 
+/// The values an export resolves angles with: the parameters' and the
+/// expressions'.
+#[derive(Clone, Copy)]
+struct Angles<'a> {
+    params: &'a [f64],
+    exprs: &'a ExprArena,
+}
+
+impl Angles<'_> {
+    /// The value of `p`, with `stack` as the evaluation scratch space.
+    fn resolve(&self, p: &GateParam, stack: &mut Vec<f64>) -> Result<f64, CircuitError> {
+        p.resolve(self.params, self.exprs, stack)
+    }
+}
+
+/// How an instruction is written.
+enum Statement<'g> {
+    /// A `qelib1.inc` gate of this name, its angles and its operands.
+    Gate(&'static str),
+    /// A call of a gate the program declares.
+    Call(&'g CustomGate),
+    /// `barrier` on these qubits; every qubit when empty.
+    Barrier(&'g [usize]),
+    /// `measure q[qubit] -> c[cbit]`.
+    Measure { qubit: usize, cbit: usize },
+    /// `measure q -> c`.
+    MeasureAll,
+}
+
+/// How `gate` is written. Exhaustive over the vocabulary (no wildcard arm),
+/// so a new instruction cannot compile until it says how it is exported.
+fn statement(gate: &GateInstruction) -> Statement<'_> {
+    use GateInstruction as G;
+    Statement::Gate(match gate {
+        G::H(_) => "h",
+        G::X(_) => "x",
+        G::Y(_) => "y",
+        G::Z(_) => "z",
+        G::S(_) => "s",
+        G::T(_) => "t",
+        G::Sdg(_) => "sdg",
+        G::Tdg(_) => "tdg",
+        G::Id(_) => "id",
+        G::Sx(_) => "sx",
+        G::Sxdg(_) => "sxdg",
+        G::Rx { .. } => "rx",
+        G::Ry { .. } => "ry",
+        G::Rz { .. } => "rz",
+        G::U { .. } => "u3",
+        G::U0 { .. } => "u0",
+        G::P { .. } => "p",
+        G::U1 { .. } => "u1",
+        G::U2 { .. } => "u2",
+        G::UGate { .. } => "u",
+        G::Cx(..) => "cx",
+        G::Cz(..) => "cz",
+        G::Swap(..) => "swap",
+        G::Cy(..) => "cy",
+        G::Ch(..) => "ch",
+        G::Csx(..) => "csx",
+        G::Rzz { .. } => "rzz",
+        G::Rxx { .. } => "rxx",
+        G::Cp { .. } => "cp",
+        G::Crx { .. } => "crx",
+        G::Cry { .. } => "cry",
+        G::Crz { .. } => "crz",
+        G::Cu1 { .. } => "cu1",
+        G::Cu3 { .. } => "cu3",
+        G::Cu { .. } => "cu",
+        G::Ccx(..) => "ccx",
+        G::Cswap(..) => "cswap",
+        G::Rccx(..) => "rccx",
+        G::Rc3x(..) => "rc3x",
+        G::C3x(..) => "c3x",
+        G::C3sqrtx(..) => "c3sqrtx",
+        G::C4x(..) => "c4x",
+        G::Custom(call) => return Statement::Call(call),
+        G::Barrier(qubits) => return Statement::Barrier(qubits),
+        G::Measure { qubit, cbit } => {
+            return Statement::Measure {
+                qubit: *qubit,
+                cbit: *cbit,
+            }
+        }
+        G::MeasureAll => return Statement::MeasureAll,
+    })
+}
+
+/// `name(angles) operands;` for a `qelib1.inc` gate: its angles in QASM
+/// argument order (resolved in that order, so the first unbound or
+/// non-finite one is the error), without parentheses when it has none, and
+/// its operands in operand order.
+fn write_gate(
+    out: &mut String,
+    name: &str,
+    gate: &GateInstruction,
+    angles: Angles<'_>,
+    stack: &mut Vec<f64>,
+) -> Result<(), CircuitError> {
+    let values = gate.params().map(|p| angles.resolve(p, stack));
+    write_statement(out, name, values, gate.acts_on().qubits())
+}
+
+/// A call of a declared gate, under the name the export declares it by.
+fn write_call(
+    out: &mut String,
+    call: &CustomGate,
+    declarations: &Declarations<'_>,
+    angles: Angles<'_>,
+    stack: &mut Vec<f64>,
+) -> Result<(), CircuitError> {
+    let values = call
+        .params()
+        .iter()
+        .map(|p| angles.resolve(p, stack))
+        .collect::<Result<Vec<f64>, _>>()?;
+    // A call with free angles is checked through its body for the
+    // values it is exported with.
+    if call.has_free_angles() {
+        call.check_body(&values)?;
+    }
+    let name = declarations.names.gate(call.definition());
+    write_statement(out, name, values.iter().map(|&v| Ok(v)), call.qubits())
+}
+
+/// `name(values) q[i],q[j],…;`, without parentheses when there are no
+/// values: the one statement form built-in gates and calls of declared gates
+/// share, so the two cannot drift apart. It runs once per gate of every
+/// export, so it writes straight into `out`, without intermediate strings.
+/// The values are taken in order and the first error is returned;
+/// `write_qasm2` then discards `out`, so the statement left half-written
+/// does not matter.
+fn write_statement(
+    out: &mut String,
+    name: &str,
+    values: impl IntoIterator<Item = Result<f64, CircuitError>>,
+    qubits: &[usize],
+) -> Result<(), CircuitError> {
+    out.push_str(name);
+    let mut has_values = false;
+    for value in values {
+        out.push(if has_values { ',' } else { '(' });
+        has_values = true;
+        out.push_str(&fmt_number(value?));
+    }
+    if has_values {
+        out.push(')');
+    }
+    write_operands(out, qubits);
+    out.push_str(";\n");
+    Ok(())
+}
+
+/// ` q[i],q[j],…`, with its leading space.
+fn write_operands(out: &mut String, qubits: &[usize]) {
+    for (i, q) in qubits.iter().enumerate() {
+        let _ = write!(out, "{}q[{q}]", if i == 0 { ' ' } else { ',' });
+    }
+}
+
+/// `barrier q;` for every qubit (an empty list), else the qubits listed.
+fn write_barrier(out: &mut String, qubits: &[usize]) {
+    if qubits.is_empty() {
+        out.push_str("barrier q;\n");
+    } else {
+        out.push_str("barrier");
+        write_operands(out, qubits);
+        out.push_str(";\n");
+    }
+}
+
+/// `measure q -> c;`, or one `measure` per qubit when the registers differ
+/// in size and the register-wide form would be invalid.
+fn write_measure_all(out: &mut String, num_qubits: usize, num_clbits: usize) {
+    if num_clbits == num_qubits {
+        out.push_str("measure q -> c;\n");
+    } else {
+        // Register sizes differ (mixed Measure/MeasureAll usage):
+        // `measure q -> c;` would be invalid, expand per qubit.
+        for q in 0..num_qubits {
+            let _ = writeln!(out, "measure q[{q}] -> c[{q}];");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::ParameterizedCircuit;
+
+    /// The statements of every instruction the exporter writes, on five qubits,
+    /// declared gates included: a program of them is exported as itself.
+    const EVERY_STATEMENT: &str = "\
+OPENQASM 2.0;
+include \"qelib1.inc\";
+gate g(t) a,b { rz(t/2) a; cx a,b; }
+gate k a { x a; }
+qreg q[5];
+creg c[2];
+h q[0];
+x q[1];
+y q[2];
+z q[3];
+s q[4];
+t q[0];
+sdg q[1];
+tdg q[2];
+id q[3];
+sx q[4];
+sxdg q[0];
+rx(0.1) q[0];
+ry(0.2) q[1];
+rz(-0.3) q[2];
+u3(0.1,0.2,0.3) q[3];
+u0(0.5) q[4];
+p(0.5) q[0];
+u1(0.5) q[1];
+u2(0.1,0.2) q[2];
+u(0.1,0.2,0.3) q[3];
+cx q[0],q[1];
+cz q[1],q[2];
+swap q[2],q[3];
+cy q[3],q[4];
+ch q[4],q[0];
+csx q[0],q[2];
+rzz(0.4) q[0],q[1];
+rxx(0.5) q[1],q[2];
+cp(0.6) q[2],q[3];
+crx(0.1) q[0],q[1];
+cry(0.2) q[1],q[2];
+crz(0.3) q[2],q[3];
+cu1(0.4) q[3],q[4];
+cu3(0.1,0.2,0.3) q[4],q[0];
+cu(0.1,0.2,0.3,0.4) q[0],q[1];
+ccx q[2],q[0],q[1];
+cswap q[3],q[1],q[2];
+rccx q[2],q[3],q[4];
+rc3x q[0],q[1],q[2],q[3];
+c3x q[1],q[2],q[3],q[4];
+c3sqrtx q[0],q[2],q[3],q[4];
+c4x q[4],q[2],q[0],q[3],q[1];
+g(0.5) q[0],q[1];
+k q[2];
+barrier q[0],q[2];
+barrier q;
+measure q[0] -> c[1];
+";
+
+    /// Every instruction is written as its statement, declared gates
+    /// included, so the exporter's split by instruction family (#419) cannot
+    /// change one character of it.
+    #[test]
+    fn every_instruction_is_exported_as_its_statement() {
+        let imported = ParameterizedCircuit::from_qasm2(EVERY_STATEMENT).unwrap();
+        assert_eq!(imported.to_qasm2_with_params(&[]).unwrap(), EVERY_STATEMENT);
+    }
+
+    /// Angles that are free parameters and expressions of them are written
+    /// with the values they are exported with; `measure_all` is written
+    /// register-wide when the registers match and qubit by qubit otherwise.
+    #[test]
+    fn parameter_and_expression_angles_are_exported_with_their_values() {
+        use crate::{Param, ParamExpr};
+        let mut qc = ParameterizedCircuit::new(2);
+        let twice = qc.add_expr(2.0 * ParamExpr::param(1)).unwrap();
+        let qc = qc
+            .rx(0, Param(0))
+            .ry(1, twice)
+            .u(0, Param(1), twice, 0.3)
+            .cu(0, 1, twice, Param(0), Param(1), -0.0)
+            .measure_all();
+        assert_eq!(
+            qc.to_qasm2_with_params(&[0.5, 0.25]).unwrap(),
+            "\
+OPENQASM 2.0;
+include \"qelib1.inc\";
+qreg q[2];
+creg c[2];
+rx(0.5) q[0];
+ry(0.5) q[1];
+u3(0.25,0.5,0.3) q[0];
+cu(0.5,0.5,0.25,-0.0) q[0],q[1];
+measure q -> c;
+"
+        );
+        assert_eq!(
+            ParameterizedCircuit::new(2)
+                .h(1)
+                .measure(0, 2)
+                .measure_all()
+                .to_qasm2_with_params(&[])
+                .unwrap(),
+            "\
+OPENQASM 2.0;
+include \"qelib1.inc\";
+qreg q[2];
+creg c[3];
+h q[1];
+measure q[0] -> c[2];
+measure q[0] -> c[0];
+measure q[1] -> c[1];
+"
+        );
+    }
 
     /// Every angle is exported as the shortest decimal that reads back as the
     /// same `f64`, in a form the importer reads: positional, scientific

@@ -30,20 +30,26 @@ use pyo3::types::{PyBool, PyDict, PyList, PyModule, PyTuple, PyType};
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 use polypus_qml::{
     AngleEncoder, CompiledModel, ConvBlock, ConvLayer, Decision, Entanglement, Entangler,
-    ExpectationJacobian, FeatureMap, FeatureStates, FidelityKernel, HardwareEfficientAnsatz,
-    IqpEncoder, JacobianWrt, KeepRule, Layer, Loss, Observable, Pairing, Pauli, PauliString,
-    PoolBlock, PoolLayer, QmlError, QmlProblem, QuantumModel, Readout, RotationAxis,
-    SimplifiedTwoDesignAnsatz, StronglyEntanglingAnsatz, ValidationError,
+    ExactState, ExpectationJacobian, FeatureMap, FeatureStates, FidelityKernel,
+    HardwareEfficientAnsatz, IqpEncoder, JacobianWrt, KeepRule, Layer, Loss, Observable, Pairing,
+    Pauli, PauliString, PoolBlock, PoolLayer, QmlError, QmlProblem, QuantumModel, Readout,
+    RotationAxis, SimplifiedTwoDesignAnsatz, StronglyEntanglingAnsatz, ValidationError,
 };
 
+use super::backend_config::{
+    config_from_strings, validate_cunqa_allocation, validate_id, validate_shots_and_qpus,
+};
 use super::callback::validate_callback;
 use super::circuit::Circuit;
-use super::{
-    check_seed_for_backend, config_from_strings, counts_to_pylist, extract_labels,
-    finish_optimization, interruptible_token, is_rotosolve, log_training_start,
-    method_from_pyclass, method_seed, resolve_optimizer_seed, seed_or_entropy, training_observer,
-    unique_id, validate_cunqa_allocation, validate_final_shots, validate_id, validate_method,
-    validate_shots_and_qpus, OptionsArg, RunResult,
+use super::extract::extract_labels;
+use super::interrupt::interruptible_token;
+use super::optimizer::{
+    is_rotosolve, method_from_pyclass, training_observer, validate_final_shots, validate_method,
+};
+use super::options::OptionsArg;
+use super::results::{counts_to_pylist, finish_optimization, log_training_start, RunResult};
+use super::seeds::{
+    check_seed_for_backend, method_seed, resolve_optimizer_seed, seed_or_entropy, unique_id,
 };
 use crate::evaluation::{
     candidate_window_size, Label, MinibatchConfig, OracleErrorSlot, QmlOracleFactory, QmlSource,
@@ -581,11 +587,20 @@ fn check_layers(num_qubits: usize, layers: &[Layer]) -> PyResult<usize> {
     }
 }
 
-/// `num_qubits` must be at least 1; shared by `Encoder` and `Ansatz`.
+/// `num_qubits` must be at least 1 and at most
+/// [`MAX_MODEL_QUBITS`](polypus_qml::MAX_MODEL_QUBITS), which `compile` would
+/// refuse anyway, but only once a layer is added; shared by `Encoder` and
+/// `Ansatz`.
 fn check_num_qubits(class: &str, num_qubits: usize) -> PyResult<()> {
     if num_qubits == 0 {
         return Err(PyValueError::new_err(format!(
             "{class} needs at least one qubit, got num_qubits=0"
+        )));
+    }
+    let max = polypus_qml::MAX_MODEL_QUBITS;
+    if num_qubits > max {
+        return Err(PyValueError::new_err(format!(
+            "{class} takes at most {max} qubits, got num_qubits={num_qubits}"
         )));
     }
     Ok(())
@@ -826,7 +841,10 @@ impl Ansatz {
     /// Append a QCNN convolution: one `block` (`"basic"`, 4 parameters, or
     /// `"cartan"`, 3) shared by every pair of active qubits that `pairing`
     /// selects (`"even_pairs"`/`"odd_pairs"`/`"alternating"`, default
-    /// `"alternating"`).
+    /// `"alternating"`). The pairing must select at least one pair of the
+    /// qubits active where the layer sits: `"odd_pairs"` needs at least three,
+    /// the others at least two; otherwise this raises `ValueError` and leaves
+    /// the `Ansatz` as it was.
     #[pyo3(signature = (block, pairing="alternating"))]
     fn conv<'py>(
         mut slf: PyRefMut<'py, Self>,
@@ -1703,8 +1721,8 @@ struct RowsRun {
 enum RowResults {
     Counts(Vec<Counts>),
     Exact(Vec<HashMap<String, f64>>),
-    /// `predict(exact=True)`'s decisions, each row's map read as soon as it
-    /// was built ([`exact_predictions`], issue #645).
+    /// `predict(exact=True)`'s decisions, each row read straight from its
+    /// statevector ([`exact_predictions`], issues #645, #628).
     Predictions(Vec<f64>),
 }
 
@@ -1739,19 +1757,20 @@ impl ExactRowError {
     }
 }
 
-/// `compiled`'s exact decision for each of `circuits`, in order: each row's
-/// probability map is read as soon as it is built and dropped, so no map is
-/// held beyond the rows in flight (issue #645). The same values, bit for bit,
-/// as `predict_from_probabilities` over `run_circuits_exact`'s maps.
+/// `compiled`'s exact decision for each of `circuits`, in order, each row read
+/// straight from its statevector (issues #645, #628): no map of its
+/// probabilities is built, and only the decision is kept. The same values, bit
+/// for bit, as `predict_from_probabilities` over `run_circuits_exact`'s maps.
 fn exact_predictions(
     native: &NativeStatevectorBackend,
     params: &RunParams,
     compiled: &CompiledModel,
     circuits: &[BoundCircuit],
 ) -> Result<Vec<f64>, ExactRowError> {
-    native.run_circuits_exact_with(circuits, params, |probabilities| {
+    native.run_circuits_exact_on_states(circuits, params, |amplitudes, width| {
+        let state = ExactState::new(amplitudes.len(), width, |s| amplitudes[s].norm_sqr());
         compiled
-            .predict_from_probabilities(&probabilities)
+            .predict_from_state(&state)
             .map_err(ExactRowError::Qml)
     })
 }
@@ -2039,13 +2058,17 @@ impl TrainedModel {
             )
             .map(Py::into_any),
             RowResults::Exact(probabilities) => {
+                // Each row's map is consumed as its dict is built, so the Rust
+                // maps and their Python copies are not all alive at once: the
+                // peak is about the larger of the two, not their sum (#628).
+                // The copies themselves are not counted against the budget.
                 let list = PyList::empty(py);
-                for row in &probabilities {
+                for row in probabilities {
                     let dict = PyDict::new(py);
-                    let mut keys: Vec<&String> = row.keys().collect();
-                    keys.sort();
-                    for key in keys {
-                        dict.set_item(key, row[key])?;
+                    let mut entries: Vec<(String, f64)> = row.into_iter().collect();
+                    entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                    for (key, p) in entries {
+                        dict.set_item(key, p)?;
                     }
                     list.append(dict)?;
                 }
@@ -2188,8 +2211,8 @@ fn parse_wrt(wrt: &str) -> PyResult<JacobianWrt> {
 enum BlockResults {
     Counts(Vec<Counts>),
     Exact(Vec<HashMap<String, f64>>),
-    /// On the exact path, each circuit's readout expectations, read from its
-    /// map as soon as it was built ([`Primitive::exact_readout`], issue #645).
+    /// On the exact path, each circuit's readout expectations, read straight
+    /// from its statevector ([`Primitive::exact_readout`], issues #645, #628).
     Expectations(Vec<Vec<f64>>),
 }
 
@@ -2236,8 +2259,9 @@ impl BlockRunner {
     }
 
     /// Run `circuits`. On the exact path with a `readout`, each circuit is
-    /// read into that model's expectations as soon as its map is built, and
-    /// only those are kept (issue #645); without one, the maps are returned.
+    /// read into that model's expectations straight from its statevector, with
+    /// no map built, and only those are kept (issues #645, #628); without one,
+    /// the maps are returned.
     fn run(
         &self,
         circuits: Vec<BoundCircuit>,
@@ -2260,9 +2284,11 @@ impl BlockRunner {
                 .map_err(PrimitiveError::Infrastructure),
             BlockRunner::Exact { native, params } => match readout {
                 Some(model) => native
-                    .run_circuits_exact_with(&circuits, params, |probabilities| {
+                    .run_circuits_exact_on_states(&circuits, params, |amplitudes, width| {
+                        let state =
+                            ExactState::new(amplitudes.len(), width, |s| amplitudes[s].norm_sqr());
                         model
-                            .expectations_from_probabilities(&probabilities)
+                            .expectations_from_state(&state)
                             .map_err(PrimitiveError::Qml)
                     })
                     .map(BlockResults::Expectations),
@@ -2342,9 +2368,10 @@ trait Primitive {
     /// Read the results of [`circuits`](Self::circuits)`(samples)`.
     fn read(&mut self, samples: Range<usize>, results: BlockResults) -> Result<(), PrimitiveError>;
     /// The model whose readout expectations are all this primitive reads from
-    /// a circuit on the exact path: each circuit is then read as soon as its
-    /// map is built and the map dropped ([`BlockResults::Expectations`], issue
-    /// #645). `None` (the default) hands [`read`](Self::read) the maps.
+    /// a circuit on the exact path: each circuit is then read straight from
+    /// its statevector, with no map built ([`BlockResults::Expectations`],
+    /// issues #645, #628). `None` (the default) hands [`read`](Self::read) the
+    /// maps.
     fn exact_readout(&self) -> Option<&CompiledModel> {
         None
     }
@@ -3798,6 +3825,7 @@ pub(crate) fn register(qml: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polypus_qml::SizeLimit;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -4044,9 +4072,10 @@ mod tests {
     }
 
     #[test]
-    fn check_layers_refuses_a_parameter_count_that_does_not_fit() {
+    fn check_layers_refuses_a_model_past_the_size_limits() {
         Python::initialize();
-        let too_many = |layer: usize| ValidationError::TooManyParams { layer }.to_string();
+        let too_large =
+            |layer: usize, reason| ValidationError::ModelTooLarge { layer, reason }.to_string();
         let message = |layers: &[Layer]| {
             Python::attach(|py| match check_layers(2, layers) {
                 Ok(count) => panic!("expected an error, got {count} parameter(s)"),
@@ -4056,26 +4085,54 @@ mod tests {
                 }
             })
         };
-        // A huge `reps` on its own.
+        // A count that does not fit in a usize.
         let huge = Layer::HardwareEfficient(HardwareEfficientAnsatz::new(usize::MAX));
-        assert_eq!(message(&[huge]), too_many(0));
+        assert_eq!(message(&[huge]), too_large(0, SizeLimit::Overflow));
         let huge = Layer::SimplifiedTwoDesign(SimplifiedTwoDesignAnsatz::new(usize::MAX));
-        assert_eq!(message(&[huge]), too_many(0));
-        // 2 × (2^63 − 1) parameters fit; a convolution or a pooling after them
-        // does not.
-        let full = Layer::HardwareEfficient(HardwareEfficientAnsatz {
-            rotations: vec![RotationAxis::Rx],
-            final_rotation_layer: false,
-            ..HardwareEfficientAnsatz::new(usize::MAX / 2)
-        });
+        assert_eq!(message(&[huge]), too_large(0, SizeLimit::Overflow));
+        // One that fits but passes the budget: 5·2^40 + 4 gates.
+        let budget = |gates| SizeLimit::Budget {
+            gates,
+            max_gates: 4_000_000,
+        };
+        let big = Layer::HardwareEfficient(HardwareEfficientAnsatz::new(1 << 40));
         assert_eq!(
-            check_layers(2, std::slice::from_ref(&full)).unwrap(),
-            usize::MAX - 1
+            message(std::slice::from_ref(&big)),
+            too_large(0, budget(5_497_558_138_884))
         );
-        let conv = Layer::Conv(ConvLayer::new(ConvBlock::Basic));
-        assert_eq!(message(&[full.clone(), conv]), too_many(1));
-        let pool = Layer::Pool(PoolLayer::new(PoolBlock::Basic));
-        assert_eq!(message(&[full, pool]), too_many(1));
+        // Entanglers alone, after the 5 gates of a `real_amplitudes(1)`.
+        let entanglers_only = Layer::HardwareEfficient(HardwareEfficientAnsatz {
+            rotations: vec![],
+            ..HardwareEfficientAnsatz::new(1 << 40)
+        });
+        let small = Layer::HardwareEfficient(HardwareEfficientAnsatz::real_amplitudes(1));
+        assert_eq!(
+            message(&[small, entanglers_only]),
+            too_large(1, budget(1_099_511_627_781))
+        );
+    }
+
+    #[test]
+    fn check_num_qubits_refuses_zero_and_more_than_the_limit() {
+        Python::initialize();
+        Python::attach(|py| {
+            let message = |num_qubits| {
+                let err = check_num_qubits("Ansatz", num_qubits).unwrap_err();
+                assert!(err.is_instance_of::<PyValueError>(py), "{err}");
+                err.value(py).to_string()
+            };
+            assert_eq!(
+                message(0),
+                "Ansatz needs at least one qubit, got num_qubits=0"
+            );
+            assert_eq!(
+                message(1_000_001),
+                "Ansatz takes at most 1000000 qubits, got num_qubits=1000001"
+            );
+            assert!(message(usize::MAX).contains(&usize::MAX.to_string()));
+            assert!(check_num_qubits("Ansatz", 1).is_ok());
+            assert!(check_num_qubits("Ansatz", 1_000_000).is_ok());
+        });
     }
 
     #[test]

@@ -129,7 +129,7 @@ Each record goes to the logger named after the Rust module that emitted it, unde
 |---|---|
 | `polypus_optimizers::util` | `polypus.optimizers.util` |
 | `polypus_sim::calibration` | `polypus.sim.calibration` |
-| `polypus::bindings` | `polypus.bindings` |
+| `polypus::bindings::run` | `polypus.bindings.run` |
 | `zeromq::codec` (a dependency, with the `qmio` feature) | `polypus.zeromq.codec` |
 
 A record's `pathname` and `lineno` are the Rust source file and line, and its message arrives already formatted, so a `%` in it is kept as is. It has no Python function, so `funcName` is `None`. Most records come from threads Python did not start, so `threadName` is the name Python gives such a thread, `Dummy-<n>`; on Python 3.12 and older, the `threading` object created for each of them is not removed when the thread ends, and `threading.enumerate()` keeps listing it. Rust's `TRACE` level is `5`, below `logging.DEBUG`; the published wheel emits nothing below `DEBUG`. `log_to_python()` configures no handler: with none on `polypus` or above it, Python's defaults apply, which print warnings and errors to stderr. The Python-side helpers in `polypus_python` log to their own `polypus_python` logger.

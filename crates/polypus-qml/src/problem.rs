@@ -39,9 +39,10 @@ use crate::dataset::Dataset;
 use crate::error::{AdjointOnlyGate, QmlError, ValidationError};
 use crate::loss::{categorical_cross_entropy, categorical_cross_entropy_gradient, Loss};
 use crate::model::{CompiledModel, InputGate};
-use crate::observables::CircuitReading;
+use crate::observables::{CircuitReading, ExactState};
 use crate::readout::Decision;
-use crate::rng::{shuffle, SplitMix64};
+use crate::rng::shuffle;
+use polypus_circuit::rng::SplitMix64;
 
 /// A trainable QML problem: a compiled model, a training set and a loss, with
 /// one circuit template precompiled per training sample (features fixed, `θ`
@@ -790,9 +791,30 @@ impl QmlProblem {
         &self,
         probabilities: &HashMap<String, f64>,
     ) -> Result<Vec<f64>, QmlError> {
+        self.read_with(probabilities)
+    }
+
+    /// [`read_probabilities`](Self::read_probabilities) read straight from
+    /// the circuit's state, with no map of its probabilities (issue #628): the
+    /// same reading, bit for bit, and the same errors. What the exact native
+    /// oracle reads, so a gradient holds one statevector per circuit in
+    /// flight and nothing more.
+    ///
+    /// # Errors
+    ///
+    /// As [`read_probabilities`](Self::read_probabilities) for the map the
+    /// state stands for.
+    pub fn read_state<F: Fn(usize) -> f64>(
+        &self,
+        state: &ExactState<F>,
+    ) -> Result<Vec<f64>, QmlError> {
+        self.read_with(state)
+    }
+
+    fn read_with<R: CircuitReading>(&self, reading: &R) -> Result<Vec<f64>, QmlError> {
         let observables = self.model.resolved_readout().observables();
         (0..self.reading_width())
-            .map(|index| probabilities.observable_expectation(observables, index))
+            .map(|index| reading.observable_expectation(observables, index))
             .collect()
     }
 
@@ -990,10 +1012,9 @@ pub fn minibatch_indices(
     call_index: u64,
     batch_size: usize,
 ) -> Vec<usize> {
-    // Mixing constant: SplitMix64's own golden-ratio increment
-    // (0x9E3779B97F4A7C15), reused here to decorrelate `call_index` values
-    // without an O(call_index) fast-forward.
-    let mixed = seed ^ call_index.wrapping_mul(0x9E3779B97F4A7C15);
+    // Mixing constant: SplitMix64's own golden-ratio increment, reused here to
+    // decorrelate `call_index` values without an O(call_index) fast-forward.
+    let mixed = seed ^ call_index.wrapping_mul(SplitMix64::GAMMA);
     let mut rng = SplitMix64::new(mixed);
     let mut indices: Vec<usize> = (0..num_samples).collect();
     shuffle(&mut indices, &mut rng);
@@ -1296,7 +1317,7 @@ pub(crate) fn untie_traced(
                     )),
                 };
                 with_fresh_angles(gate, &mut fresh)?
-                    .ok_or_else(|| rejected("is not a known instruction kind"))?
+                    .ok_or_else(|| rejected("is classified as taking angles but has none"))?
             }
         };
         untied.try_push(gate)?;
@@ -1319,143 +1340,23 @@ pub(crate) fn untie_traced(
 }
 
 /// `gate` with each of its angles replaced by `fresh(angle index, angle)`,
-/// called in [`AngleRef`] angle order (`θ, φ, λ`, then `Cu`'s `γ`; `U2`'s
-/// `φ, λ`), or `None` for a gate that is neither a Pauli rotation nor one of
-/// the gates only the adjoint differentiates.
+/// called in [`AngleRef`] angle order, which is
+/// [`GateInstruction::angles`]'s (`θ, φ, λ`, then `Cu`'s `γ`; `U2`'s `φ, λ`):
+/// the order the native simulator's adjoint numbers them in too; or `None`
+/// for a gate with no angle (a parameter-free instruction, or the call of a
+/// declared gate), which has nothing to untie; [`classify`] never sends one
+/// here, and `every_instruction_kind_is_classified` holds it to that.
 fn with_fresh_angles(
     gate: &GateInstruction,
     fresh: &mut impl FnMut(usize, &GateParam) -> Result<GateParam, QmlError>,
 ) -> Result<Option<GateInstruction>, QmlError> {
-    use GateInstruction as G;
-    Ok(Some(match gate {
-        G::Rx { qubit, theta } => G::Rx {
-            qubit: *qubit,
-            theta: fresh(0, theta)?,
-        },
-        G::Ry { qubit, theta } => G::Ry {
-            qubit: *qubit,
-            theta: fresh(0, theta)?,
-        },
-        G::Rz { qubit, theta } => G::Rz {
-            qubit: *qubit,
-            theta: fresh(0, theta)?,
-        },
-        G::Rxx { q0, q1, theta } => G::Rxx {
-            q0: *q0,
-            q1: *q1,
-            theta: fresh(0, theta)?,
-        },
-        G::Rzz { q0, q1, theta } => G::Rzz {
-            q0: *q0,
-            q1: *q1,
-            theta: fresh(0, theta)?,
-        },
-        G::Crx {
-            control,
-            target,
-            theta,
-        } => G::Crx {
-            control: *control,
-            target: *target,
-            theta: fresh(0, theta)?,
-        },
-        G::Cry {
-            control,
-            target,
-            theta,
-        } => G::Cry {
-            control: *control,
-            target: *target,
-            theta: fresh(0, theta)?,
-        },
-        G::Crz {
-            control,
-            target,
-            theta,
-        } => G::Crz {
-            control: *control,
-            target: *target,
-            theta: fresh(0, theta)?,
-        },
-        G::Cp { q0, q1, theta } => G::Cp {
-            q0: *q0,
-            q1: *q1,
-            theta: fresh(0, theta)?,
-        },
-        G::Cu1 { q0, q1, theta } => G::Cu1 {
-            q0: *q0,
-            q1: *q1,
-            theta: fresh(0, theta)?,
-        },
-        G::P { qubit, lam } => G::P {
-            qubit: *qubit,
-            lam: fresh(0, lam)?,
-        },
-        G::U1 { qubit, lam } => G::U1 {
-            qubit: *qubit,
-            lam: fresh(0, lam)?,
-        },
-        G::U0 { qubit, gamma } => G::U0 {
-            qubit: *qubit,
-            gamma: fresh(0, gamma)?,
-        },
-        G::U {
-            qubit,
-            theta,
-            phi,
-            lam,
-        } => G::U {
-            qubit: *qubit,
-            theta: fresh(0, theta)?,
-            phi: fresh(1, phi)?,
-            lam: fresh(2, lam)?,
-        },
-        G::UGate {
-            qubit,
-            theta,
-            phi,
-            lam,
-        } => G::UGate {
-            qubit: *qubit,
-            theta: fresh(0, theta)?,
-            phi: fresh(1, phi)?,
-            lam: fresh(2, lam)?,
-        },
-        G::U2 { qubit, phi, lam } => G::U2 {
-            qubit: *qubit,
-            phi: fresh(0, phi)?,
-            lam: fresh(1, lam)?,
-        },
-        G::Cu3 {
-            control,
-            target,
-            theta,
-            phi,
-            lam,
-        } => G::Cu3 {
-            control: *control,
-            target: *target,
-            theta: fresh(0, theta)?,
-            phi: fresh(1, phi)?,
-            lam: fresh(2, lam)?,
-        },
-        G::Cu {
-            control,
-            target,
-            theta,
-            phi,
-            lam,
-            gamma,
-        } => G::Cu {
-            control: *control,
-            target: *target,
-            theta: fresh(0, theta)?,
-            phi: fresh(1, phi)?,
-            lam: fresh(2, lam)?,
-            gamma: fresh(3, gamma)?,
-        },
-        _ => return Ok(None),
-    }))
+    let mut gate = gate.clone();
+    let mut untied = false;
+    for (index, angle) in gate.angles_mut().enumerate() {
+        *angle = fresh(index, angle)?;
+        untied = true;
+    }
+    Ok(untied.then_some(gate))
 }
 
 #[cfg(test)]
@@ -2049,6 +1950,13 @@ mod tests {
         assert!(differs, "every call_index produced the same minibatch");
     }
 
+    /// The minibatch stream is pinned: a change would move every seeded
+    /// minibatch training, so it must be deliberate.
+    #[test]
+    fn minibatch_indices_is_pinned() {
+        assert_eq!(minibatch_indices(10, 42, 3, 4), vec![3, 5, 4, 0]);
+    }
+
     #[test]
     fn subset_reproduces_the_full_problem_on_those_samples() {
         // Full problem over 4 distinct-feature samples with distinct labels.
@@ -2491,13 +2399,57 @@ mod tests {
             .to_vec()
     }
 
+    /// A gate with no angle — parameter-free, a barrier, a measurement, the
+    /// call of a declared gate — has nothing to untie: `with_fresh_angles`
+    /// gives `None` and never calls `fresh`. A gate with one angle is untied,
+    /// with one call.
+    #[test]
+    fn with_fresh_angles_has_nothing_to_untie_in_a_gate_with_no_angle() {
+        use GateInstruction as G;
+        let declared = one_instruction_of_every_kind()
+            .into_iter()
+            .find(|gate| matches!(gate, G::Custom(_)))
+            .expect("a call of a declared gate");
+        let calls = std::cell::Cell::new(0);
+        let mut fresh = |_: usize, angle: &GateParam| -> Result<GateParam, QmlError> {
+            calls.set(calls.get() + 1);
+            Ok(*angle)
+        };
+        for gate in [
+            G::H(0),
+            G::Cx(0, 1),
+            G::Barrier(vec![0]),
+            G::Measure { qubit: 0, cbit: 0 },
+            declared,
+        ] {
+            assert_eq!(
+                with_fresh_angles(&gate, &mut fresh).unwrap(),
+                None,
+                "{gate:?}"
+            );
+        }
+        assert_eq!(calls.get(), 0);
+        let rx = G::Rx {
+            qubit: 0,
+            theta: GateParam::Param(0),
+        };
+        assert_eq!(
+            with_fresh_angles(&rx, &mut fresh).unwrap(),
+            Some(rx.clone())
+        );
+        assert_eq!(calls.get(), 1);
+    }
+
     /// `GateInstruction` is `#[non_exhaustive]`, so `classify` ends in a
     /// wildcard arm. This keeps the closed list complete: it must name every
     /// kind `polypus-circuit` has (`kind_index` is exhaustive inside that
     /// crate), and it declares the three sets of angle-taking kinds — the five
     /// Pauli rotations both gradients differentiate, the thirteen kinds only
     /// the adjoint does (#561), and the one no exact gradient does. A new kind
-    /// fails here until it is classified (contract C-2).
+    /// fails here until it is classified (contract C-2). It also holds the
+    /// untying to what `with_fresh_angles` takes for granted: a kind is untied
+    /// (a Pauli rotation or adjoint-only) exactly when
+    /// `GateInstruction::angles` gives it an angle to untie.
     #[test]
     fn every_instruction_kind_is_classified() {
         use std::collections::BTreeSet;
@@ -2513,6 +2465,14 @@ mod tests {
                 GateClass::ParameterFree => "parameter free",
                 GateClass::Unknown => panic!("{gate:?} is not classified"),
             };
+            assert_eq!(
+                matches!(
+                    classify(&gate),
+                    GateClass::PauliRotation | GateClass::AdjointOnly
+                ),
+                gate.angles().count() > 0,
+                "{gate:?}: untied exactly when it has an angle to untie"
+            );
             by_class.entry(class).or_default().insert(gate.kind_index());
         }
         let missing: Vec<usize> = (0..GateInstruction::KINDS).filter(|&k| !seen[k]).collect();
@@ -2801,9 +2761,10 @@ mod tests {
     /// on each angle — `Param(k)` on angle `k` of `AngleRef`'s order (`θ, φ,
     /// λ`, then `Cu`'s `γ`; `U2`'s `φ, λ`), the angle count written out here —
     /// unties to occurrence `k` at `AngleRef::new(1, k)` reading `θ[k]`. This
-    /// pins the per-gate order of `with_fresh_angles` independently of the
-    /// simulator: two of its indices swapped would hand the derivative of one
-    /// angle to the parameter of another, and every other test would pass.
+    /// pins the per-gate order of `with_fresh_angles` — which is
+    /// `GateInstruction::angles`'s — independently of the simulator and of
+    /// that method: two of its indices swapped would hand the derivative of
+    /// one angle to the parameter of another, and every other test would pass.
     #[test]
     fn untie_numbers_every_angle_of_each_adjoint_only_gate_in_angle_order() {
         use GateInstruction as G;
@@ -3348,11 +3309,11 @@ mod tests {
     /// native path keeps it instead of the map, gives the fitness, gradient
     /// and adjoint runs the maps give, bit for bit, for scalar and categorical
     /// losses (`{:?}` prints every `f64` exactly, a `-0.0` included).
-    #[test]
-    fn readings_of_the_maps_give_what_the_maps_give_bit_for_bit() {
+    /// The catalogue, a categorical problem, and a scalar loss over a readout
+    /// of several observables (which reads `⟨O₀⟩` only).
+    fn reading_problems() -> Vec<QmlProblem> {
         let mut problems = catalogue();
         problems.push(categorical_two_class_problem());
-        // A scalar loss over a readout of several observables reads `⟨O₀⟩`.
         let z = |q: usize| {
             Observable::new(vec![(1.0, PauliString::new(vec![(q, Pauli::Z)]).unwrap())]).unwrap()
         };
@@ -3363,6 +3324,12 @@ mod tests {
         let rows: Vec<Vec<f64>> = vec![vec![0.4, 1.1, 0.7, 2.0], vec![1.3, 0.2, 2.2, 0.9]];
         let ds = Dataset::from_rows(&rows, &[0.5, -0.3]).unwrap();
         problems.push(QmlProblem::new(two.compile(4).unwrap(), ds, Loss::SquaredError).unwrap());
+        problems
+    }
+
+    #[test]
+    fn readings_of_the_maps_give_what_the_maps_give_bit_for_bit() {
+        let problems = reading_problems();
         for (i, problem) in problems.iter().enumerate() {
             let theta: Vec<f64> = (0..problem.num_params())
                 .map(|k| 0.3 - 0.17 * k as f64)
@@ -3399,6 +3366,90 @@ mod tests {
                 "problem {i}"
             );
         }
+    }
+
+    /// A circuit's amplitudes and the map the native backend builds from
+    /// them: keyed `width` bits wide, the zero-probability states left out.
+    fn state_and_map(
+        circuit: &ConcreteCircuit,
+        width: usize,
+    ) -> (Vec<polypus_sim::C64>, HashMap<String, f64>) {
+        use polypus_sim::{Simulator, StatevectorSimulator};
+        let sv = StatevectorSimulator::new().run(circuit).unwrap();
+        let map = sv
+            .amplitudes()
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.norm_sqr() != 0.0)
+            .map(|(state, a)| (format!("{state:0width$b}"), a.norm_sqr()))
+            .collect();
+        (sv.amplitudes().to_vec(), map)
+    }
+
+    /// #628: a circuit read straight from its state, with no map, gives what
+    /// its map gives, bit for bit: the problem's reading, the model's
+    /// expectations and its prediction (`{:?}` prints every `f64` exactly).
+    #[test]
+    fn states_read_as_their_maps_do_bit_for_bit() {
+        for (i, problem) in reading_problems().iter().enumerate() {
+            let theta: Vec<f64> = (0..problem.num_params())
+                .map(|k| 0.3 - 0.17 * k as f64)
+                .collect();
+            for circuit in problem.gradient_circuits(&theta).unwrap() {
+                let width = circuit.num_qubits();
+                let (amplitudes, map) = state_and_map(&circuit, width);
+                let state = ExactState::new(amplitudes.len(), width, |s| amplitudes[s].norm_sqr());
+                let model = &problem.model;
+                assert_eq!(
+                    format!("{:?}", problem.read_state(&state)),
+                    format!("{:?}", problem.read_probabilities(&map)),
+                    "problem {i}"
+                );
+                assert_eq!(
+                    format!("{:?}", model.expectations_from_state(&state)),
+                    format!("{:?}", model.expectations_from_probabilities(&map)),
+                    "problem {i}"
+                );
+                assert_eq!(
+                    format!("{:?}", model.predict_from_state(&state)),
+                    format!("{:?}", model.predict_from_probabilities(&map)),
+                    "problem {i}"
+                );
+            }
+        }
+    }
+
+    /// The state reader raises the map reader's errors: no state of non-zero
+    /// probability is `EmptyCounts`, a readout position past the key width
+    /// `CountsWidthMismatch`, with the same fields.
+    #[test]
+    fn states_raise_the_errors_their_maps_raise() {
+        let problem = &catalogue()[0]; // reads Z on qubits 0..=3
+        let empty = ExactState::new(16, 4, |_| 0.0);
+        assert_eq!(
+            problem.read_state(&empty).unwrap_err(),
+            problem.read_probabilities(&HashMap::new()).unwrap_err()
+        );
+        let narrow = ExactState::new(4, 2, |s| if s == 0 { 1.0 } else { 0.0 });
+        let narrow_map = HashMap::from([("00".to_string(), 1.0)]);
+        assert_eq!(
+            problem.read_state(&narrow).unwrap_err(),
+            problem.read_probabilities(&narrow_map).unwrap_err()
+        );
+        assert!(matches!(
+            problem.read_state(&narrow).unwrap_err(),
+            QmlError::CountsWidthMismatch {
+                expected: 3,
+                got: 2
+            }
+        ));
+        // Both at once: a map with no entry is empty before its width is
+        // looked at, and so is a state with no non-zero probability.
+        let empty_and_narrow = ExactState::new(4, 2, |_| 0.0);
+        assert_eq!(
+            problem.read_state(&empty_and_narrow).unwrap_err(),
+            QmlError::EmptyCounts
+        );
     }
 
     #[test]

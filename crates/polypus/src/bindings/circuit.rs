@@ -1203,3 +1203,54 @@ pub fn shor_order_finding(
         .map_err(to_py_err)?;
     Ok(Circuit { inner })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #428: `polypus.statevector`'s memory check. Above 30 qubits a known
+    /// budget decides (`InsufficientMemoryError` when the statevector does not
+    /// fit, through when it does); the blind fallback keeps 30 as the ceiling,
+    /// with the simulator's ceiling `ValueError` naming `POLYPUS_MEM_BUDGET`;
+    /// above `MAX_QUBITS` the simulator's own error is left to the run.
+    #[test]
+    fn statevector_memory_check_lets_a_known_budget_decide_above_30_qubits() {
+        use crate::infrastructure::{BudgetSource, MemBudget, FALLBACK_MAX_QUBITS};
+        Python::initialize();
+        Python::attach(|py| {
+            let wide = FALLBACK_MAX_QUBITS + 4; // 256 GiB
+            for source in [BudgetSource::Explicit, BudgetSource::Detected] {
+                let roomy = MemBudget {
+                    bytes: 1 << 40,
+                    source,
+                };
+                assert!(statevector_memory_check(wide, roomy).is_ok());
+                let tight = MemBudget {
+                    bytes: 64 << 30,
+                    source,
+                };
+                let refused = statevector_memory_check(wide, tight).unwrap_err();
+                assert!(
+                    refused.is_instance_of::<crate::exceptions::InsufficientMemoryError>(py),
+                    "{refused}"
+                );
+            }
+            let fallback = MemBudget {
+                bytes: 16 << 30,
+                source: BudgetSource::Fallback,
+            };
+            assert!(statevector_memory_check(FALLBACK_MAX_QUBITS, fallback).is_ok());
+            let refused = statevector_memory_check(FALLBACK_MAX_QUBITS + 1, fallback).unwrap_err();
+            assert!(refused.is_instance_of::<PyValueError>(py));
+            assert!(
+                !refused.is_instance_of::<crate::exceptions::InsufficientMemoryError>(py),
+                "the ceiling error stays a plain ValueError: {refused}"
+            );
+            let message = refused.value(py).to_string();
+            assert!(message.contains("at most 30"), "{message}");
+            assert!(message.contains("POLYPUS_MEM_BUDGET"), "{message}");
+            // Above the simulator's ceiling the run's own ValueError is the error.
+            assert!(statevector_memory_check(polypus_sim::MAX_QUBITS + 1, fallback).is_ok());
+        });
+    }
+}
