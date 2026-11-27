@@ -12,7 +12,7 @@ use super::options::OptionsArg;
 use super::prepare::{self, Entry, TargetArgs};
 use super::results::{counts_to_pydict, counts_to_pylist, RunResult};
 use super::seeds::{seed_or_entropy, unique_id};
-use super::{call_trace, python_version};
+use super::{call_trace, python_log, python_version};
 use crate::infrastructure::execution_config::random_seed;
 use crate::infrastructure::{
     merge_counts, Counts, InfrastructureError, Planner, ShotDistributingPlanner,
@@ -93,15 +93,15 @@ use crate::orchestration::RunCircuitFlow;
 /// does. If something is already there, a file or a symbolic link, or the
 /// directory does not exist, nothing is created or changed and the run goes on
 /// without a trace, after one warning in the Polypus log (shown only once a
-/// logger is installed with `polypus.init_logger`). A `bytes` path, or a value
-/// that is not a path, raises `TypeError` before anything runs. The trace never
-/// changes the result or the error. Without `trace`,
-/// `POLYPUS_CALL_TRACE=<directory>` writes one trace per run there, named
-/// `<id>-<pid>-<n>.jsonl`, as for `train`, after the run's id (`RunResult.id`,
-/// cut to its first 100 characters and a hash if longer), the process id and
-/// the number of traces the variable named before in the process; the
-/// directory must exist. `POLYPUS_CALL_TRACE_MAX_MB` caps a trace, in whole
-/// MiB (512 MiB by default).
+/// logger is installed with `polypus.init_logger` or `polypus.log_to_python`).
+/// A `bytes` path, or a value that is not a path, raises `TypeError` before
+/// anything runs. The trace never changes the result or the error. Without
+/// `trace`, `POLYPUS_CALL_TRACE=<directory>` writes one trace per run there,
+/// named `<id>-<pid>-<n>.jsonl`, as for `train`, after the run's id
+/// (`RunResult.id`, cut to its first 100 characters and a hash if longer), the
+/// process id and the number of traces the variable named before in the
+/// process; the directory must exist. `POLYPUS_CALL_TRACE_MAX_MB` caps a trace,
+/// in whole MiB (512 MiB by default).
 ///
 /// `target` (keyword-only, default `None`) is a typed target, `polypus.Aer`,
 /// `Native`, `Cunqa`, `Qmio` or `Registered`, used instead of `infrastructure`,
@@ -129,6 +129,8 @@ pub fn run_quantum_circuit<'py>(
     trace: Option<PathBuf>,
     target: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // Read Python's log levels before the GIL is released below (`python_log`).
+    python_log::refresh_levels(qc.py());
     let start = Instant::now();
     let selection = prepare::select(
         Entry::Run,

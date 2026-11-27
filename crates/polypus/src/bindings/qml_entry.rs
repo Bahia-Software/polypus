@@ -16,9 +16,9 @@ use super::optimizer::{
 };
 use super::options::OptionsArg;
 use super::prepare::{self, Entry, TargetArgs};
-use super::qml;
 use super::results::{counts_to_pylist, finish_optimization, log_training_start, RunResult};
 use super::seeds::{method_seed, resolve_optimizer_seed, seed_or_entropy, unique_id};
+use super::{python_log, qml};
 use crate::evaluation::{OracleErrorSlot, QmlObjective, QmlOracleFactory, QmlSource};
 use crate::infrastructure::execution_config::random_seed;
 use crate::infrastructure::{BoundCircuit, Counts, InfrastructureError};
@@ -234,6 +234,8 @@ pub fn qml_train<'py>(
     callback: Option<Bound<'py, PyAny>>,
     target: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // Read Python's log levels before the GIL is released below (`python_log`).
+    python_log::refresh_levels(feature_map.py());
     let start = Instant::now();
     let selection = prepare::select(
         Entry::QmlTrain,
@@ -464,6 +466,8 @@ pub fn qml_predict<'py>(
     walltime: Option<String>,
     target: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // Read Python's log levels before the GIL is released below (`python_log`).
+    python_log::refresh_levels(feature_map.py());
     let start = Instant::now();
     let selection = prepare::select(
         Entry::QmlPredict,

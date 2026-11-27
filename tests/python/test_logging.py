@@ -17,7 +17,8 @@ from Python:
 The global logger can be installed only once per process, so everything is
 verified in a single ordered test — the first `init_logger` in the process must
 be the one below. Nothing else in the Python suite installs the logger; (d)
-runs in a subprocess.
+runs in a subprocess. With ``POLYPUS_TEST_LOG_TO_PYTHON=1`` (``conftest.py``)
+the suite installs ``polypus.log_to_python()`` first, so that test is skipped.
 """
 
 import os
@@ -29,6 +30,10 @@ import polypus
 import pytest
 
 
+@pytest.mark.skipif(
+    os.environ.get("POLYPUS_TEST_LOG_TO_PYTHON") == "1",
+    reason="POLYPUS_TEST_LOG_TO_PYTHON=1 installs polypus.log_to_python() first",
+)
 def test_default_is_file_and_reinit_is_noop(tmp_path, monkeypatch):
     # Redirect the auto-generated default file into a throwaway dir.
     monkeypatch.setenv("POLYPUS_LOG_DIR", str(tmp_path))

@@ -400,27 +400,29 @@ impl<C: Clock> WalltimeWatch<C> {
     }
 
     fn after_batch(&self, circuits: usize) {
-        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        state.batches += 1;
-        state.circuits += circuits as u64;
-        if state.batches < self.shape.batches_per_generation {
-            return;
-        }
-        if self.shape.until_next_batch {
-            state.awaiting_next = true;
-            return;
-        }
-        self.done.store(true, Ordering::Relaxed);
-        let end = self.clock.now();
-        self.project(&mut state, end);
+        let warning = {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            state.batches += 1;
+            state.circuits += circuits as u64;
+            if state.batches < self.shape.batches_per_generation {
+                return;
+            }
+            if self.shape.until_next_batch {
+                state.awaiting_next = true;
+                return;
+            }
+            self.done.store(true, Ordering::Relaxed);
+            let end = self.clock.now();
+            self.project(&mut state, end)
+        };
+        warn(warning);
     }
 
-    /// Project the run from a first generation that ended at `end`, and warn
-    /// when the projection exceeds the walltime.
-    fn project(&self, state: &mut WatchState, end: Instant) {
-        let Some(started) = state.started else {
-            return;
-        };
+    /// Project the run from a first generation that ended at `end`, and return
+    /// the warning when the projection exceeds the walltime. The caller logs it
+    /// once it has released the state lock (see [`warn`]).
+    fn project(&self, state: &mut WatchState, end: Instant) -> Option<String> {
+        let started = state.started?;
         let first = end.saturating_duration_since(started);
         let generations = self.shape.generations_after(state.circuits);
         let work = self.growth.map_or(generations, |g| g.first_generations) as f64
@@ -430,7 +432,7 @@ impl<C: Clock> WalltimeWatch<C> {
         if projected > self.walltime {
             state.warned = Some(projected);
             if let Some(growth) = self.growth {
-                log::warn!(
+                return Some(format!(
                     "run {}: the first of up to {} {} took {}; with up to {} IPOP restarts, \
                      each doubling the population, the optimisation may take up to {}, \
                      beyond the {} walltime; the QPUs are released when it runs out. \
@@ -443,11 +445,10 @@ impl<C: Clock> WalltimeWatch<C> {
                     hms(projected),
                     hms(self.walltime),
                     self.shape.setting,
-                );
-                return;
+                ));
             }
             if state.leading_circuits > 0 {
-                log::warn!(
+                return Some(format!(
                     "run {}: the first of up to {} {} took {}; with the {} circuits sent \
                      before it at that pace, the optimisation may take up to {}, beyond the \
                      {} walltime; the QPUs are released when it runs out. Raise `walltime` \
@@ -460,8 +461,7 @@ impl<C: Clock> WalltimeWatch<C> {
                     hms(projected),
                     hms(self.walltime),
                     self.shape.setting,
-                );
-                return;
+                ));
             }
             // The library's time between the batches is in the first one's.
             let with_the_library = if self.shape.until_next_batch {
@@ -469,7 +469,7 @@ impl<C: Clock> WalltimeWatch<C> {
             } else {
                 ""
             };
-            log::warn!(
+            return Some(format!(
                 "run {}: the first of up to {} {}{with_the_library} took {}, so the \
                  optimisation may take up to {}, beyond the {} walltime; the QPUs are \
                  released when it runs out. Raise `walltime` or lower the {}.",
@@ -480,8 +480,19 @@ impl<C: Clock> WalltimeWatch<C> {
                 hms(projected),
                 hms(self.walltime),
                 self.shape.setting,
-            );
+            ));
         }
+        None
+    }
+}
+
+/// Log the walltime warning [`WalltimeWatch::project`] returned, if any. Called
+/// with the state lock released (docs/ENGINEERING.md §9): a log sink may block
+/// (the Python bridge waits for the GIL), and every batch that reaches the watch
+/// meanwhile would wait for the lock behind it.
+fn warn(warning: Option<String>) {
+    if let Some(warning) = warning {
+        log::warn!("{warning}");
     }
 }
 
@@ -520,8 +531,9 @@ impl<C: Clock> WalltimeWatch<C> {
                 // The next batch starts: the first generation ends here.
                 self.done.store(true, Ordering::Relaxed);
                 let end = self.clock.now();
-                self.project(&mut state, end);
+                let warning = self.project(&mut state, end);
                 drop(state);
+                warn(warning);
                 return call();
             }
             state.started.get_or_insert_with(|| self.clock.now());
@@ -2121,6 +2133,59 @@ mod tests {
             );
             let gradient = oracles.gradient.as_ref().expect("the gradient is kept");
             assert_eq!(gradient.scores_theta(), scores_theta);
+        }
+    }
+
+    /// The run shape of an external optimizer's batches: each one's
+    /// `tell()` and the next `ask()` count towards it.
+    const EXTERNAL_50: RunShape = RunShape {
+        batches_per_generation: 1,
+        generations: 50,
+        leading_batches: 0,
+        evaluations: None,
+        until_next_batch: true,
+        unit: "batches",
+        setting: "max_evaluations",
+    };
+
+    /// The walltime warning is logged with the state lock released
+    /// (docs/ENGINEERING.md §9), both where the first generation ends inside a
+    /// batch and where it ends as the next batch starts: a thread that takes
+    /// the lock while the record is emitted is not held up behind it.
+    #[test]
+    fn warns_with_the_state_lock_released() {
+        use crate::test_log::{probe_contention, Contention};
+        for (run_id, shape) in [
+            ("walltime-watch-unlocked", DE_100),
+            ("walltime-watch-unlocked-next", EXTERNAL_50),
+        ] {
+            let (watch, _) = watch(
+                run_id,
+                Duration::from_secs(120),
+                Duration::from_secs(3600),
+                shape,
+            );
+            let watch = Arc::new(watch);
+            let contender = Arc::clone(&watch);
+            let contention = probe_contention(
+                move || {
+                    let _ = contender.warned();
+                },
+                || {
+                    for _ in 0..3 {
+                        watch.evaluate_batch(&vec![vec![0.0]; 4]);
+                    }
+                },
+            );
+            assert_eq!(
+                contention,
+                Contention {
+                    records: 1,
+                    blocked: 0
+                },
+                "{run_id}"
+            );
+            assert_eq!(logged_for(run_id).len(), 1, "{run_id}");
         }
     }
 }

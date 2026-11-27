@@ -23,12 +23,45 @@ from skip_guard import (  # noqa: E402, F401
     pytest_terminal_summary,
 )
 
+# POLYPUS_TEST_LOG_TO_PYTHON=1 runs the whole suite with the Python log bridge
+# installed (issue #458): `polypus.log_to_python()` with the `polypus` logger at
+# DEBUG and a handler that formats every record and drops it, so every Rust log
+# record of every test goes through Python. It checks that no path deadlocks or
+# fails with the bridge on; CI runs it on one leg (`log-bridge` in ci.yml).
+# Child interpreters that tests start do not load this file, so they run
+# without the bridge.
+LOG_TO_PYTHON = os.environ.get("POLYPUS_TEST_LOG_TO_PYTHON") == "1"
+
+
+def _install_log_to_python():
+    import logging
+
+    import polypus
+
+    class FormatAndDrop(logging.Handler):
+        def emit(self, record):
+            self.format(record)
+
+    handler = FormatAndDrop(logging.NOTSET)
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s %(threadName)s "
+            "%(pathname)s:%(lineno)d %(message)s"
+        )
+    )
+    top = logging.getLogger("polypus")
+    top.setLevel(logging.DEBUG)
+    top.addHandler(handler)
+    polypus.log_to_python()
+
 
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "cunqa: needs a real CUNQA install and SLURM (opt-in: POLYPUS_CUNQA_REAL=1)",
     )
+    if LOG_TO_PYTHON:
+        _install_log_to_python()
 
 
 @pytest.fixture

@@ -80,8 +80,8 @@ pub fn cleanup_failure_count() -> u64 {
     CLEANUP_FAILURES.load(Ordering::SeqCst)
 }
 
-/// Register the backends Polypus ships through the runtime registry, once per
-/// process. Idempotent (a `Once` guard), and called at the top of
+/// Register the backends Polypus ships through the runtime registry, filling
+/// in only the names that are still free. Idempotent, and called at the top of
 /// [`Infrastructure::create_backend`] so a name-driven build always finds them.
 ///
 /// - `"subprocess"` — the Python subprocess bridge (`polypus-subprocess-backend`),
@@ -92,27 +92,30 @@ pub fn cleanup_failure_count() -> u64 {
 ///
 /// A third party's own `register_backend(...)` call composes with these: last
 /// registration wins, so an embedder can even override a built-in name.
+///
+/// There is deliberately no `Once` around it: `register_backend` logs, a log sink
+/// may block (the Python bridge waits for the GIL), and the bindings call this
+/// both with the GIL held (resolving a target) and without it (inside a run), so
+/// a record emitted inside a one-time initialiser could deadlock the two
+/// (docs/ENGINEERING.md §9). Checking the registry each time costs one read
+/// lock. Two threads that both find a name free both register the same factory,
+/// the second replacing the first.
 pub fn register_builtin_backends() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // Never clobber a name an embedder already registered: registering is
-        // last-wins, so an embedder who registered their own `"subprocess"` (or
-        // `"qmio"`) *before* the first `create_backend` keeps it. Only fill in a name
-        // that is still free.
-        //
-        // The subprocess bridge is Unix-only (POSIX process controls), so on
-        // non-Unix (Windows) the `"subprocess"` name is simply never registered and
-        // resolves to `UnknownInfrastructure` like any other unknown backend.
-        #[cfg(unix)]
-        if !is_registered(polypus_subprocess_backend::BACKEND_NAME) {
-            polypus_subprocess_backend::register();
-        }
-        #[cfg(feature = "qmio")]
-        if !is_registered("qmio") {
-            register_backend("qmio", qmio::qmio_factory);
-        }
-    });
+    // Never clobber a name an embedder already registered: registering is
+    // last-wins, so an embedder who registered their own `"subprocess"` (or
+    // `"qmio"`) keeps it. Only fill in a name that is still free.
+    //
+    // The subprocess bridge is Unix-only (POSIX process controls), so on
+    // non-Unix (Windows) the `"subprocess"` name is simply never registered and
+    // resolves to `UnknownInfrastructure` like any other unknown backend.
+    #[cfg(unix)]
+    if !is_registered(polypus_subprocess_backend::BACKEND_NAME) {
+        polypus_subprocess_backend::register();
+    }
+    #[cfg(feature = "qmio")]
+    if !is_registered("qmio") {
+        register_backend("qmio", qmio::qmio_factory);
+    }
 }
 
 /// Supported quantum execution infrastructures.

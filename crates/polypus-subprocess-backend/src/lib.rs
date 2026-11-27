@@ -305,6 +305,19 @@ impl Worker {
         max_frame_bytes: usize,
         expected_parent: nix::unistd::Pid,
     ) -> Result<Worker, BridgeError> {
+        // Logged here, on the caller's thread, not on the spawner thread: the caller
+        // waits for the spawner below, possibly holding the GIL (the bindings build
+        // backends before releasing it), and a log sink may block on the GIL (the
+        // Python bridge), so a record from the spawner could deadlock the two
+        // (docs/ENGINEERING.md §9).
+        #[cfg(not(target_os = "linux"))]
+        if arm_pdeathsig {
+            log::warn!(
+                "arm_pdeathsig was requested but PR_SET_PDEATHSIG is Linux-only; \
+                 the orphan guard is not armed on this platform, so the worker will \
+                 not be auto-killed if this process dies unexpectedly"
+            );
+        }
         let (result_tx, result_rx) = mpsc::channel::<Result<Worker, BridgeError>>();
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let thread = std::thread::Builder::new()
@@ -420,12 +433,8 @@ impl Worker {
                     });
                 };
             }
-            #[cfg(not(target_os = "linux"))]
-            log::warn!(
-                "arm_pdeathsig was requested but PR_SET_PDEATHSIG is Linux-only; \
-                 the orphan guard is not armed on this platform, so the worker will \
-                 not be auto-killed if this process dies unexpectedly"
-            );
+            // Off Linux the request is a no-op here; `spawn_detached` has already
+            // logged that, on the caller's thread.
         }
         let mut child = cmd.spawn().map_err(|e| {
             if arm_pdeathsig && e.raw_os_error() == Some(nix::errno::Errno::ESRCH as i32) {

@@ -322,17 +322,23 @@ impl CallTracer {
     /// error logs one warning and stops the trace, which is then left without
     /// an `end` line.
     pub fn record(&self, event: TraceEvent) {
-        let mut guard = self.lock();
-        let state = &mut *guard;
-        if state.finished || state.sink.is_none() {
-            return;
-        }
-        let line = state.count(event);
-        if state.truncated {
-            return;
-        }
-        if let Err(err) = state.write_event(&line, self.max_bytes) {
-            state.discard();
+        let failed = {
+            let mut guard = self.lock();
+            let state = &mut *guard;
+            if state.finished || state.sink.is_none() {
+                return;
+            }
+            let line = state.count(event);
+            if state.truncated {
+                return;
+            }
+            let written = state.write_event(&line, self.max_bytes);
+            if written.is_err() {
+                state.discard();
+            }
+            written
+        };
+        if let Err(err) = failed {
             self.warn_stopped(&err);
         }
     }
@@ -344,16 +350,19 @@ impl CallTracer {
     /// [`record`](Self::record) after it, do nothing. Never fails: a write
     /// error logs one warning, as in `record`.
     pub fn finish(&self, status: RunStatus) {
-        let mut guard = self.lock();
-        // Read under the lock, after any `record` that held it: `end` is not
-        // stamped before a call whose line it follows.
-        let t = self.now_ns();
-        let state = &mut *guard;
-        if state.finished {
-            return;
-        }
-        state.finished = true;
-        if let Err(err) = state.close(status, t) {
+        let closed = {
+            let mut guard = self.lock();
+            // Read under the lock, after any `record` that held it: `end` is not
+            // stamped before a call whose line it follows.
+            let t = self.now_ns();
+            let state = &mut *guard;
+            if state.finished {
+                return;
+            }
+            state.finished = true;
+            state.close(status, t)
+        };
+        if let Err(err) = closed {
             self.warn_stopped(&err);
         }
     }
@@ -413,7 +422,10 @@ impl CallTracer {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The one warning of a trace stopped by a write error.
+    /// The one warning of a trace stopped by a write error. Emitted with the
+    /// state lock released (docs/ENGINEERING.md §9): a log sink may block (the
+    /// Python bridge waits for the GIL), and every thread recording an event
+    /// meanwhile would wait for the lock behind it.
     fn warn_stopped(&self, err: &io::Error) {
         log::warn!("run {}: call trace stopped: {err}", self.id);
     }
@@ -1526,5 +1538,46 @@ mod tests {
         per_event.sort_by(f64::total_cmp);
         println!("record: median {:.0} ns per event", per_event[50] * 1e9);
         assert!(per_event[50] < 2e-6);
+    }
+
+    /// A write error is logged with the state lock released
+    /// (docs/ENGINEERING.md §9), from `record` and from `finish`: a thread
+    /// that records an event while the warning is emitted is not held up
+    /// behind it.
+    #[test]
+    fn write_failures_are_logged_with_the_lock_released() {
+        use crate::test_log::{probe_contention, Contention};
+        let one_unblocked = Contention {
+            records: 1,
+            blocked: 0,
+        };
+
+        // `record`: the sink fails partway through the events.
+        let id = "t-unlocked-record";
+        let tracer = CallTracer::from_sink(
+            Box::new(FailingSink::new(4_096)),
+            header(id),
+            DEFAULT_MAX_BYTES,
+        );
+        let contender = Arc::clone(&tracer);
+        let contention = probe_contention(
+            move || contender.record(batch(0)),
+            || (0..2_000).for_each(|k| tracer.record(batch(k))),
+        );
+        assert_eq!(contention, one_unblocked, "{id}");
+
+        // `finish`: the header fits in the sink, the `end` line does not.
+        let id = "t-unlocked-finish";
+        let tracer = CallTracer::from_sink(
+            Box::new(FailingSink::new(header_len(id))),
+            header(id),
+            DEFAULT_MAX_BYTES,
+        );
+        let contender = Arc::clone(&tracer);
+        let contention = probe_contention(
+            move || contender.record(batch(0)),
+            || tracer.finish(RunStatus::Ok),
+        );
+        assert_eq!(contention, one_unblocked, "{id}");
     }
 }

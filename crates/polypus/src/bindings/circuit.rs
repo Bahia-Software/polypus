@@ -244,6 +244,8 @@ pub fn statevector<'py>(
     fusion: bool,
 ) -> PyResult<Bound<'py, PyArray1<polypus_sim::C64>>> {
     let params = params.unwrap_or_default();
+    // Read Python's log levels before the GIL is released below (`python_log`).
+    super::python_log::refresh_levels(qc.py());
     // This entry point is always the native statevector path: calibrate the
     // gate-parallel threshold lazily on the first call (#351), then surface the
     // one-time, default-visible warning if it fell back to the static default

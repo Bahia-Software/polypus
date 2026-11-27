@@ -3,7 +3,9 @@
 //! The Rust `log::*` macros used across the workspace (optimizers, backends, …)
 //! are **no-ops until a global logger sink is installed**. These bindings let
 //! Python callers install that sink so the internal log records are actually
-//! emitted. Without calling `init_logger` once per process, no log output (and
+//! emitted, in one of two ways, once per process: `init_logger` writes them
+//! with Polypus's own sink (a file, or stdout), and `log_to_python` hands them
+//! to Python's `logging` (`python_log.rs`). Without either, no log output (and
 //! no log file) is ever produced.
 //!
 //! By default (`init_logger()` with no `file`/`console`) output goes to a
@@ -19,11 +21,13 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
+use super::python_log;
 use crate::logger::{self, LogFormat, LogLevel, LogTarget, LoggerBuilder};
 
-/// Tracks whether *these bindings* have already installed the global logger, so
-/// a second call can no-op **without** opening (and orphaning) a fresh log file
-/// before `log::set_boxed_logger` rejects it. The underlying `log` crate allows
+/// Tracks whether *these bindings* have already installed the global logger,
+/// with `init_logger` or `log_to_python`, so a second call of either can no-op
+/// **without** opening (and orphaning) a fresh log file before
+/// `log::set_boxed_logger` rejects it. The underlying `log` crate allows
 /// exactly one global sink per process; this is a fast-path guard in front of
 /// that one-shot install.
 static LOGGER_INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -65,18 +69,34 @@ fn create_parent_dirs(path: &Path) -> PyResult<()> {
     })
 }
 
-/// Emit a Python `UserWarning` that a logger is already installed.
-fn warn_logger_already_installed(py: Python<'_>) -> PyResult<()> {
+/// Emit a Python `UserWarning` that a logger is already installed, naming the
+/// ignored call (`init_logger` or `log_to_python`).
+fn warn_logger_already_installed(py: Python<'_>, call: &str) -> PyResult<()> {
     let warnings = PyModule::import(py, "warnings")?;
     warnings.call_method1(
         "warn",
-        (
-            "a Polypus logger is already installed; ignoring this init_logger call. \
-          The logger can be configured only once per process — restart the \
-          interpreter/kernel to change its level, format, or target.",
-        ),
+        (format!(
+            "a Polypus logger is already installed; ignoring this {call} call. \
+             The logger (init_logger or log_to_python) can be installed only once per \
+             process — restart the interpreter/kernel to change its level, format, or \
+             target."
+        ),),
     )?;
     Ok(())
+}
+
+/// Claim the one install slot shared by `init_logger` and `log_to_python`:
+/// `true` for the first call of the process, `false` (after the `UserWarning`)
+/// for any later one.
+fn claim_install_slot(py: Python<'_>, call: &str) -> PyResult<bool> {
+    if LOGGER_INSTALLED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        warn_logger_already_installed(py, call)?;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// Install the process-wide Polypus logger.
@@ -126,7 +146,9 @@ fn warn_logger_already_installed(py: Python<'_>) -> PyResult<()> {
 /// A global logger can be installed only once per process. A second call (e.g.
 /// re-running a Jupyter cell, or repeated calls across tests in one interpreter)
 /// is a **no-op with a `UserWarning`**, leaving the first sink in place; restart
-/// the interpreter/kernel to change the level, format or target.
+/// the interpreter/kernel to change the level, format or target. The same holds
+/// across `init_logger` and `log_to_python`: whichever comes second is the
+/// no-op.
 #[pyfunction]
 #[pyo3(signature = (
     level = "info",
@@ -162,11 +184,7 @@ pub fn init_logger(
     // re-run, repeated test calls), no-op with a warning *without* opening a
     // fresh file — otherwise every re-run would orphan an empty log file before
     // `set_boxed_logger` rejected it.
-    if LOGGER_INSTALLED
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        warn_logger_already_installed(py)?;
+    if !claim_install_slot(py, "init_logger")? {
         return Ok(None);
     }
 
@@ -196,8 +214,73 @@ pub fn init_logger(
             // was registered from outside these bindings (e.g. a direct Rust
             // `LoggerBuilder::init`). Keep the guard set (a sink does exist) and
             // degrade to a no-op with a warning rather than raising.
-            warn_logger_already_installed(py)?;
+            warn_logger_already_installed(py, "init_logger")?;
             Ok(None)
+        }
+    }
+}
+
+/// Forward Polypus's Rust log records to Python's `logging` module.
+///
+/// After this call every record goes to `logging.getLogger(name)`, where
+/// `name` is the Rust module that emitted it under a `polypus.` hierarchy:
+/// `polypus_optimizers::util` logs to `polypus.optimizers.util`,
+/// `polypus::bindings::qml` to `polypus.bindings.qml`, and a dependency's
+/// module (e.g. `zeromq::codec`) to `polypus.zeromq.codec`. So
+/// `logging.getLogger("polypus")` controls everything Polypus's Rust core logs:
+/// add handlers, set a level or a format to it as to any library's logger.
+/// Nothing is configured here: with no handler on `polypus` or above it,
+/// Python's own defaults apply (warnings and errors to stderr). Optimizer
+/// progress is logged at `DEBUG`.
+///
+/// Each record carries the Rust source file and line as `pathname` and
+/// `lineno`, and its message already formatted, so a `%` in it is kept
+/// verbatim. Rust's `TRACE` level is `5`, below `logging.DEBUG`; the wheel is
+/// built with `DEBUG` as its most verbose level (see `init_logger`), so it
+/// emits no `TRACE` records.
+///
+/// # Levels
+/// Which levels each `polypus` logger lets through is read from Python when
+/// this function runs and again at the start of each Polypus call that runs
+/// Rust code on worker threads, a complete list: `train`,
+/// `run_quantum_circuit`, `statevector`, `qml.train`, `qml.predict`,
+/// `Model.fit`, `TrainedModel.predict` and `run`, `qml.expval`,
+/// `qml.jacobian`, `qml.vjp`, `qml.kernel_matrix`,
+/// `calibrate_parallel_threshold`. Records are filtered against the levels
+/// read last without taking the GIL, so a level changed while a call runs is
+/// seen from the next of these calls on. A record that passes the filter is
+/// checked once more against the live logger before it is handled.
+///
+/// A record has no Python function (`funcName` is `None`), and one emitted on
+/// a thread Python did not start has the `threadName` Python gives such a
+/// thread, `Dummy-<n>`.
+///
+/// # When Python is unavailable
+/// A record emitted while the interpreter cannot be reached (it is shutting
+/// down, or in a garbage-collection pass) is not lost silently: an `ERROR` or
+/// `WARNING` one is written to stderr as
+/// `polypus: <LEVEL> <logger name>: <message>`, and anything less severe is
+/// dropped.
+///
+/// # Re-initialization
+/// Only one logger can be installed per process, by this function or by
+/// `init_logger`: whichever is called second is a no-op with a `UserWarning`
+/// and returns `None`. Restart the interpreter/kernel to switch.
+#[pyfunction]
+pub fn log_to_python(py: Python<'_>) -> PyResult<()> {
+    if !claim_install_slot(py, "log_to_python")? {
+        return Ok(());
+    }
+    match python_log::install(py) {
+        Ok(true) => Ok(()),
+        // A sink was registered from outside these bindings: keep the guard set
+        // (a sink does exist) and degrade to a no-op, as `init_logger` does.
+        Ok(false) => warn_logger_already_installed(py, "log_to_python"),
+        // The levels could not be read, so nothing was installed: free the slot
+        // for a later call and raise.
+        Err(err) => {
+            LOGGER_INSTALLED.store(false, Ordering::Release);
+            Err(err)
         }
     }
 }

@@ -13,7 +13,7 @@ A dense `n`-qubit statevector needs `16 · 2^n` bytes (1 GiB at 26 qubits, 16 Gi
 export POLYPUS_MEM_BUDGET=32G   # e.g. the job's --mem, minus what else runs in it
 ```
 
-An invalid value (`abc`, `1.5G`, `0`) is not silently dropped: it is reported once per process as a warning in the Polypus log (visible once a logger is installed with `polypus.init_logger`), and the default below is used instead.
+An invalid value (`abc`, `1.5G`, `0`) is not silently dropped: it is reported once per process as a warning in the Polypus log (visible once a logger is installed with `polypus.init_logger` or `polypus.log_to_python`), and the default below is used instead.
 
 ## The default
 
