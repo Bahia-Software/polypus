@@ -15,9 +15,15 @@
 //! symmetry: its lowest eigenvalue is the lowest state with that `M_S` and
 //! any total spin `S ≥ |M_S|`, in any irreducible representation. For
 //! `N↑ = N↓` that is the singlet only when no triplet (or higher spin) lies
-//! below it; to pick a given `S` or symmetry, look further up
-//! [`FermionHamiltonian::sector_eigenvalues`]. The ground states of H₂, LiH
-//! and BeH₂ are singlets.
+//! below it. The eigenvalues carry no label of `S`, but the neighbouring
+//! sector tells them apart: a spin-`S` multiplet has one state for each
+//! `M_S` from `−S` to `S`, so for `N↑ ≥ N↓` the roots of `(N↑, N↓)` with
+//! `S > M_S` are exactly those that are also roots of `(N↑ + 1, N↓ − 1)`,
+//! with multiplicity, and the rest have `S = M_S`. With
+//! [`FermionHamiltonian::sector_eigenvalues`] of both sectors, the lowest
+//! root of `(N, N)` left over is the lowest singlet. The spatial symmetry
+//! cannot be told apart this way. The ground states of H₂, LiH and BeH₂ are
+//! singlets.
 //!
 //! # Method
 //!
@@ -72,7 +78,7 @@ fn binomial(n: usize, k: usize) -> Option<usize> {
 
 /// Every `k`-bit mask with exactly `ones` bits set, ascending (Gosper's hack).
 /// The caller guarantees `ones <= k` and `k < usize::BITS`.
-fn combinations(k: usize, ones: usize) -> Vec<usize> {
+pub(super) fn combinations(k: usize, ones: usize) -> Vec<usize> {
     if ones == 0 {
         return vec![0];
     }
@@ -270,6 +276,44 @@ mod tests {
         let full = h2.to_pauli_sum().ground_energy().expect("a small sum");
         assert!((sector - full).abs() <= 1e-12, "{sector} vs {full}");
         assert_eq!(sector_dimension(2, 1, 1), Some(4));
+    }
+
+    /// The rule of the module docs: for `N↑ ≥ N↓`, the roots of
+    /// `(N↑ + 1, N↓ − 1)` are roots of `(N↑, N↓)` too, with multiplicity (the
+    /// states with `S > M_S`), since spin-free integrals conserve `S²`. For
+    /// H₂, the one root of `(2, 0)` is the triplet of `(1, 1)`, and the ground
+    /// state of `(1, 1)` is not among them: a singlet.
+    #[test]
+    fn the_next_sector_holds_the_higher_spin_roots() {
+        let h2 = H2Molecule::new(0.7414, H2Encoding::JordanWigner).expect("a valid length");
+        let cases = [
+            (h2.fermion_hamiltonian().clone(), 1, 1),
+            (random_hamiltonian(3, 3), 1, 1),
+            (random_hamiltonian(3, 3), 2, 1),
+            (random_hamiltonian(3, 7), 2, 2),
+        ];
+        for (hamiltonian, n_up, n_down) in &cases {
+            let lower = hamiltonian.sector_eigenvalues(*n_up, *n_down).unwrap();
+            let upper = hamiltonian
+                .sector_eigenvalues(n_up + 1, n_down - 1)
+                .unwrap();
+            let scale = lower.iter().fold(1.0_f64, |m, v| m.max(v.abs()));
+            // Each root of the upper sector takes a distinct equal root of the
+            // lower one (both ascending, so a greedy match is enough).
+            let mut unmatched = lower.clone();
+            for root in &upper {
+                let position = unmatched
+                    .iter()
+                    .position(|v| (v - root).abs() <= 1e-10 * scale)
+                    .unwrap_or_else(|| panic!("({n_up}, {n_down}): {root} is missing"));
+                unmatched.remove(position);
+            }
+            if *n_up == 1 && *n_down == 1 && hamiltonian.num_spatial_orbitals() == 2 {
+                // H₂: the lowest root left over is the ground state, a singlet.
+                assert_eq!(unmatched[0], lower[0]);
+                assert!(upper[0] > lower[0] + 0.1);
+            }
+        }
     }
 
     /// With no electrons only the core energy remains.

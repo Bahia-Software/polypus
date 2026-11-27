@@ -32,16 +32,18 @@
 //!   `TREL=.TRUE.` (complex integrals) are rejected. `ISYM` is not applied:
 //!   [`FermionHamiltonian::sector_ground_energy`] gives the lowest state of
 //!   the sector in **any** spatial symmetry, which is lower than or equal to
-//!   the energy of a state of symmetry `ISYM ≠ 1` the file was written for.
+//!   the energy of the state of symmetry `ISYM` the file was written for, for
+//!   any `ISYM`, 1 included: the lowest state of a sector need not be totally
+//!   symmetric (O₂'s ³Σg⁻ ground state is `B1g` in `D2h`).
 //! - **Integrals.** `value i j k l`, indices 1-based. All four `> 0`: the
 //!   two-electron integral `(ij|kl)`; `k = l = 0`: the one-electron `h_ij`;
 //!   all `0`: the core energy (nuclear repulsion, plus any frozen core),
 //!   which becomes [`FermionHamiltonian::nuclear_repulsion`]; `j = k = l = 0`:
 //!   an orbital energy, which is not needed and is ignored. A value may use a
 //!   Fortran exponent (`1.0D-02`); a three-digit exponent written without its
-//!   letter (`0.1-100`, from Fortran's `ES23.16` below `1e-99`) is rejected
-//!   as not a number, since writers omit integrals that small. Blank lines
-//!   are skipped.
+//!   letter (`1.0-100`, as Fortran's `E` and `ES` editing write values below
+//!   `1e-99`) is rejected as not a number, since writers omit integrals that
+//!   small. Blank lines are skipped.
 //! - **Symmetry.** A file lists one integral of each group of equal ones (8
 //!   permutations of `(ij|kl)`, 2 of `h_ij`) or more of them; PySCF's default
 //!   lists both `(ij|kl)` and `(kl|ij)`, which may differ in the last digit.

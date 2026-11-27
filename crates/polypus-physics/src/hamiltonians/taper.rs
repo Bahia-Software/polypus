@@ -5,7 +5,10 @@
 //! replaced by its eigenvalue `±1`: qubit `q` disappears and the remaining
 //! qubits are renumbered in order. [`PauliSum::taper`] does this for qubits
 //! and values chosen by the caller; [`parity_reduction_qubits`] gives the
-//! usual choice for a molecule in the parity encoding.
+//! usual choice for a molecule in the parity encoding. To find every Z-type
+//! symmetry of a Hamiltonian and remove them all, use
+//! [`Tapering`](super::Tapering) ([`super::symmetry`]), which rotates each
+//! symmetry onto one qubit and then calls this.
 //!
 //! # Limitations
 //!
@@ -24,12 +27,14 @@
 //!   reference energy from the tapered sum is only valid when every other
 //!   sector with the same parities lies higher. The exact reference of a
 //!   sector is
-//!   [`FermionHamiltonian::sector_ground_energy`](super::FermionHamiltonian::sector_ground_energy)
-//!   (issue #535); the generic detection of `Z₂` symmetries is still to come
-//!   (also issue #535).
-//! - **Only fixed `Z` qubits.** Qubits are removed only when the caller
-//!   names them and every term acts on them with `I` or `Z`; symmetries that
-//!   need a Clifford rotation first are not detected (also issue #535).
+//!   [`FermionHamiltonian::sector_ground_energy`](super::FermionHamiltonian::sector_ground_energy),
+//!   and after tapering
+//!   [`PauliSum::restricted_eigenvalues`] over
+//!   [`Tapering::sector_basis`](super::Tapering::sector_basis) (issue #535).
+//! - **Only fixed `Z` qubits here.** This function removes only qubits the
+//!   caller names, on which every term acts with `I` or `Z`; symmetries that
+//!   need a Clifford rotation first are found and removed by
+//!   [`Tapering`](super::Tapering).
 
 use super::pauli::{PauliAxis, PauliString, PauliSum, PauliTerm};
 use crate::error::PhysicsError;

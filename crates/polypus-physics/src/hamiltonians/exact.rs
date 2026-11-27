@@ -31,7 +31,7 @@
 //! The eigensolver is the classic Householder tridiagonalization followed by
 //! the implicit QL algorithm (Numerical Recipes §11.2–11.3), eigenvalues only.
 
-use super::pauli::{PauliAxis, PauliSum};
+use super::pauli::{PauliAxis, PauliString, PauliSum};
 use crate::error::PhysicsError;
 
 /// Largest number of qubits for which [`PauliSum::to_dense_real`] builds a
@@ -144,6 +144,68 @@ impl DenseMatrix {
     }
 }
 
+/// Largest amplitude, relative to `Σ|c|` of the non-identity terms, that
+/// [`PauliSum::restricted_eigenvalues`] accepts outside the given span: the
+/// terms that leave it must cancel to rounding.
+pub const RESTRICTION_TOLERANCE: f64 = 1e-12;
+
+/// How a real Pauli string (an even number of `Y`) acts on a computational
+/// basis state: `|b⟩ → sign · |b ⊕ x⟩`, with `x` the qubits carrying `X` or
+/// `Y` and `sign = i^{#Y} · (−1)^{popcount(b ∧ (y ∨ z))}`. Shared by every
+/// dense builder, so their sign conventions cannot drift apart.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RealPauliAction {
+    x_mask: usize,
+    sign_mask: usize,
+    /// `i^{#Y}`, real for an even `#Y`.
+    y_sign: f64,
+}
+
+impl RealPauliAction {
+    /// The action of `string`, whose qubits the caller has checked fit in a
+    /// `usize`.
+    ///
+    /// # Errors
+    /// [`PhysicsError::UnsupportedOperation`] if `string` has an odd number
+    /// of `Y` (its matrix is not real).
+    pub(crate) fn of(string: &PauliString) -> Result<Self, PhysicsError> {
+        let (mut x_mask, mut sign_mask, mut n_y) = (0usize, 0usize, 0u32);
+        for &(q, axis) in string.ops() {
+            match axis {
+                PauliAxis::X => x_mask |= 1 << q,
+                PauliAxis::Y => {
+                    x_mask |= 1 << q;
+                    sign_mask |= 1 << q;
+                    n_y += 1;
+                }
+                PauliAxis::Z => sign_mask |= 1 << q,
+            }
+        }
+        if n_y % 2 == 1 {
+            return Err(PhysicsError::UnsupportedOperation {
+                message: format!("{string} has an odd number of Y factors: its matrix is not real"),
+            });
+        }
+        // i^{#Y} for an even #Y is (−1)^{#Y/2}.
+        let y_sign = if n_y % 4 == 0 { 1.0 } else { -1.0 };
+        Ok(Self {
+            x_mask,
+            sign_mask,
+            y_sign,
+        })
+    }
+
+    /// The image of basis state `b` and its sign.
+    pub(crate) fn apply(self, b: usize) -> (usize, f64) {
+        let sign = if (b & self.sign_mask).count_ones() % 2 == 0 {
+            self.y_sign
+        } else {
+            -self.y_sign
+        };
+        (b ^ self.x_mask, sign)
+    }
+}
+
 impl PauliSum {
     /// The sum as a dense real matrix in the little-endian basis.
     ///
@@ -180,38 +242,100 @@ impl PauliSum {
         let dim = 1usize << n;
         let mut m = DenseMatrix::zeros(dim);
         for term in self.terms() {
-            let (mut x_mask, mut sign_mask, mut n_y) = (0usize, 0usize, 0u32);
-            for &(q, axis) in term.string.ops() {
-                match axis {
-                    PauliAxis::X => x_mask |= 1 << q,
-                    PauliAxis::Y => {
-                        x_mask |= 1 << q;
-                        sign_mask |= 1 << q;
-                        n_y += 1;
-                    }
-                    PauliAxis::Z => sign_mask |= 1 << q,
-                }
-            }
-            if n_y % 2 == 1 {
-                return Err(PhysicsError::UnsupportedOperation {
-                    message: format!(
-                        "{} has an odd number of Y factors: its matrix is not real",
-                        term.string
-                    ),
-                });
-            }
-            // i^{#Y} for an even #Y is (−1)^{#Y/2}.
-            let y_sign = if n_y % 4 == 0 { 1.0 } else { -1.0 };
+            let action = RealPauliAction::of(&term.string)?;
             for b in 0..dim {
-                let sign = if (b & sign_mask).count_ones() % 2 == 0 {
-                    y_sign
-                } else {
-                    -y_sign
-                };
-                m.add_to(b ^ x_mask, b, sign * term.coefficient);
+                let (image, sign) = action.apply(b);
+                m.add_to(image, b, sign * term.coefficient);
             }
         }
         Ok(m)
+    }
+
+    /// Every eigenvalue of the sum restricted to the span of the
+    /// computational-basis states `basis`, ascending. The span must be
+    /// invariant under the sum (an electron sector of a molecule, or its
+    /// image under a [`Tapering`](super::Tapering)), so these are exact
+    /// eigenvalues of the sum, not of a projection. Single terms may leave
+    /// the span (a hopping `(X₀X₁ + Y₀Y₁)/2` conserves the electrons, `X₀X₁`
+    /// alone does not): what they send outside must cancel, to within
+    /// [`RESTRICTION_TOLERANCE`]` · Σ|c|` per amplitude, the sum over the
+    /// non-identity terms (the identity never leaves the span).
+    ///
+    /// # Errors
+    /// - [`PhysicsError::UnsupportedOperation`] if
+    ///   - the sum has more qubits than a `usize` has bits;
+    ///   - `basis` is not strictly ascending, or a state is outside the `2^n`
+    ///     basis states;
+    ///   - the span is not invariant (an amplitude sent outside does not
+    ///     cancel);
+    ///   - the span has more than
+    ///     [`MAX_SECTOR_DIMENSION`](super::MAX_SECTOR_DIMENSION) states; or
+    ///   - a term has an odd number of `Y` (its matrix is not real).
+    /// - As [`DenseMatrix::symmetric_eigenvalues`].
+    pub fn restricted_eigenvalues(&self, basis: &[usize]) -> Result<Vec<f64>, PhysicsError> {
+        let unsupported = |message: String| PhysicsError::UnsupportedOperation { message };
+        let n = self.num_qubits();
+        if n > usize::BITS as usize {
+            return Err(unsupported(format!(
+                "{n} qubits do not fit in a {}-bit basis state",
+                usize::BITS
+            )));
+        }
+        if basis.len() > super::MAX_SECTOR_DIMENSION {
+            return Err(unsupported(format!(
+                "{} basis states exceed the dense limit of {}",
+                basis.len(),
+                super::MAX_SECTOR_DIMENSION
+            )));
+        }
+        if let Some(pair) = basis.windows(2).find(|pair| pair[0] >= pair[1]) {
+            return Err(unsupported(format!(
+                "the basis states must be strictly ascending: {} then {}",
+                pair[0], pair[1]
+            )));
+        }
+        if let Some(&last) = basis.last() {
+            if n < usize::BITS as usize && last >> n != 0 {
+                return Err(unsupported(format!(
+                    "basis state {last} is outside the 2^{n} states of the sum"
+                )));
+            }
+        }
+        let mut m = DenseMatrix::zeros(basis.len());
+        // Amplitudes sent outside the span, by (outside state, column).
+        let mut outside: std::collections::BTreeMap<(usize, usize), f64> =
+            std::collections::BTreeMap::new();
+        for term in self.terms() {
+            let action = RealPauliAction::of(&term.string)?;
+            for (column, &b) in basis.iter().enumerate() {
+                let (image, sign) = action.apply(b);
+                match basis.binary_search(&image) {
+                    Ok(row) => m.add_to(row, column, sign * term.coefficient),
+                    Err(_) => {
+                        *outside.entry((image, column)).or_insert(0.0) += sign * term.coefficient
+                    }
+                }
+            }
+        }
+        // The identity maps every state to itself, so it never leaks: a large
+        // constant (a molecule's energy offset) must not widen the tolerance.
+        let tolerance = RESTRICTION_TOLERANCE
+            * self
+                .terms()
+                .iter()
+                .filter(|t| !t.string.is_identity())
+                .map(|t| t.coefficient.abs())
+                .sum::<f64>();
+        if let Some((&(image, column), &amplitude)) =
+            outside.iter().find(|(_, a)| a.abs() > tolerance)
+        {
+            return Err(unsupported(format!(
+                "the sum maps basis state {} to {image}, outside the given states, with \
+                 amplitude {amplitude}: their span is not invariant",
+                basis[column]
+            )));
+        }
+        m.symmetric_eigenvalues()
     }
 
     /// All eigenvalues of the sum, sorted ascending (with multiplicity).
