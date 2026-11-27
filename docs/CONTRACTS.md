@@ -2622,8 +2622,8 @@ batching and distribution are the oracle's concern.
   num_features)` compiles encoders alone (no ansatz, no readout) through the
   layers' own `plan` (`plan_layers`, shared with `QuantumModel::compile`), so a
   stack raises the errors it raises in a model (`AmplitudeEncoderNotFirst`,
-  `TooManyFeatures`, `NotEnoughQubits`, …); a layer that reserves parameters is
-  `ValidationError::TrainableLayerInFeatureMap`. Its `circuit(x)` is `U(x)`:
+  `TooManyFeatures`, `NotEnoughQubits`, `ConvNeedsQubits`, …); a layer that
+  reserves parameters is `ValidationError::TrainableLayerInFeatureMap`. Its `circuit(x)` is `U(x)`:
   gate for gate what a model's template emits for those layers, unmeasured, and
   a sample they reject is that `QmlError`. A `FidelityKernel` over the states of
   `x` (rows) and `y` (columns, or `x` again for the symmetric kernel) numbers

@@ -628,6 +628,15 @@ class TestConvAndPool:
             ansatz.conv("basic")
         assert ansatz.num_layers == 1
 
+    @pytest.mark.parametrize("pairing", ["even_pairs", "odd_pairs", "alternating"])
+    def test_the_message_spells_the_pairing_as_it_was_written(self, pairing):
+        # The name is parsed in the bindings and spelled back by polypus-qml:
+        # the two tables must agree for every pairing.
+        from polypus.qml import Ansatz
+
+        with pytest.raises(ValueError, match=f'pairing "{pairing}" needs'):
+            Ansatz(1).conv("basic", pairing)
+
     @staticmethod
     def _even_pairs_model():
         from polypus.qml import Ansatz, Encoder, Model, Readout, Z
