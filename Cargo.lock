@@ -813,7 +813,9 @@ dependencies = [
  "polypus-observable",
  "polypus-optimizers",
  "polypus-orchestration",
+ "polypus-physics",
  "polypus-qml",
+ "polypus-sim",
  "pyo3",
  "rayon",
 ]
@@ -863,6 +865,7 @@ version = "0.9.0-dev"
 dependencies = [
  "log",
  "ndarray",
+ "polypus-circuit",
  "rand 0.10.4",
 ]
 
@@ -872,6 +875,7 @@ version = "0.9.0-dev"
 dependencies = [
  "log",
  "polypus-backend-conformance",
+ "polypus-circuit",
  "polypus-infrastructure",
  "polypus-observable",
  "polypus-optimizers",

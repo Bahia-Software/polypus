@@ -470,3 +470,22 @@ class TestUnsafeDefaultDirectory:
         with pytest.raises(PermissionError, match="owned by uid"):
             rf.serialize_quantum_circuit("run1", bell)
         assert list(default_dir.iterdir()) == []
+
+
+class TestNoLeftovers:
+    """Placeholders removed in #419 stay removed."""
+
+    def test_test_connection_is_not_exported(self):
+        import polypus_python
+
+        assert not hasattr(polypus_python, "test_connection")
+        assert not hasattr(rf, "test_connection")
+
+    def test_infrastructures_keep_no_unread_attributes(self):
+        pytest.importorskip("qiskit_aer")
+        from polypus_python.local import Local
+
+        unread = {"num_qpus", "qubits_per_qpu", "qpu_types"}
+        assert not unread & set(vars(Local()))
+        with pytest.raises(TypeError):
+            Local(num_qpus=1, qubits_per_qpu=[32], qpu_types=["AerSimulator"])

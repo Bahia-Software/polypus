@@ -442,8 +442,9 @@ fn qir_base_profile_module_is_valid_llvm() {
         .unwrap();
 
     let mut child = Command::new("llvm-as")
-        .args(["-o", "/dev/null", "-"])
+        .args(["-o", "-", "-"])
         .stdin(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn llvm-as");

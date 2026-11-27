@@ -61,9 +61,12 @@ impl LayerOps for BasisEncoder {
                 active: ctx.active.len(),
             });
         }
-        // Encoders reserve no θ: the range stays empty and the cursor unmoved.
+        // Which features are `1.0` is only known at emission, so count the most
+        // gates it can emit: one `X` per feature. Encoders reserve no θ: the
+        // range stays empty and the cursor unmoved.
+        let params = ctx.reserve(Some(ctx.num_features), Some(0))?;
         Ok(LayerAllocation {
-            params: ctx.param_cursor..ctx.param_cursor,
+            params,
             active: ctx.active.clone(),
         })
     }
@@ -106,6 +109,7 @@ mod tests {
             num_features,
             param_cursor: 0,
             layers_planned: 0,
+            gate_count: 0,
         }
     }
 

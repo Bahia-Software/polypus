@@ -36,14 +36,20 @@ use polypus_qml::{
     RotationAxis, SimplifiedTwoDesignAnsatz, StronglyEntanglingAnsatz, ValidationError,
 };
 
+use super::backend_config::{
+    config_from_strings, validate_cunqa_allocation, validate_id, validate_shots_and_qpus,
+};
 use super::callback::validate_callback;
 use super::circuit::Circuit;
-use super::{
-    check_seed_for_backend, config_from_strings, counts_to_pylist, extract_labels,
-    finish_optimization, interruptible_token, is_rotosolve, log_training_start,
-    method_from_pyclass, method_seed, resolve_optimizer_seed, seed_or_entropy, training_observer,
-    unique_id, validate_cunqa_allocation, validate_final_shots, validate_id, validate_method,
-    validate_shots_and_qpus, OptionsArg, RealReader, RunResult,
+use super::extract::{extract_labels, RealReader};
+use super::interrupt::interruptible_token;
+use super::optimizer::{
+    is_rotosolve, method_from_pyclass, training_observer, validate_final_shots, validate_method,
+};
+use super::options::OptionsArg;
+use super::results::{counts_to_pylist, finish_optimization, log_training_start, RunResult};
+use super::seeds::{
+    check_seed_for_backend, method_seed, resolve_optimizer_seed, seed_or_entropy, unique_id,
 };
 use crate::evaluation::{
     candidate_window_size, Label, MinibatchConfig, OracleErrorSlot, QmlOracleFactory, QmlSource,
@@ -581,11 +587,20 @@ fn check_layers(num_qubits: usize, layers: &[Layer]) -> PyResult<usize> {
     }
 }
 
-/// `num_qubits` must be at least 1; shared by `Encoder` and `Ansatz`.
+/// `num_qubits` must be at least 1 and at most
+/// [`MAX_MODEL_QUBITS`](polypus_qml::MAX_MODEL_QUBITS), which `compile` would
+/// refuse anyway, but only once a layer is added; shared by `Encoder` and
+/// `Ansatz`.
 fn check_num_qubits(class: &str, num_qubits: usize) -> PyResult<()> {
     if num_qubits == 0 {
         return Err(PyValueError::new_err(format!(
             "{class} needs at least one qubit, got num_qubits=0"
+        )));
+    }
+    let max = polypus_qml::MAX_MODEL_QUBITS;
+    if num_qubits > max {
+        return Err(PyValueError::new_err(format!(
+            "{class} takes at most {max} qubits, got num_qubits={num_qubits}"
         )));
     }
     Ok(())
@@ -3821,6 +3836,7 @@ pub(crate) fn register(qml: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polypus_qml::SizeLimit;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -4067,9 +4083,10 @@ mod tests {
     }
 
     #[test]
-    fn check_layers_refuses_a_parameter_count_that_does_not_fit() {
+    fn check_layers_refuses_a_model_past_the_size_limits() {
         Python::initialize();
-        let too_many = |layer: usize| ValidationError::TooManyParams { layer }.to_string();
+        let too_large =
+            |layer: usize, reason| ValidationError::ModelTooLarge { layer, reason }.to_string();
         let message = |layers: &[Layer]| {
             Python::attach(|py| match check_layers(2, layers) {
                 Ok(count) => panic!("expected an error, got {count} parameter(s)"),
@@ -4079,26 +4096,54 @@ mod tests {
                 }
             })
         };
-        // A huge `reps` on its own.
+        // A count that does not fit in a usize.
         let huge = Layer::HardwareEfficient(HardwareEfficientAnsatz::new(usize::MAX));
-        assert_eq!(message(&[huge]), too_many(0));
+        assert_eq!(message(&[huge]), too_large(0, SizeLimit::Overflow));
         let huge = Layer::SimplifiedTwoDesign(SimplifiedTwoDesignAnsatz::new(usize::MAX));
-        assert_eq!(message(&[huge]), too_many(0));
-        // 2 × (2^63 − 1) parameters fit; a convolution or a pooling after them
-        // does not.
-        let full = Layer::HardwareEfficient(HardwareEfficientAnsatz {
-            rotations: vec![RotationAxis::Rx],
-            final_rotation_layer: false,
-            ..HardwareEfficientAnsatz::new(usize::MAX / 2)
-        });
+        assert_eq!(message(&[huge]), too_large(0, SizeLimit::Overflow));
+        // One that fits but passes the budget: 5·2^40 + 4 gates.
+        let budget = |gates| SizeLimit::Budget {
+            gates,
+            max_gates: 4_000_000,
+        };
+        let big = Layer::HardwareEfficient(HardwareEfficientAnsatz::new(1 << 40));
         assert_eq!(
-            check_layers(2, std::slice::from_ref(&full)).unwrap(),
-            usize::MAX - 1
+            message(std::slice::from_ref(&big)),
+            too_large(0, budget(5_497_558_138_884))
         );
-        let conv = Layer::Conv(ConvLayer::new(ConvBlock::Basic));
-        assert_eq!(message(&[full.clone(), conv]), too_many(1));
-        let pool = Layer::Pool(PoolLayer::new(PoolBlock::Basic));
-        assert_eq!(message(&[full, pool]), too_many(1));
+        // Entanglers alone, after the 5 gates of a `real_amplitudes(1)`.
+        let entanglers_only = Layer::HardwareEfficient(HardwareEfficientAnsatz {
+            rotations: vec![],
+            ..HardwareEfficientAnsatz::new(1 << 40)
+        });
+        let small = Layer::HardwareEfficient(HardwareEfficientAnsatz::real_amplitudes(1));
+        assert_eq!(
+            message(&[small, entanglers_only]),
+            too_large(1, budget(1_099_511_627_781))
+        );
+    }
+
+    #[test]
+    fn check_num_qubits_refuses_zero_and_more_than_the_limit() {
+        Python::initialize();
+        Python::attach(|py| {
+            let message = |num_qubits| {
+                let err = check_num_qubits("Ansatz", num_qubits).unwrap_err();
+                assert!(err.is_instance_of::<PyValueError>(py), "{err}");
+                err.value(py).to_string()
+            };
+            assert_eq!(
+                message(0),
+                "Ansatz needs at least one qubit, got num_qubits=0"
+            );
+            assert_eq!(
+                message(1_000_001),
+                "Ansatz takes at most 1000000 qubits, got num_qubits=1000001"
+            );
+            assert!(message(usize::MAX).contains(&usize::MAX.to_string()));
+            assert!(check_num_qubits("Ansatz", 1).is_ok());
+            assert!(check_num_qubits("Ansatz", 1_000_000).is_ok());
+        });
     }
 
     #[test]

@@ -460,6 +460,37 @@ jobs:
       - name: Test the backend templates
         run: just test-templates
 
+  # The native simulator and the circuit IR on macOS and Windows (#416): the
+  # calibration cache (its directory, file lock and atomic rename) and the QIR
+  # tests that spawn processes depend on the platform. Both crates are pure
+  # Rust, with no PyO3, so no Python is set up. llvm-as is not on PATH there,
+  # so the QIR tests that need it skip (POLYPUS_REQUIRE_LLVM_AS is not set).
+  test-portable:
+    name: test (Rust, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/reference-data/
+          sparse-checkout-cone-mode: false
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install just
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      # All features: includes `parallel`, the calibration cache.
+      - name: Test polypus-sim and polypus-circuit (all features)
+        run: just test-portable
+
   # Sanity-check that the rustdoc still builds cleanly across the whole
   # workspace (broken intra-doc links fail via -D warnings). Catches
   # doc-comment regressions on PRs. docs.yml builds the same rustdoc into the
@@ -490,9 +521,13 @@ jobs:
       - name: Build docs (no deploy)
         run: just doc
 
-  # Smoke-test that the PyO3 extension wheel builds on every supported
-  # platform, at the floor and latest supported Python (no abi3, so wheels
-  # are per-version). The full test suite still runs on Linux only.
+  # Build the PyO3 extension wheel on every supported platform, at the floor
+  # and latest supported Python (no abi3, so wheels are per-version), then
+  # install it there and test it: the README Bell example (as the release
+  # `smoke` job runs it) and the Python tests of the native simulator, the
+  # local runs and the calibration cache. A wheel that does not import on
+  # macOS or Windows fails here, not first at release time. The full Python
+  # suite still runs on Linux only (`python-tests`).
   build-extension:
     name: build extension (${{ matrix.os }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
@@ -515,17 +550,25 @@ jobs:
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Install maturin
-        run: python -m pip install --upgrade maturin
+      - name: Install maturin and pytest
+        run: python -m pip install --upgrade maturin pytest
       - name: Install just
         uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: just@${{ env.JUST_VERSION }}
-      # Smoke-test that the full distribution wheel builds — the root
-      # pyproject.toml drives maturin (the `polypus` extension plus the bundled
-      # `polypus_python` helpers). Features come from pyproject `[tool.maturin]`.
-      - name: Build wheel
-        run: just build-wheel
+      # The full distribution wheel (the `polypus` extension plus the bundled
+      # `polypus_python` helpers; features from pyproject `[tool.maturin]`),
+      # installed with the runtime deps it declares (qiskit, qiskit-aer), which
+      # the tests below need.
+      - name: Build and install the wheel
+        run: just wheel
+      # On Windows, test_autocalibrate.py checks that the calibration cache
+      # lands in %LOCALAPPDATA% (#416). POLYPUS_ALLOWED_SKIPS set and empty:
+      # any skip fails the run (tests/python/skip_guard.py).
+      - name: Run the README Bell example and the portable Python tests
+        env:
+          POLYPUS_ALLOWED_SKIPS: ""
+        run: just pytest-portable
 
   # ---------------------------------------------------------------------------
   # Python test suite. Mirrors install.sh and the manual README instructions:

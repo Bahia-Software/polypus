@@ -47,9 +47,13 @@ impl LayerOps for AngleEncoder {
                 active: ctx.active.len(),
             });
         }
+        // One rotation per feature, after its Hadamard if one is prepended.
         // Encoders reserve no θ: the range stays empty and the cursor unmoved.
+        let per_feature = 1 + usize::from(self.prepend_hadamard);
+        let gates = ctx.num_features.checked_mul(per_feature);
+        let params = ctx.reserve(gates, Some(0))?;
         Ok(LayerAllocation {
-            params: ctx.param_cursor..ctx.param_cursor,
+            params,
             active: ctx.active.clone(),
         })
     }
@@ -92,6 +96,7 @@ mod tests {
             num_features,
             param_cursor: 0,
             layers_planned: 0,
+            gate_count: 0,
         }
     }
 
