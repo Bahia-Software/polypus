@@ -56,6 +56,8 @@
 //!    in every state, so no shots are spent on them: [`group_qubit_wise`] sums
 //!    them into [`Grouping::constant`]. A [`ParityObservable`] still accepts a
 //!    mask-0 term (always `+c`), as `polypus-qml`'s `DiagonalObservable` does.
+//!    Terms with a zero coefficient are in no group either: they add nothing,
+//!    and would only cost circuits (issue #667).
 //!
 //! Qubit `i` is bit `i` of a mask, and the counts keys follow the convention
 //! below.
