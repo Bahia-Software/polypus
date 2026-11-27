@@ -2,9 +2,12 @@
 which seed each call and each CUNQA QPU must receive (contract C-7). A plain
 module, not a test file: imported as ``from seed_reference import ...``.
 
-``stream_seed`` is ``polypus_backend::stream_seed`` (SplitMix64); its first
-output for seed 0 is pinned in ``crates/polypus-backend/src/seed.rs`` and in
-``test_cunqa_run_flow.py``.
+``stream_seed`` is ``polypus_backend::stream_seed``, built on the
+workspace's one SplitMix64, ``polypus_circuit::rng::SplitMix64``
+(``crates/polypus-circuit/src/rng.rs``, whose ``GAMMA`` and ``mix`` the
+constants and ``_mix`` below copy): a change to that generator must change
+this oracle too. Its first output for seed 0 is pinned in
+``crates/polypus-backend/src/seed.rs`` and in ``test_cunqa_run_flow.py``.
 """
 
 MASK = 2**63 - 1
