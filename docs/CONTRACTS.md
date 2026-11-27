@@ -1379,23 +1379,30 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `AdamConfig::finite_difference_step`. `QmlOracleFactory` provides the
     exact parameter-shift gradient for a native QML model, which also scores
     `θ` through `value_and_gradient` when there is no minibatch, so such an
-    iteration is one call (C-11 (f)); neither it, for Qiskit circuits, nor
-    `VqcOracleFactory` provides a gradient otherwise, so those runs take the
-    finite difference, built over the run's evaluation oracle so that `θ`'s
-    value is that oracle's. A `GradientOracle` declares in advance, through
+    iteration is one call (C-11 (f)). `PauliSumOracleFactory` provides the
+    exact parameter-shift gradient of a Pauli-sum cost when its template
+    passes `check_single_frequency` (ADR 0009, decision 8, #536): its
+    `value_and_gradient` scores `[θ, θ+π/2·e₀, θ−π/2·e₀, …]` in one batch
+    of `2·dims + 1` candidates, each group measured with the run's shots,
+    and `scores_theta` is `true`. Neither `QmlOracleFactory`, for Qiskit
+    circuits, nor `VqcOracleFactory`, nor `PauliSumOracleFactory` for
+    another template, provides a gradient, so those runs take the finite
+    difference, built over the run's evaluation oracle so that `θ`'s value
+    is that oracle's. A `GradientOracle` declares in advance, through
     `scores_theta` (default `false`), whether its `value_and_gradient` scores
     `θ` in the gradient's own batch: `true` exactly when it returns a value,
-    as `FiniteDifferenceGradient` always does and `QmlOracle` does without a
-    minibatch. The CUNQA walltime projection (`Method::run_shape_over`)
-    counts one batch per iteration when the gradient scores `θ` (the finite
-    difference the run builds with no gradient and no minibatch, or a given
-    gradient whose `scores_theta` is `true`), and two (`θ`, then the
-    gradient) with a given gradient that does not, or with a minibatch and no
-    given gradient; the final `θ` counts as one more iteration, exact with
-    one batch per iteration and a bound on its single candidate with two. The
-    watch forwards every call, `value_and_gradient` and `scores_theta`
-    included, `value_and_gradient` counted as a batch only when it returns a
-    value, so Adam sends the same batches with and without it. Enforced by
+    as `FiniteDifferenceGradient` and `PauliSumOracle` always do and
+    `QmlOracle` does without a minibatch. The CUNQA walltime projection
+    (`Method::run_shape_over`) counts one batch per iteration when the
+    gradient scores `θ` (the finite difference the run builds with no
+    gradient and no minibatch, or a given gradient whose `scores_theta` is
+    `true`), and two (`θ`, then the gradient) with a given gradient that
+    does not, or with a minibatch and no given gradient; the final `θ`
+    counts as one more iteration, exact with one batch per iteration and a
+    bound on its single candidate with two. The watch forwards every call,
+    `value_and_gradient` and `scores_theta` included, `value_and_gradient`
+    counted as a batch only when it returns a value, so Adam sends the same
+    batches with and without it. Enforced by
     `scores_theta_tells_whether_value_and_gradient_scores_theta` in
     `crates/polypus-optimizers/tests/adam.rs` (the default, the finite
     difference and an `Arc` of each agree with `value_and_gradient`), by the
