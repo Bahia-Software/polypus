@@ -5,6 +5,7 @@
 - **Supersedes:** —
 - **Issue / PRs:** #531 (epic #528, step 3 of #424); builds on #529 (multi-qubit `PauliSum`, exact H2) and #530 (qubit-wise grouping and parity reducer)
 - **Amended by:** #667 (2026-11): decision 6 runs the candidates in windows, one call per window; every group's counts must total the shots; zero-coefficient terms are in no group
+- **Amended by:** #536 (2026-11): decision 1 gains an exact parameter-shift gradient for templates whose parameters are single-frequency coordinates (decision 8)
 
 ## Context
 
@@ -39,8 +40,11 @@ depends on the term order, and a term can vanish below
 1. **A new, additive oracle, `PauliSumOracle`, and its factory,
    `PauliSumOracleFactory`, in `polypus-evaluation`.** The factory implements
    the current `OracleFactory` contract and returns `Oracles` with an
-   evaluation oracle only (no gradient, no minibatch oracle; Adam falls back
-   to finite differences, as with any oracle without a gradient).
+   evaluation oracle, no minibatch oracle, and, since #536, the exact
+   parameter-shift gradient of decision 8 when the template allows it
+   *(amended by #536: this was an evaluation oracle only)*. Without that
+   gradient Adam falls back to finite differences, as with any oracle
+   without one.
    `EvaluationOracle`, the `Planner` and `VqcOracle` do not change, and
    neither does C-5's rule (one finite value per candidate). C-5's text does
    change: its `final_shots` paragraph, which lists the oracles that put
@@ -65,8 +69,9 @@ depends on the term order, and a term can vanish below
      acting outside the template, and `Σ|c|` within `MAX_WEIGHT_BOUND`;
    - a Hamiltonian with no non-identity term (empty, or identity terms only;
      since #667 also when its other terms all have a zero coefficient, which
-     `group_qubit_wise` leaves out of every group) is rejected: it has no group to measure, its value does not depend on
-     the candidate, and nothing would be trained.
+     `group_qubit_wise` leaves out of every group) is rejected: it has no
+     group to measure, its value does not depend on the candidate, and
+     nothing would be trained.
 
    The G measurement templates (template, then group `g`'s rotations in
    application order, then `measure_all`) are built once, in `new`; each
@@ -158,6 +163,80 @@ depends on the term order, and a term can vanish below
    `polypus-physics` (for H2's Hamiltonian and its exact energy) becomes a
    dev-dependency of `polypus-evaluation`, as it is of `polypus-observable`.
 
+8. **An exact parameter-shift gradient, by shifting the parameter, when every
+   parameter is a single-frequency coordinate** *(added by #536)*. `new`
+   runs `ParameterizedCircuit::check_single_frequency` on the template once,
+   the check Rotosolve's landscape already relies on: every parameter is the
+   angle `±θ_k + c` of exactly one `rx`, `ry`, `rz`, `rxx`, `rzz`, `p`, `u1`,
+   `u`, `u2` or `u3`. Then the energy, as a function of `θ_k` with the others
+   fixed, is one sinusoid `a + b·cos θ_k + c·sin θ_k` for every group, so
+
+   ```text
+   ∂E/∂θ_k = [E(θ + π/2·e_k) − E(θ − π/2·e_k)] / 2
+   ```
+
+   exactly, with no circuit surgery: the shifted points are ordinary
+   candidates, measured by the oracle's own evaluation path (decision 6:
+   windows, the `W · G` length check, the shot totals), each group with the
+   run's `shots`. The oracle implements `GradientOracle` for the fitness
+   `−E` (decision 3), uphill as C-5 requires, and `build` returns **one**
+   `Arc<PauliSumOracle>` as both the run's evaluation oracle and its
+   gradient, as `QmlOracleFactory` does: C-5 requires `value_and_gradient`'s
+   value to come from the optimizer's own evaluation oracle. The oracle:
+   - `value_and_gradient(θ, P)` scores `[θ, θ+π/2·e_0, θ−π/2·e_0, …]`, the
+     layout of `FiniteDifferenceGradient`, in one batch of `2P + 1`
+     candidates (`(2P + 1) · G` circuits), and returns `θ`'s value with the
+     gradient, so an Adam iteration is one batch; `scores_theta` is `true`;
+   - `gradient_batch` scores the `2P` shifted candidates alone, and
+     `gradient(θ, k)` only the two of component `k`;
+   - a failure is recorded in the error slot and returns finite zeros, as
+     `evaluate_batch` does (decision 6).
+
+   The shifted candidates may fall outside an optimizer's `bounds`; that is
+   harmless, since the oracle does not enforce bounds and the angles are
+   periodic. Each component carries the noise of two independent values,
+   `σ(g_k)² = (σ₊² + σ₋²) / 4`, but no bias, unlike a finite difference,
+   whose step trades bias against noise.
+
+   When the check fails (a parameter in two angles, or in a controlled
+   rotation, a `u0`, a declared gate, an expression such as `2·θ`, or in no
+   angle at all), the factory provides **no** gradient and Adam takes the
+   finite difference, as before #536. That is not silent:
+   `PauliSumOracleFactory::gradient_unavailable()` returns the
+   `SingleFrequencyError` naming the parameter and the gate, and `new` logs
+   it once with `log::warn!`. It is not an error either, because the factory
+   does not know the optimizer, and DE, PSO and the others need no gradient.
+
+## Deviation from issue #536
+
+The issue asks to "reuse the QML implementation where possible" and to test
+the gradient "on the exact path". Neither is possible as written:
+
+- **The QML parameter shift covers fewer gates and is bound to its
+  models.** `polypus-qml` shifts each occurrence of a parameter separately
+  (`untie` and `classify`, private to its `problem` module), which also
+  handles a parameter shared by several gates; the shift and its
+  combination are `QmlProblem` methods (`gradient_circuits`). It shifts only
+  the Pauli rotations `rx`, `ry`, `rz`, `rxx`, `rzz` with plain `Param`
+  angles: there `p`, `u1`, `u`, `u2`, `u3` are differentiated by the
+  adjoint only, and expression angles not at all. Reusing it would lose
+  gates and `±θ + c` angles that decision 8 accepts, and extracting it would
+  refactor `polypus-qml` for shared parameters, a case no Pauli-sum template
+  has yet. Decision 8 reuses instead what the Rotosolve path shares,
+  `check_single_frequency` in `polypus-circuit`, and shifts the parameter
+  itself. A parameter shared by several gates gets no exact gradient for
+  now; untying it can extend decision 8 later without changing its API.
+- **There is no exact path for Pauli sums yet.** The exact `⟨ψ|H|ψ⟩` on the
+  native backend is #534, blocked on #423 at the time of writing. Integer
+  counts cannot reach 1e-10, so no fake backend can meet the criterion
+  either. The oracle's gradient therefore builds its candidates and combines
+  their values in one private function that takes the evaluator as an
+  argument: the oracle passes its windowed, shot-based evaluation, and the
+  test passes an exact evaluator built from the native backend's exact
+  probabilities (`run_circuits_exact`) and each group's `ParityObservable`,
+  the same pieces #534's exact path will use. The test cannot pass without
+  running the code the oracle ships.
+
 ## Deviation from issue #531
 
 ### The planner call
@@ -208,10 +287,11 @@ asks for already exists, on `execute`:
 One call gives full waves: 10 candidates of 5 groups on a backend that runs 8
 circuits at a time take 7 waves in one call, and 10 (8 + 2, five times) in
 five. With windows (#667), a window holding all 10 candidates is still one
-call; smaller windows lose at most one partial wave each. A test pins the guarantee decision 6 relies on, through a backend that
-runs 3 circuits at a time and encodes each circuit's identity in its counts,
-with `N · G` not a multiple of 3, so that a candidate's groups straddle two
-waves: every candidate must still get its own value.
+call; smaller windows lose at most one partial wave each. A test pins the
+guarantee decision 6 relies on, through a backend that runs 3 circuits at a
+time and encodes each circuit's identity in its counts, with `N · G` not a
+multiple of 3, so that a candidate's groups straddle two waves: every
+candidate must still get its own value.
 
 What one call (per window) gives up, compared with the issue's starting point:
 
@@ -254,7 +334,10 @@ the FCI energy.
   `candidate_window_size(backend, G)`; windows are whole candidates, so the
   pairing of decision 6 is unchanged. A trace (C-12) then shows one `batch`
   line per window, as it does for the QML oracle.
-- C-5's text gains this oracle (decision 1).
+- C-5's text gains this oracle (decision 1), and since #536 its exact
+  gradient (decision 8): Adam on a single-frequency ansatz, such as the H2
+  ansatz of decision 7, steps on an unbiased gradient at `2P + 1` candidates
+  per iteration, the cost of the finite difference it replaces.
 
 ## Validation
 
@@ -296,6 +379,18 @@ The acceptance criteria of #531, and the decisions above, map to tests:
   the next call; an empty batch makes no call.
 - **Zero terms (#667):** a zero-coefficient term opens no group and widens
   none, and a repeated string joins its twin's group.
+- **Gradient (#536), exact:** the oracle's shifted candidates and their
+  combination, with each value from the exact evaluator of the deviation
+  above, give the value `−E(θ)` and the gradient `−∂E/∂θ` of the H2
+  ansatz's analytic `E(θ)` within 1e-10 at several `θ`, the optimum
+  included; a two-parameter template with a closed-form energy pins that
+  component `k` is `−∂E/∂θ_k`.
+- **Gradient (#536), with shots:** one batch of `2P + 1` candidates per
+  `value_and_gradient`; H2's gradient within 3σ of the analytic derivative,
+  σ from the group variances, fixed seed; a template that fails
+  `check_single_frequency` gets no gradient, names the reason and logs it;
+  a failure is recorded with finite zeros; and Adam, in a training run,
+  takes this gradient instead of the finite difference.
 - The determinism gate stays green and existing flows are unchanged.
 
 ## Alternatives considered
@@ -313,6 +408,15 @@ The acceptance criteria of #531, and the decisions above, map to tests:
   grouping, but every caller would have to group first, and the oracle would
   lose the ungrouped terms #534 needs. A second constructor can add it later
   without breaking anything.
+- **The QML occurrence shift, extracted** (decision 8): handles shared
+  parameters, but shifts only `rx`, `ry`, `rz`, `rxx`, `rzz` with plain
+  angles, and refactors `polypus-qml` for a case no Pauli-sum template has
+  yet; a copy of it in `polypus-evaluation` would duplicate it instead.
+- **The exact path now** (decision 8): the oracle's own exact `⟨ψ|H|ψ⟩`
+  is #534's subject, blocked on #423 at the time of writing.
+- **Rejecting a template without a gradient** (decision 8): `new` does not
+  know the optimizer, so it would forbid DE or PSO on a template they can
+  train.
 - **A public H2 ansatz** (decision 7): reusable at once, but public API that
   the general generator of #538 would replace, and in `polypus-physics` a new
   dependency on `polypus-circuit`.

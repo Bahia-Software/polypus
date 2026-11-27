@@ -24,7 +24,7 @@ Rules of the road:
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ both crates' `tests/inverse.rs` for `ConcreteCircuit::inverse`; `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings; `polypus-qml`'s `every_instruction_kind_is_classified` in `src/problem.rs` for the gradient's gate classification; `polypus-sim`'s `apply_inverse_undoes_every_instruction_kind` in `src/statevector.rs`, `every_generator_is_the_derivative_of_the_simulated_matrix` in `src/adjoint.rs` (the table of generators) and `every_instruction_kind_is_differentiated_through` in `tests/adjoint.rs` for the adjoint gradient) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed); CUNQA 3.0.0 failed such a job (`key 'counts' not found`) and split the key of a circuit with several classical registers with spaces (#253, #304, fixed in the seal); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
-| C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` (+ `crates/polypus-optimizers/tests/initial_point.rs` and `tests/python/test_initial_point.py` for `initial_point`, `tests/python/test_final_shots.py` for `final_shots`, and `tests/python/test_qml_native_initial_point_final_shots.py` for both through `qml.Model.fit`; `crates/polypus-optimizers/tests/observer.rs` and `tests/python/test_callback.py` for `callback`) | ✅ present | DE `best_fitness` mismatch (C4) |
+| C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` (+ `crates/polypus-optimizers/tests/initial_point.rs` and `tests/python/test_initial_point.py` for `initial_point`, `tests/python/test_final_shots.py` for `final_shots`, and `tests/python/test_qml_native_initial_point_final_shots.py` for both through `qml.Model.fit`; `crates/polypus-optimizers/tests/observer.rs` and `tests/python/test_callback.py` for `callback`; the gradient tests of `crates/polypus-evaluation/src/pauli_sum_oracle.rs` and `tests/pauli_sum_h2.rs` for `PauliSumOracle`'s parameter shift) | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | `release.yml` gate (tag, internal pins, CHANGELOG.md, CITATION.cff ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff, pins) + `tests/python/test_version_coherence.py` (`polypus.__version__` ↔ Cargo.toml ↔ installed distribution) | ✅ present | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`, `test_seed_range.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249) or the run `id`'s UUID (#264); both fixed: `polypus.BackendError`; on Aer about half of the drawn seeds, and any explicit one, of `2**63` or more reached Aer masked to 63 bits, so the reported seed was not the one Aer used (#393, fixed: drawn below `2**63`, an explicit one raises `polypus.ConfigurationError`) |
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
@@ -1379,23 +1379,30 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `AdamConfig::finite_difference_step`. `QmlOracleFactory` provides the
     exact parameter-shift gradient for a native QML model, which also scores
     `θ` through `value_and_gradient` when there is no minibatch, so such an
-    iteration is one call (C-11 (f)); neither it, for Qiskit circuits, nor
-    `VqcOracleFactory` provides a gradient otherwise, so those runs take the
-    finite difference, built over the run's evaluation oracle so that `θ`'s
-    value is that oracle's. A `GradientOracle` declares in advance, through
+    iteration is one call (C-11 (f)). `PauliSumOracleFactory` provides the
+    exact parameter-shift gradient of a Pauli-sum cost when its template
+    passes `check_single_frequency` (ADR 0009, decision 8, #536): its
+    `value_and_gradient` scores `[θ, θ+π/2·e₀, θ−π/2·e₀, …]` in one batch
+    of `2·dims + 1` candidates, each group measured with the run's shots,
+    and `scores_theta` is `true`. Neither `QmlOracleFactory`, for Qiskit
+    circuits, nor `VqcOracleFactory`, nor `PauliSumOracleFactory` for
+    another template, provides a gradient, so those runs take the finite
+    difference, built over the run's evaluation oracle so that `θ`'s value
+    is that oracle's. A `GradientOracle` declares in advance, through
     `scores_theta` (default `false`), whether its `value_and_gradient` scores
     `θ` in the gradient's own batch: `true` exactly when it returns a value,
-    as `FiniteDifferenceGradient` always does and `QmlOracle` does without a
-    minibatch. The CUNQA walltime projection (`Method::run_shape_over`)
-    counts one batch per iteration when the gradient scores `θ` (the finite
-    difference the run builds with no gradient and no minibatch, or a given
-    gradient whose `scores_theta` is `true`), and two (`θ`, then the
-    gradient) with a given gradient that does not, or with a minibatch and no
-    given gradient; the final `θ` counts as one more iteration, exact with
-    one batch per iteration and a bound on its single candidate with two. The
-    watch forwards every call, `value_and_gradient` and `scores_theta`
-    included, `value_and_gradient` counted as a batch only when it returns a
-    value, so Adam sends the same batches with and without it. Enforced by
+    as `FiniteDifferenceGradient` and `PauliSumOracle` always do and
+    `QmlOracle` does without a minibatch. The CUNQA walltime projection
+    (`Method::run_shape_over`) counts one batch per iteration when the
+    gradient scores `θ` (the finite difference the run builds with no
+    gradient and no minibatch, or a given gradient whose `scores_theta` is
+    `true`), and two (`θ`, then the gradient) with a given gradient that
+    does not, or with a minibatch and no given gradient; the final `θ`
+    counts as one more iteration, exact with one batch per iteration and a
+    bound on its single candidate with two. The watch forwards every call,
+    `value_and_gradient` and `scores_theta` included, `value_and_gradient`
+    counted as a batch only when it returns a value, so Adam sends the same
+    batches with and without it. Enforced by
     `scores_theta_tells_whether_value_and_gradient_scores_theta` in
     `crates/polypus-optimizers/tests/adam.rs` (the default, the finite
     difference and an `Arc` of each agree with `value_and_gradient`), by the
@@ -1412,6 +1419,18 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     unknown `rule` rejected before any batch, the defaults, and both entry
     points; the Adam cases of `tests/python/test_oracle_contract.py` cover a
     bad value in a batch, the updated `θ`'s own and the final `θ`'s included.
+    `PauliSumOracle`'s parameter shift (#536) is enforced by the gradient
+    tests in `crates/polypus-evaluation/src/pauli_sum_oracle.rs` (on the
+    exact path, the H2 ansatz's value and gradient equal the analytic `−E`
+    and `−dE/dθ` within 1e-10 and each component is its own parameter's;
+    with shots, `value_and_gradient`, `gradient_batch` and `gradient` are
+    one batch of `2·dims + 1`, `2·dims` and 2 candidates, `scores_theta` is
+    `true` and the value is the evaluation oracle's; a template that fails
+    `check_single_frequency` gets no gradient, with its reason and a
+    warning; a failure is recorded with finite zeros) and in
+    `crates/polypus-evaluation/tests/pauli_sum_h2.rs` (H2's gradient within
+    3σ of the analytic derivative, and Adam in a training run stepping on
+    `θ ± π/2`, one batch per iteration, to within 1 mHa of FCI).
 - **SPSA** (`AlgorithmSPSA`, exposed as `polypus.SPSA`: Spall's
   simultaneous perturbation stochastic approximation, ascending the fitness,
   with a calibrated first step).

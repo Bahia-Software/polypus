@@ -42,15 +42,30 @@
 //! sampling stream, as the native backend does (`circuit_seed`, contract
 //! C-7). A third-party backend is only bound to one stream per call, so there
 //! two groups of a candidate may share random numbers.
+//!
+//! # Gradient
+//!
+//! When every parameter of the template is a single-frequency coordinate
+//! ([`ParameterizedCircuit::check_single_frequency`]: the angle `±θ_k + c`
+//! of exactly one `rx`, `ry`, `rz`, `rxx`, `rzz`, `p`, `u1`, `u`, `u2` or
+//! `u3`), the energy is one sinusoid in each parameter, and the oracle's
+//! [`GradientOracle`] gives the exact parameter shift (issue #536; ADR 0009,
+//! decision 8): `∂(−E)/∂θ_k = [f(θ + π/2·e_k) − f(θ − π/2·e_k)] / 2`, the
+//! shifted points measured as ordinary candidates, with the run's shots. An
+//! Adam iteration is then one batch of `2P + 1` candidates, `θ` and its
+//! shifts, `(2P + 1) · G` circuits. Otherwise the factory provides no
+//! gradient ([`PauliSumOracleFactory::gradient_unavailable`] says why) and
+//! Adam differentiates by finite differences.
 
 use std::fmt;
 use std::sync::Arc;
 
-use polypus_circuit::{CircuitError, GateInstruction, ParameterizedCircuit};
+use polypus_circuit::{CircuitError, GateInstruction, ParameterizedCircuit, SingleFrequencyError};
 use polypus_infrastructure::{
     BoundCircuit, CancelToken, CircuitTask, Counts, Planner, QuantumBackend, RunParams,
 };
 use polypus_observable::{group_qubit_wise, BasisRotation, Grouping, ObservableError, PauliMask};
+use polypus_optimizers::GradientOracle;
 use polypus_orchestration::{OracleFactory, Oracles, Resources};
 
 use crate::{
@@ -129,6 +144,9 @@ pub struct PauliSumOracleFactory {
     /// One measurement template per group, in [`Grouping::groups`] order.
     templates: Vec<ParameterizedCircuit>,
     grouping: Grouping,
+    /// Why the template has no exact gradient, or `None` when it has one
+    /// (see [`gradient_unavailable`](Self::gradient_unavailable)).
+    gradient_unavailable: Option<SingleFrequencyError>,
 }
 
 impl PauliSumOracleFactory {
@@ -137,6 +155,16 @@ impl PauliSumOracleFactory {
     /// template's width, and build each group's measurement template: the
     /// template, then the group's rotations in application order (`H` for
     /// `X`; `S†` then `H` for `Y`), then a measurement of every qubit.
+    ///
+    /// It also decides whether the oracle has an exact gradient (ADR 0009,
+    /// decision 8): when the template passes
+    /// [`ParameterizedCircuit::check_single_frequency`], the run's
+    /// [`Oracles`] carry the parameter-shift gradient of
+    /// [`PauliSumOracle`]'s [`GradientOracle`] implementation; otherwise
+    /// they carry none, Adam differentiates by finite differences, the reason
+    /// is logged once with `log::warn!`, and
+    /// [`gradient_unavailable`](Self::gradient_unavailable) returns it. That
+    /// is not an error: the optimizers other than Adam need no gradient.
     ///
     /// # Errors
     ///
@@ -183,10 +211,29 @@ impl PauliSumOracleFactory {
             })
             .collect::<Result<Vec<_>, CircuitError>>()
             .map_err(PauliSumOracleError::Circuit)?;
+        let gradient_unavailable = template.check_single_frequency().err();
+        if let Some(reason) = &gradient_unavailable {
+            log::warn!(
+                "Pauli-sum cost: no exact parameter-shift gradient ({reason}); Adam will use \
+                 finite differences"
+            );
+        }
         Ok(Self {
             templates,
             grouping,
+            gradient_unavailable,
         })
+    }
+
+    /// Why the oracle has no exact gradient: the
+    /// [`SingleFrequencyError`] naming the parameter and the gate that make
+    /// the template fail [`ParameterizedCircuit::check_single_frequency`]
+    /// (a parameter in two angles, in a controlled rotation, `u0` or a
+    /// declared gate, in an expression such as `2·θ`, or in no angle).
+    /// `None` when the oracle provides the exact parameter-shift gradient
+    /// (ADR 0009, decision 8).
+    pub fn gradient_unavailable(&self) -> Option<&SingleFrequencyError> {
+        self.gradient_unavailable.as_ref()
     }
 
     /// The Hamiltonian's grouping: the identity terms' constant and the
@@ -202,13 +249,18 @@ impl PauliSumOracleFactory {
 }
 
 impl OracleFactory for PauliSumOracleFactory {
+    /// One [`PauliSumOracle`] as the run's evaluation oracle and, when the
+    /// template has one, its exact gradient: contract C-5 requires the value
+    /// [`GradientOracle::value_and_gradient`] returns to come from the
+    /// optimizer's own evaluation oracle.
     fn build(
         self,
         resources: &Resources,
         cancel: &CancelToken,
         errors: &OracleErrorSlot,
     ) -> Oracles {
-        Box::new(PauliSumOracle {
+        let has_gradient = self.gradient_unavailable.is_none();
+        let oracle = Arc::new(PauliSumOracle {
             templates: self.templates,
             grouping: self.grouping,
             config: Arc::clone(&resources.config),
@@ -216,8 +268,12 @@ impl OracleFactory for PauliSumOracleFactory {
             planner: Arc::clone(&resources.planner),
             cancel: cancel.clone(),
             errors: errors.clone(),
-        })
-        .into()
+        });
+        Oracles {
+            evaluation: Box::new(Arc::clone(&oracle)),
+            gradient: has_gradient.then(|| Box::new(oracle) as Box<dyn GradientOracle>),
+            full_evaluation: None,
+        }
     }
 }
 
@@ -374,6 +430,139 @@ impl PauliSumOracle {
         }
         Ok(values)
     }
+}
+
+/// The exact parameter-shift gradient of ADR 0009, decision 8, for a
+/// template that passes `check_single_frequency` (the factory provides it as
+/// the run's gradient only then). Every component is of the fitness `−E`,
+/// uphill (contract C-5), and every shifted candidate is measured like any
+/// other, with the run's shots. A failure is recorded in the error slot and
+/// returns finite zeros, as [`evaluate_batch`](EvaluationOracle::evaluate_batch)
+/// does.
+impl GradientOracle for PauliSumOracle {
+    /// `∂fitness/∂θ[param_index]` from the two candidates `θ ± π/2·e_k`
+    /// alone. An index outside `θ` is `0.0`, with nothing run.
+    fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
+        if param_index >= theta.len() {
+            return 0.0;
+        }
+        self.measured(1, || {
+            shift_gradient(theta, &[param_index], false, |candidates| {
+                self.try_evaluate(candidates, self.config.shots)
+            })
+        })
+        .1
+        .first()
+        .copied()
+        .unwrap_or(0.0)
+    }
+
+    /// Every component from the `2P` shifted candidates in one batch,
+    /// `[θ+π/2·e_0, θ−π/2·e_0, θ+π/2·e_1, …]`, `P = θ.len()`; a `dims` other
+    /// than `P` is left to the optimizer's length check, as `QmlOracle`
+    /// does.
+    fn gradient_batch(&self, theta: &[f64], dims: usize) -> Vec<f64> {
+        let components: Vec<usize> = (0..theta.len()).collect();
+        self.measured(dims, || {
+            shift_gradient(theta, &components, false, |candidates| {
+                self.try_evaluate(candidates, self.config.shots)
+            })
+        })
+        .1
+    }
+
+    /// `θ`'s fitness and every component from one batch of `2P + 1`
+    /// candidates, `[θ, θ+π/2·e_0, θ−π/2·e_0, …]`, so an Adam iteration is
+    /// one call.
+    fn value_and_gradient(&self, theta: &[f64], dims: usize) -> Option<(f64, Vec<f64>)> {
+        let components: Vec<usize> = (0..theta.len()).collect();
+        let (value, gradient) = self.measured(dims, || {
+            shift_gradient(theta, &components, true, |candidates| {
+                self.try_evaluate(candidates, self.config.shots)
+            })
+        });
+        Some((value.unwrap_or(0.0), gradient))
+    }
+
+    /// `true`: [`value_and_gradient`](Self::value_and_gradient) always
+    /// scores `θ` in the gradient's own batch.
+    fn scores_theta(&self) -> bool {
+        true
+    }
+}
+
+impl PauliSumOracle {
+    /// The sentinel discipline of [`evaluate`](Self::evaluate) for a
+    /// gradient: nothing runs once a failure is recorded, and a new failure
+    /// is recorded; either way the result is a zero value and `dims` zeros.
+    /// `value_and_gradient` then still returns `Some`, as `scores_theta`
+    /// promises, so a caller that counts evaluations counts one that did not
+    /// run; the run stops at its next check of the error slot, as it does
+    /// after `evaluate`'s sentinels.
+    fn measured(
+        &self,
+        dims: usize,
+        run: impl FnOnce() -> Result<(Option<f64>, Vec<f64>), EvaluationError>,
+    ) -> (Option<f64>, Vec<f64>) {
+        if self.errors.failed() {
+            return (Some(0.0), vec![0.0; dims]);
+        }
+        match run() {
+            Ok(measured) => measured,
+            Err(e) => {
+                self.errors.record(Box::new(e), &self.config.id);
+                (Some(0.0), vec![0.0; dims])
+            }
+        }
+    }
+}
+
+/// The parameter shift of ADR 0009, decision 8: scores `θ` (when
+/// `with_theta`) and `θ ± π/2·e_k` for each `k` of `components`, in the
+/// order `[θ, θ+π/2·e_k0, θ−π/2·e_k0, θ+π/2·e_k1, …]`, through `evaluate`,
+/// and returns `θ`'s value and the components `(f₊ − f₋)/2`, in the order
+/// of `components`. The oracle passes its own shot-based evaluation; the
+/// tests pass an exact one, so that the criterion of #536 is checked on the
+/// code the oracle runs. Exact when every parameter is a single-frequency
+/// coordinate (`check_single_frequency`): the fitness is then one sinusoid
+/// `a + b·cos θ_k + c·sin θ_k` in each of them.
+fn shift_gradient(
+    theta: &[f64],
+    components: &[usize],
+    with_theta: bool,
+    evaluate: impl FnOnce(&[Vec<f64>]) -> Result<Vec<f64>, EvaluationError>,
+) -> Result<(Option<f64>, Vec<f64>), EvaluationError> {
+    const SHIFT: f64 = std::f64::consts::FRAC_PI_2;
+    let mut candidates = Vec::with_capacity(usize::from(with_theta) + 2 * components.len());
+    if with_theta {
+        candidates.push(theta.to_vec());
+    }
+    for &k in components {
+        for sign in [1.0, -1.0] {
+            let mut shifted = theta.to_vec();
+            if let Some(angle) = shifted.get_mut(k) {
+                *angle += sign * SHIFT;
+            }
+            candidates.push(shifted);
+        }
+    }
+    let values = evaluate(&candidates)?;
+    if values.len() != candidates.len() {
+        return Err(EvaluationError::WrongLength {
+            expected: candidates.len(),
+            got: values.len(),
+        });
+    }
+    let (value, shifted) = if with_theta {
+        (Some(values[0]), &values[1..])
+    } else {
+        (None, &values[..])
+    };
+    let gradient = shifted
+        .chunks_exact(2)
+        .map(|pair| (pair[0] - pair[1]) / 2.0)
+        .collect();
+    Ok((value, gradient))
 }
 
 /// Contract C-3: a circuit's counts total the shots it asked for. A map with
@@ -1113,5 +1302,412 @@ mod tests {
             assert!(error.to_string().contains(message), "{error}");
             assert!(std::error::Error::source(&error).is_some());
         }
+    }
+
+    // ---- Exact parameter-shift gradient (#536, ADR 0009 decision 8) ----
+
+    /// The fitness `−E` of each candidate, exactly: each group's measurement
+    /// template bound and run on a statevector (its `measure_all` reads
+    /// nothing), its probabilities reduced by the group's
+    /// `ParityObservable`, plus the constant. The exact path of #534 will
+    /// use the same pieces; here it stands in for the oracle's shot-based
+    /// evaluation in [`shift_gradient`].
+    fn exact_fitness(
+        factory: &PauliSumOracleFactory,
+        candidates: &[Vec<f64>],
+    ) -> Result<Vec<f64>, EvaluationError> {
+        candidates
+            .iter()
+            .map(|params| {
+                let mut energy = factory.grouping.constant();
+                for (group, template) in factory.grouping.groups().iter().zip(&factory.templates) {
+                    let circuit = template
+                        .assign_parameters(params)
+                        .map_err(EvaluationError::Binding)?;
+                    let mut state =
+                        polypus_sim::Statevector::new(circuit.num_qubits()).expect("a small state");
+                    for gate in circuit.gates() {
+                        state.apply(gate).expect("a simulable gate");
+                    }
+                    let probabilities: Vec<f64> =
+                        state.amplitudes().iter().map(|a| a.norm_sqr()).collect();
+                    energy += group
+                        .observable()
+                        .expectation_from_probabilities(&probabilities)?;
+                }
+                Ok(-energy)
+            })
+            .collect()
+    }
+
+    /// The 4-qubit Jordan–Wigner H2 at 0.7414 Å as `(coefficient, mask)`
+    /// terms, and its dense matrix (as in `tests/pauli_sum_h2.rs`).
+    fn h2() -> (
+        Vec<(f64, PauliMask)>,
+        polypus_physics::hamiltonians::DenseMatrix,
+    ) {
+        use polypus_physics::chemistry::{H2Encoding, H2Molecule};
+        use polypus_physics::hamiltonians::{PauliAxis, PhysicsHamiltonian};
+        let sum = H2Molecule::new(0.7414, H2Encoding::JordanWigner)
+            .expect("a valid bond length")
+            .to_pauli_sum();
+        let terms = sum
+            .terms()
+            .iter()
+            .map(|term| {
+                let ops = term.string.ops().iter().map(|&(qubit, axis)| {
+                    let pauli = match axis {
+                        PauliAxis::X => Pauli::X,
+                        PauliAxis::Y => Pauli::Y,
+                        PauliAxis::Z => Pauli::Z,
+                    };
+                    (qubit, pauli)
+                });
+                (
+                    term.coefficient,
+                    PauliMask::new(ops).expect("a valid string"),
+                )
+            })
+            .collect();
+        (terms, sum.to_dense_real().expect("a 4-qubit matrix"))
+    }
+
+    /// The H2 ansatz of ADR 0009, decision 7:
+    /// `cos(θ/2)|1010⟩ + sin(θ/2)|0101⟩`.
+    fn h2_ansatz() -> ParameterizedCircuit {
+        ParameterizedCircuit::new(4)
+            .ry(0, GateParam::Param(0))
+            .cx(0, 2)
+            .x(1)
+            .cx(0, 1)
+            .cx(1, 3)
+    }
+
+    /// #536's first criterion: on the exact path, the oracle's parameter
+    /// shift gives `−E(θ)` and `−dE/dθ` of the H2 ansatz's analytic energy
+    /// `E(θ) = (a + b)/2 + (a − b)/2·cos θ + h·sin θ` within 1e-10, at several
+    /// `θ`, the optimum (where the gradient vanishes) included.
+    #[test]
+    fn the_shift_gradient_is_the_analytic_derivative_on_the_exact_path() {
+        let (terms, dense) = h2();
+        let get = |row, col| dense.get(row, col).expect("inside the matrix");
+        let (a, b, h) = (
+            get(0b1010, 0b1010),
+            get(0b0101, 0b0101),
+            get(0b0101, 0b1010),
+        );
+        let energy = |t: f64| (a + b) / 2.0 + (a - b) / 2.0 * t.cos() + h * t.sin();
+        let derivative = |t: f64| -(a - b) / 2.0 * t.sin() + h * t.cos();
+        let optimum = (-h).atan2(-(a - b) / 2.0);
+        let factory = PauliSumOracleFactory::new(h2_ansatz(), &terms).expect("a valid cost");
+        assert!(factory.gradient_unavailable().is_none());
+        for theta in [-2.0, -0.3, 0.9, 2.5, optimum] {
+            let (value, gradient) = shift_gradient(&[theta], &[0], true, |candidates| {
+                exact_fitness(&factory, candidates)
+            })
+            .expect("an exact evaluation");
+            let value = value.expect("θ is scored");
+            assert!(
+                (value + energy(theta)).abs() <= 1e-10,
+                "θ = {theta}: value {value}, −E {}",
+                -energy(theta)
+            );
+            assert_eq!(gradient.len(), 1);
+            assert!(
+                (gradient[0] + derivative(theta)).abs() <= 1e-10,
+                "θ = {theta}: gradient {}, −dE/dθ {}",
+                gradient[0],
+                -derivative(theta)
+            );
+        }
+        assert!(derivative(optimum).abs() <= 1e-12);
+    }
+
+    /// Component `k` is `−∂E/∂θ_k`: on `rx(θ₀)` ⊗ `ry(θ₁)` with
+    /// `H = 0.5·Z₀ + 2·X₁ + 3·Z₀X₁`,
+    /// `E = 0.5·cos θ₀ + 2·sin θ₁ + 3·cos θ₀·sin θ₁`, exactly, at random
+    /// points; without `θ`, only the shifted candidates are scored.
+    #[test]
+    fn each_component_is_the_derivative_in_its_own_parameter() {
+        let (factory, energy, gradient) = two_parameter_cost();
+        let mut rng = polypus_circuit::rng::SplitMix64::new(536);
+        for _ in 0..10 {
+            let theta = [(rng.next_f64() - 0.5) * 8.0, (rng.next_f64() - 0.5) * 8.0];
+            let (value, measured) = shift_gradient(&theta, &[0, 1], true, |candidates| {
+                exact_fitness(&factory, candidates)
+            })
+            .expect("an exact evaluation");
+            assert!((value.expect("θ is scored") + energy(theta)).abs() <= 1e-10);
+            let want = gradient(theta);
+            for k in 0..2 {
+                assert!(
+                    (measured[k] + want[k]).abs() <= 1e-10,
+                    "θ = {theta:?}, component {k}: {} vs {}",
+                    measured[k],
+                    -want[k]
+                );
+            }
+            // One component alone, without θ: the same value, two candidates.
+            let mut asked = Vec::new();
+            let (value, alone) = shift_gradient(&theta, &[1], false, |candidates| {
+                asked = candidates.to_vec();
+                exact_fitness(&factory, candidates)
+            })
+            .expect("an exact evaluation");
+            assert_eq!(value, None);
+            let half_pi = std::f64::consts::FRAC_PI_2;
+            assert_eq!(
+                asked,
+                vec![
+                    vec![theta[0], theta[1] + half_pi],
+                    vec![theta[0], theta[1] - half_pi]
+                ]
+            );
+            assert!((alone[0] + want[1]).abs() <= 1e-10);
+        }
+    }
+
+    /// Every kind of angle `check_single_frequency` accepts beyond `rx` and
+    /// `ry` has frequency 1, so the shift is exact for it too: `u3`'s `θ`,
+    /// `u2`'s `φ`, `rzz`, `rz` and `p` of `−θ + 0.4`, `rxx` and `u1`, in a
+    /// circuit whose terms read X and Y, against a five-point derivative of
+    /// the exact fitness (error about 1e-12). A gate let in with another
+    /// frequency would break the shift here.
+    #[test]
+    fn the_shift_is_exact_for_every_single_frequency_gate_kind() {
+        use polypus_circuit::ParamExpr;
+        let mut template = ParameterizedCircuit::new(2);
+        let turned = template
+            .add_expr(-ParamExpr::param(4) + 0.4)
+            .expect("a valid expression");
+        let template = template
+            .u(0, GateParam::Param(0), 0.3, -0.2)
+            .u2(1, GateParam::Param(1), 0.5)
+            .rzz(0, 1, GateParam::Param(2))
+            .rz(0, GateParam::Param(3))
+            .p(1, turned)
+            .rxx(0, 1, GateParam::Param(5))
+            .u1(0, GateParam::Param(6))
+            .h(1);
+        let mask = |ops: &[(usize, Pauli)]| PauliMask::new(ops.iter().copied()).expect("valid");
+        let terms = [
+            (0.7, mask(&[(0, Pauli::X)])),
+            (-1.3, mask(&[(1, Pauli::Y)])),
+            (0.4, mask(&[(0, Pauli::X), (1, Pauli::X)])),
+            (0.9, mask(&[(0, Pauli::Z), (1, Pauli::Y)])),
+            (0.25, mask(&[(0, Pauli::Y), (1, Pauli::Z)])),
+        ];
+        let factory = PauliSumOracleFactory::new(template, &terms).expect("a valid cost");
+        assert!(factory.gradient_unavailable().is_none());
+        let fitness = |theta: &[f64]| exact_fitness(&factory, &[theta.to_vec()]).unwrap()[0];
+        let mut rng = polypus_circuit::rng::SplitMix64::new(5360);
+        let h = 1e-3;
+        for _ in 0..5 {
+            let theta: Vec<f64> = (0..7).map(|_| (rng.next_f64() - 0.5) * 6.0).collect();
+            let components: Vec<usize> = (0..7).collect();
+            let (_, shifted) = shift_gradient(&theta, &components, false, |candidates| {
+                exact_fitness(&factory, candidates)
+            })
+            .expect("an exact evaluation");
+            for k in 0..7 {
+                let at = |step: f64| {
+                    let mut point = theta.clone();
+                    point[k] += step;
+                    fitness(&point)
+                };
+                let reference =
+                    (-at(2.0 * h) + 8.0 * at(h) - 8.0 * at(-h) + at(-2.0 * h)) / (12.0 * h);
+                assert!(
+                    (shifted[k] - reference).abs() <= 1e-9,
+                    "parameter {k} at {theta:?}: shift {} vs five-point {reference}",
+                    shifted[k]
+                );
+            }
+            // Not trivially zero: the shift sees every parameter.
+            assert!(shifted.iter().any(|g| g.abs() > 1e-3), "{shifted:?}");
+        }
+    }
+
+    type Energy = fn([f64; 2]) -> f64;
+    type Gradient = fn([f64; 2]) -> [f64; 2];
+
+    /// The cost of [`each_component_is_the_derivative_in_its_own_parameter`]:
+    /// its factory (one group: `Z₀`, `X₁` and `Z₀X₁` commute qubit-wise),
+    /// `E(θ)` and `∇E(θ)`.
+    fn two_parameter_cost() -> (PauliSumOracleFactory, Energy, Gradient) {
+        let z0 = PauliMask::new([(0, Pauli::Z)]).expect("a valid string");
+        let x1 = PauliMask::new([(1, Pauli::X)]).expect("a valid string");
+        let z0x1 = PauliMask::new([(0, Pauli::Z), (1, Pauli::X)]).expect("a valid string");
+        let template = ParameterizedCircuit::new(2)
+            .rx(0, GateParam::Param(0))
+            .ry(1, GateParam::Param(1));
+        let factory = PauliSumOracleFactory::new(template, &[(0.5, z0), (2.0, x1), (3.0, z0x1)])
+            .expect("a valid cost");
+        assert_eq!(factory.num_groups(), 1);
+        assert!(factory.gradient_unavailable().is_none());
+        (
+            factory,
+            |t| 0.5 * t[0].cos() + 2.0 * t[1].sin() + 3.0 * t[0].cos() * t[1].sin(),
+            |t| {
+                [
+                    -0.5 * t[0].sin() - 3.0 * t[0].sin() * t[1].sin(),
+                    2.0 * t[1].cos() + 3.0 * t[0].cos() * t[1].cos(),
+                ]
+            },
+        )
+    }
+
+    /// The two-parameter cost's oracle on the native backend, behind a
+    /// planner that records the tasks of each call, with its gradient.
+    fn two_parameter_oracles(planner: Arc<RecordingPlanner>, errors: &OracleErrorSlot) -> Oracles {
+        let resources = Resources::new(
+            Arc::new(NativeStatevectorBackend::new(536)),
+            Some(planner),
+            config(),
+        )
+        .expect("the planner suits the backend");
+        two_parameter_cost()
+            .0
+            .build(&resources, &CancelToken::default(), errors)
+    }
+
+    /// With shots, each gradient method is one batch of the candidates
+    /// ADR 0009 decision 8 lists: `value_and_gradient` scores `2P + 1`,
+    /// `gradient_batch` `2P`, `gradient` 2 and an index outside `θ` none;
+    /// `scores_theta` is `true`; and the evaluation and the gradient are one
+    /// oracle (the value is the evaluation oracle's, C-5). The tasks are
+    /// counted over every call of a method, since a batch is one call per
+    /// window and the window depends on the host's parallelism (#667).
+    #[test]
+    fn each_gradient_call_is_one_batch_of_its_shifted_candidates() {
+        let planner = Arc::new(RecordingPlanner::default());
+        let errors = OracleErrorSlot::new();
+        let oracles = two_parameter_oracles(planner.clone(), &errors);
+        let gradient = oracles.gradient.expect("a single-frequency template");
+        assert!(gradient.scores_theta());
+        let theta = [0.4, -1.1];
+        // The tasks the planner received since `before` calls, over all of them.
+        let tasks_since =
+            |before: usize| -> usize { planner.tasks_per_call()[before..].iter().sum() };
+        let calls = || planner.tasks_per_call().len();
+        // One group, so one task per candidate.
+        let before = calls();
+        let (value, components) = gradient.value_and_gradient(&theta, 2).expect("θ is scored");
+        assert_eq!(components.len(), 2);
+        assert_eq!(tasks_since(before), 5);
+        let before = calls();
+        assert_eq!(gradient.gradient_batch(&theta, 2).len(), 2);
+        assert_eq!(tasks_since(before), 4);
+        let before = calls();
+        let _ = gradient.gradient(&theta, 1);
+        assert_eq!(tasks_since(before), 2);
+        let before = calls();
+        assert_eq!(gradient.gradient(&theta, 2), 0.0);
+        assert_eq!(calls(), before, "an index outside θ runs nothing");
+        assert!(!errors.failed());
+        // Finite and noisy: 16 shots of a cost of norm 5.5.
+        assert!(value.is_finite() && value.abs() <= 5.5);
+        assert!(components.iter().all(|c| c.is_finite() && c.abs() <= 5.5));
+        // The same seed on a fresh backend: the evaluation oracle scores θ as
+        // the gradient's first candidate did, bit for bit (C-7: the native
+        // backend seeds each circuit by its position in the run).
+        let fresh = two_parameter_oracles(
+            Arc::new(RecordingPlanner::default()),
+            &OracleErrorSlot::new(),
+        );
+        assert_eq!(
+            fresh.evaluation.evaluate_batch(&[theta.to_vec()]),
+            vec![value]
+        );
+    }
+
+    /// A captured `WARN` line, for the one test that reads the log.
+    struct Warnings(Mutex<Vec<String>>);
+
+    impl log::Log for Warnings {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.level() <= log::Level::Warn
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(record.args().to_string());
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    static WARNINGS: Warnings = Warnings(Mutex::new(Vec::new()));
+
+    /// A template that fails `check_single_frequency` gets no gradient: the
+    /// factory says why and logs it, and the run's `Oracles` carry no
+    /// gradient, so Adam takes the finite difference. The other optimizers
+    /// still evaluate it.
+    #[test]
+    fn a_template_without_single_frequency_parameters_has_no_gradient() {
+        // The only test of this binary that installs a logger.
+        log::set_logger(&WARNINGS).expect("no other logger in this test binary");
+        log::set_max_level(log::LevelFilter::Warn);
+        let z0 = PauliMask::new([(0, Pauli::Z)]).expect("a valid string");
+        // θ₀ in two angles.
+        let repeated = ParameterizedCircuit::new(2)
+            .ry(0, GateParam::Param(0))
+            .ry(1, GateParam::Param(0));
+        let factory = PauliSumOracleFactory::new(repeated, &[(1.0, z0)]).expect("a valid cost");
+        let reason = factory
+            .gradient_unavailable()
+            .expect("a repeated parameter")
+            .clone();
+        assert!(
+            matches!(reason, SingleFrequencyError::Repeated { param: 0, .. }),
+            "{reason:?}"
+        );
+        let logged = WARNINGS.0.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        assert!(
+            logged
+                .iter()
+                .any(|line| line.contains("no exact parameter-shift gradient")
+                    && line.contains(&reason.to_string())),
+            "{logged:?}"
+        );
+        let resources =
+            Resources::new(Arc::new(NativeStatevectorBackend::new(536)), None, config())
+                .expect("the default planner");
+        let oracles = factory.build(&resources, &CancelToken::default(), &OracleErrorSlot::new());
+        assert!(oracles.gradient.is_none());
+        assert_eq!(oracles.evaluation.evaluate_batch(&[vec![0.3]]).len(), 1);
+    }
+
+    /// A failure while computing a gradient is recorded, with finite zeros;
+    /// afterwards nothing runs, for the gradient or the evaluation.
+    #[test]
+    fn a_gradient_failure_is_recorded_and_later_calls_run_nothing() {
+        let planner = Arc::new(RecordingPlanner::default());
+        let errors = OracleErrorSlot::new();
+        let oracles = two_parameter_oracles(planner.clone(), &errors);
+        let gradient = oracles.gradient.expect("a single-frequency template");
+        // Three parameters for a two-parameter template: binding fails.
+        assert_eq!(
+            gradient.value_and_gradient(&[0.1, 0.2, 0.3], 3),
+            Some((0.0, vec![0.0; 3]))
+        );
+        assert!(errors.failed());
+        assert_eq!(gradient.gradient_batch(&[0.1, 0.2], 2), vec![0.0; 2]);
+        assert_eq!(gradient.gradient(&[0.1, 0.2], 0), 0.0);
+        assert_eq!(
+            oracles.evaluation.evaluate_batch(&[vec![0.1, 0.2]]),
+            vec![0.0]
+        );
+        assert!(planner.tasks_per_call().is_empty());
+        let error = errors
+            .take()
+            .expect("an error is recorded")
+            .downcast::<EvaluationError>()
+            .expect("an evaluation error");
+        assert!(matches!(*error, EvaluationError::Binding(_)), "{error:?}");
     }
 }

@@ -1,8 +1,10 @@
 //! Acceptance tests of issue #531 on the native backend: the Pauli-sum oracle
 //! (ADR 0009) on the 4-qubit Jordan–Wigner H2 of `polypus-physics`, at the
 //! analytic optimum of a one-parameter ansatz and end to end with DE and
-//! `final_shots`; its `final_shots` re-evaluation drawing new noise; and the
-//! basis rotation of `Y`, which H2 alone cannot pin.
+//! `final_shots`; its `final_shots` re-evaluation drawing new noise; the
+//! basis rotation of `Y`, which H2 alone cannot pin; and the exact
+//! parameter-shift gradient of #536 (ADR 0009, decision 8) with shots and
+//! through Adam.
 //!
 //! Statistics follow the epic (#528): σ² = Σ_g Var_g / shots, with `Var_g`
 //! the variance of group `g`'s per-shot value, read from the counts of the
@@ -11,15 +13,17 @@
 use std::f64::consts::FRAC_PI_2;
 use std::sync::{Arc, Mutex};
 
-use polypus_circuit::{GateParam, ParameterizedCircuit};
+use polypus_circuit::{GateInstruction, GateParam, ParameterizedCircuit};
 use polypus_evaluation::{EvaluationOracle, OracleErrorSlot, PauliSumOracleFactory};
 use polypus_infrastructure::{
-    CancelToken, CircuitTask, Counts, InfrastructureError, NativeStatevectorBackend, OptLevel,
-    Planner, PlannerRequirements, QuantumBackend, RunParams, SequentialPlanner,
+    BoundCircuit, CancelToken, CircuitTask, Counts, InfrastructureError, NativeStatevectorBackend,
+    OptLevel, Planner, PlannerRequirements, QuantumBackend, RunParams, SequentialPlanner,
 };
 use polypus_observable::{CostObservable, Grouping, MeasurementGroup, Pauli, PauliMask};
-use polypus_optimizers::DeStrategy;
-use polypus_orchestration::{DeConfig, Method, OracleFactory, Resources, Scheduler, TrainFlow};
+use polypus_optimizers::{AdamRule, DeStrategy};
+use polypus_orchestration::{
+    AdamConfig, DeConfig, Method, OracleFactory, Resources, Scheduler, TrainFlow,
+};
 use polypus_physics::chemistry::{H2Encoding, H2Molecule};
 use polypus_physics::hamiltonians::{PauliAxis, PauliSum, PhysicsHamiltonian};
 use polypus_sim::Statevector;
@@ -376,5 +380,160 @@ fn the_y_rotation_measures_y() {
         "⟨Y⟩ = {}, want {}",
         -value,
         -theta.sin()
+    );
+}
+
+/// #536 with shots: H2's parameter-shift gradient is within 3σ of the
+/// analytic `−dE/dθ`, σ² = (σ₊² + σ₋²)/4 with each `σ±²` from its candidate's
+/// group variances (ADR 0009, decision 8), at a point where the slope is
+/// large and at the optimum, where it vanishes. Fixed seed.
+#[test]
+fn the_shot_gradient_is_within_three_sigma_of_the_analytic_derivative() {
+    let terms = to_masks(&h2());
+    let factory = PauliSumOracleFactory::new(ansatz(), &terms).expect("a valid cost");
+    assert!(factory.gradient_unavailable().is_none());
+    let grouping = factory.grouping().clone();
+    let groups = grouping.groups().len();
+    let planner = Arc::new(RecordingPlanner::default());
+    let resources = Resources::new(
+        Arc::new(NativeStatevectorBackend::new(536)),
+        Some(planner.clone()),
+        config("pauli-sum-h2-gradient"),
+    )
+    .expect("the planner suits the backend");
+    let errors = OracleErrorSlot::new();
+    let gradient = factory
+        .build(&resources, &CancelToken::default(), &errors)
+        .gradient
+        .expect("the H2 ansatz is single-frequency");
+    let (a, b, h) = subspace_matrix();
+    let derivative = |t: f64| -(a - b) / 2.0 * t.sin() + h * t.cos();
+    for theta in [1.0, optimal_theta()] {
+        let measured = gradient.gradient_batch(&[theta], 1);
+        assert!(!errors.failed());
+        let counts = planner.take();
+        assert_eq!(counts.len(), 2 * groups, "θ + π/2, then θ − π/2");
+        let (plus, minus) = counts.split_at(groups);
+        let sigma = (sigma(&grouping, plus).powi(2) + sigma(&grouping, minus).powi(2)).sqrt() / 2.0;
+        assert!(
+            (measured[0] + derivative(theta)).abs() <= 3.0 * sigma,
+            "θ = {theta}: gradient {}, −dE/dθ {}, σ = {sigma}",
+            measured[0],
+            -derivative(theta)
+        );
+    }
+}
+
+/// A planner that runs [`SequentialPlanner`] and records the angle of the
+/// first gate (the ansatz's `ry(θ)`) of every task, call by call.
+#[derive(Default)]
+struct AnglePlanner {
+    calls: Mutex<Vec<Vec<f64>>>,
+}
+
+impl Planner for AnglePlanner {
+    fn requirements(&self) -> PlannerRequirements {
+        SequentialPlanner.requirements()
+    }
+
+    fn execute(
+        &self,
+        backend: &dyn QuantumBackend,
+        tasks: &[CircuitTask<'_>],
+        params: &RunParams,
+        cancel: &CancelToken,
+    ) -> Result<Vec<Counts>, InfrastructureError> {
+        let angles = tasks
+            .iter()
+            .map(|task| match task.circuit {
+                BoundCircuit::Native(circuit) => match circuit.gates().first() {
+                    Some(GateInstruction::Ry {
+                        theta: GateParam::Fixed(angle),
+                        ..
+                    }) => *angle,
+                    other => panic!("the ansatz starts with ry(θ): {other:?}"),
+                },
+                _ => panic!("the oracle binds native circuits"),
+            })
+            .collect();
+        self.calls
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(angles);
+        SequentialPlanner.execute(backend, tasks, params, cancel)
+    }
+}
+
+/// #536 through a training run: Adam takes the oracle's parameter shift, not
+/// the finite difference (each iteration scores `θ` and `θ ± π/2`, five
+/// groups each, not `θ ± h`), each iteration is one batch of three
+/// candidates, and it converges: the exact energy at its best `θ` is within
+/// 1 mHa of FCI (convergence apart from the oracle's accuracy, as the epic
+/// asks). Fixed seed. The angles are read over every planner call, since a
+/// batch is one call per window and the window depends on the host's
+/// parallelism (#667).
+#[test]
+fn adam_trains_h2_with_the_parameter_shift_gradient() {
+    let terms = to_masks(&h2());
+    let planner = Arc::new(AnglePlanner::default());
+    let resources = Resources::new(
+        Arc::new(NativeStatevectorBackend::new(536)),
+        Some(planner.clone()),
+        config("pauli-sum-h2-adam"),
+    )
+    .expect("the planner suits the backend");
+    let start = 2.0;
+    let iterations = 60;
+    let flow = TrainFlow {
+        factory: PauliSumOracleFactory::new(ansatz(), &terms).expect("a valid cost"),
+        method: Method::Adam(AdamConfig {
+            max_iters: iterations,
+            learning_rate: 0.1,
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1e-8,
+            bounds: (-std::f64::consts::PI, std::f64::consts::PI),
+            tolerance: 0.0,
+            patience: iterations,
+            finite_difference_step: 1e-3,
+            rule: AdamRule::Adam,
+        }),
+        dimensions: 1,
+        seed: 536,
+        initial_point: Some(vec![start]),
+        final_shots: None,
+        observer: None,
+        errors: OracleErrorSlot::new(),
+        trace: None,
+    };
+    let outcome = match Scheduler::ephemeral(resources).run(flow) {
+        Ok(outcome) => outcome,
+        Err(_) => panic!("the train flow must run"),
+    };
+    let angles: Vec<f64> = planner
+        .calls
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .concat();
+    // Each iteration's batch (2P + 1 = 3 candidates, five groups each), then
+    // the final θ alone.
+    let iterations = iterations as usize;
+    assert_eq!(angles.len(), iterations * 15 + 5);
+    let shifted = |theta: f64| -> Vec<f64> {
+        [theta, theta + FRAC_PI_2, theta - FRAC_PI_2]
+            .iter()
+            .flat_map(|&angle| std::iter::repeat_n(angle, 5))
+            .collect()
+    };
+    assert_eq!(angles[..15], shifted(start), "θ₀ and θ₀ ± π/2");
+    for batch in angles[..iterations * 15].chunks(15) {
+        assert_eq!(batch, shifted(batch[0]), "θ and θ ± π/2, five groups each");
+    }
+    let best = outcome.optimization.best_params[0];
+    let fci = h2().ground_energy().expect("a ground energy");
+    assert!(
+        (exact_energy(best) - fci).abs() < 1e-3,
+        "Adam did not converge: θ = {best}, exact energy {}, FCI {fci}",
+        exact_energy(best)
     );
 }

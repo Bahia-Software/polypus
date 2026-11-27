@@ -25,6 +25,9 @@ polypus-qml = { workspace = true }
 pyo3 = { workspace = true }
 # Count-weighted aggregation in the Python-callback observable fallback.
 rayon = { workspace = true }
+# Library diagnostics through the `log` facade (e.g. a Pauli-sum template
+# without an exact gradient); only the app layer installs a logger.
+log = { workspace = true }
 
 [dev-dependencies]
 # The Pauli-sum oracle's acceptance tests (#531): H2's Hamiltonian and exact
