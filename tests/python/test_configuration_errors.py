@@ -10,6 +10,8 @@ Every such check raises ``polypus.ConfigurationError``, a ``PolypusError`` that
 is also a ``ValueError``.
 """
 
+import functools
+
 import pytest
 
 pytest.importorskip("qiskit_aer")
@@ -143,14 +145,14 @@ def _fit(x=_UNSET, y=_UNSET, **kwargs):
     kwargs.setdefault("method", polypus.DE(generations=1, population_size=4))
     kwargs.setdefault("loss", "hinge")
     kwargs.setdefault("infrastructure", "cunqa")
+    kwargs.setdefault("shots", 16)
+    kwargs.setdefault("nodes", 1)
+    kwargs.setdefault("cores_per_qpu", 1)
+    kwargs.setdefault("seed", 3)
     return make_model().fit(
         X if x is _UNSET else x,
         Y if y is _UNSET else y,
-        shots=16,
-        nodes=1,
-        cores_per_qpu=1,
         id="config_check",
-        seed=3,
         **kwargs,
     )
 
@@ -166,9 +168,10 @@ def _infer(entry_point, x=_UNSET, **kwargs):
     from qml_native_helpers import X
 
     kwargs.setdefault("infrastructure", "cunqa")
-    return getattr(_trained(), entry_point)(
-        X if x is _UNSET else x, shots=16, nodes=1, cores_per_qpu=1, **kwargs
-    )
+    kwargs.setdefault("shots", 16)
+    kwargs.setdefault("nodes", 1)
+    kwargs.setdefault("cores_per_qpu", 1)
+    return getattr(_trained(), entry_point)(X if x is _UNSET else x, **kwargs)
 
 
 def _primitive(
@@ -181,14 +184,15 @@ def _primitive(
     model = model or make_model()
     x = X if x is _UNSET else x
     kwargs.setdefault("infrastructure", "cunqa")
+    kwargs.setdefault("shots", 16)
+    kwargs.setdefault("nodes", 1)
+    kwargs.setdefault("cores_per_qpu", 1)
     args = [model, x, [0.1] * model.num_params if params is _UNSET else params]
     if entry_point == "vjp":
         if cotangent is _UNSET:
             cotangent = [[1.0] * model.num_observables for _ in range(len(x))]
         args.append(cotangent)
-    return getattr(polypus.qml, entry_point)(
-        *args, shots=16, nodes=1, cores_per_qpu=1, **kwargs
-    )
+    return getattr(polypus.qml, entry_point)(*args, **kwargs)
 
 
 def _kernel(x1=_UNSET, x2=None, encoder=None, **kwargs):
@@ -196,12 +200,12 @@ def _kernel(x1=_UNSET, x2=None, encoder=None, **kwargs):
 
     kwargs.setdefault("infrastructure", "cunqa")
     kwargs.setdefault("shots", 16)
+    kwargs.setdefault("nodes", 1)
+    kwargs.setdefault("cores_per_qpu", 1)
     return polypus.qml.kernel_matrix(
         encoder or polypus.qml.Encoder(1).angle_encoder("ry"),
         X if x1 is _UNSET else x1,
         x2,
-        nodes=1,
-        cores_per_qpu=1,
         **kwargs,
     )
 
@@ -210,6 +214,32 @@ def _amplitude_model():
     from qml_native_helpers import make_model
 
     return make_model(encoder=polypus.qml.Encoder(1).amplitude_encoder())
+
+
+# Every native entry point that takes the execution integers, each a valid call
+# on CUNQA unless its keyword arguments say otherwise.
+NATIVE_ENTRY_POINTS = {
+    "fit": _fit,
+    "predict": functools.partial(_infer, "predict"),
+    "run": functools.partial(_infer, "run"),
+    "expval": functools.partial(_primitive, "expval"),
+    "jacobian": functools.partial(_primitive, "jacobian"),
+    "vjp": functools.partial(_primitive, "vjp"),
+    "kernel_matrix": _kernel,
+}
+
+# The execution integers and a value each of their types cannot hold, on
+# either side: `shots`, `n_qpus`, `nodes`, `cores_per_qpu` are `u32`, `seed` a
+# `u64`.
+OUT_OF_RANGE = [
+    *[
+        (argument, value)
+        for argument in ("shots", "n_qpus", "nodes", "cores_per_qpu")
+        for value in (-1, 2**32)
+    ],
+    ("seed", -1),
+    ("seed", 2**64),
+]
 
 
 class TestNativeQmlChecksRaiseIt:
@@ -405,6 +435,34 @@ class TestNativeQmlChecksRaiseIt:
         with pytest.raises(polypus.ConfigurationError, match=match):
             call()
         assert fake.calls == []
+
+    @pytest.mark.parametrize("entry", list(NATIVE_ENTRY_POINTS))
+    @pytest.mark.parametrize(("argument", "value"), OUT_OF_RANGE)
+    def test_an_execution_integer_out_of_range_before_any_cunqa_call(
+        self, monkeypatch, entry, argument, value
+    ):
+        # A negative or oversized `shots`, `n_qpus`, `nodes`, `cores_per_qpu`
+        # or `seed` is refused by name and value (#607), never with PyO3's
+        # `OverflowError`, which is not a `ValueError`.
+        fake = FakeCunqa().install(monkeypatch)
+        with pytest.raises(
+            polypus.ConfigurationError, match=rf"^{argument} must be .*, got {value}$"
+        ):
+            NATIVE_ENTRY_POINTS[entry](**{argument: value})
+        assert fake.calls == []
+
+    @pytest.mark.parametrize("entry", list(NATIVE_ENTRY_POINTS))
+    @pytest.mark.parametrize("argument", ["nodes", "cores_per_qpu"])
+    @pytest.mark.parametrize("value", [-1, 2**32])
+    def test_nodes_and_cores_out_of_range_are_refused_off_cunqa_too(
+        self, entry, argument, value
+    ):
+        # `0` is refused on CUNQA only, but no infrastructure takes a value its
+        # type cannot hold.
+        with pytest.raises(
+            polypus.ConfigurationError, match=rf"^{argument} must be .*, got {value}$"
+        ):
+            NATIVE_ENTRY_POINTS[entry](infrastructure="local", **{argument: value})
 
     def test_a_valid_native_configuration_reaches_cunqa(self, monkeypatch):
         # The checks above would pass if CUNQA were never reached at all.
