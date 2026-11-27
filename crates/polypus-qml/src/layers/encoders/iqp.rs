@@ -80,11 +80,7 @@ impl LayerOps for IqpEncoder {
         let f = ctx.num_features;
         let gates = entanglement_pair_count(f, self.entanglement)
             .and_then(|pairs| f.checked_mul(2)?.checked_add(pairs));
-        let params = ctx.reserve(gates, Some(0))?;
-        Ok(LayerAllocation {
-            params,
-            active: ctx.active.clone(),
-        })
+        ctx.allocate(gates, Some(0))
     }
 
     fn emit_traced(

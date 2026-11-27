@@ -83,7 +83,7 @@ impl LayerOps for HardwareEfficientAnsatz {
         // requested. Each of the `reps` entangling blocks adds one gate per
         // pair. The num_params == 0 case is caught model-wide by
         // NoTrainableParams; the gates, even with no rotation, are what
-        // `reserve` bounds.
+        // `allocate` bounds.
         let n = ctx.active.len();
         let params = self
             .reps
@@ -93,11 +93,7 @@ impl LayerOps for HardwareEfficientAnsatz {
         let gates = entanglement_pair_count(n, self.entanglement)
             .and_then(|pairs| pairs.checked_mul(self.reps))
             .and_then(|entanglers| params?.checked_add(entanglers));
-        let params = ctx.reserve(gates, params)?;
-        Ok(LayerAllocation {
-            params,
-            active: ctx.active.clone(),
-        })
+        ctx.allocate(gates, params)
     }
 
     fn emit_traced(

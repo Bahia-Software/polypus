@@ -58,11 +58,7 @@ impl LayerOps for AmplitudeEncoder {
             0 => Some(0),
             _ => power_of_two(k + 1).map(|levels| levels - 3),
         };
-        let params = ctx.reserve(gates, Some(0))?;
-        Ok(LayerAllocation {
-            params,
-            active: ctx.active.clone(),
-        })
+        ctx.allocate(gates, Some(0))
     }
 
     fn emit_traced(
