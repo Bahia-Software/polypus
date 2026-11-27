@@ -64,11 +64,7 @@ impl LayerOps for BasisEncoder {
         // Which features are `1.0` is only known at emission, so count the most
         // gates it can emit: one `X` per feature. Encoders reserve no θ: the
         // range stays empty and the cursor unmoved.
-        let params = ctx.reserve(Some(ctx.num_features), Some(0))?;
-        Ok(LayerAllocation {
-            params,
-            active: ctx.active.clone(),
-        })
+        ctx.allocate(Some(ctx.num_features), Some(0))
     }
 
     fn emit_traced(

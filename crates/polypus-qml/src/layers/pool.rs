@@ -87,18 +87,17 @@ impl LayerOps for PoolLayer {
         // Parameter sharing: reserve the block's θ once for the whole layer,
         // while every pair gets the block's four gates ([`emit_basic`]).
         let gates = even_pair_count(active).checked_mul(4);
-        let params = ctx.reserve(gates, Some(self.param_count()))?;
-
         // The allocation snapshots the active set *before* pooling — `emit`
         // needs it to map every logical position to its physical qubit.
-        let snapshot = ctx.active.clone();
+        let alloc = ctx.allocate(gates, Some(self.param_count()))?;
 
         // Every pair discards one logical position; remove those, preserving
         // the relative order of the survivors (and any odd leftover). The pairs
         // are those of `even_pairs`, so position `p` belongs to the pair that
         // starts at `p - p % 2`, and an odd count's last position to none: one
         // pass, linear in the active qubits.
-        ctx.active = snapshot
+        ctx.active = alloc
+            .active
             .iter()
             .enumerate()
             .filter(|&(position, _)| {
@@ -108,10 +107,7 @@ impl LayerOps for PoolLayer {
             .map(|(_, &qubit)| qubit)
             .collect();
 
-        Ok(LayerAllocation {
-            params,
-            active: snapshot,
-        })
+        Ok(alloc)
     }
 
     fn emit_traced(

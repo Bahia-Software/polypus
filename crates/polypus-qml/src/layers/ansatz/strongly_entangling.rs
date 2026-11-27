@@ -94,11 +94,7 @@ impl LayerOps for StronglyEntanglingAnsatz {
         let gates = ring
             .checked_mul(self.reps)
             .and_then(|entanglers| params?.checked_add(entanglers));
-        let params = ctx.reserve(gates, params)?;
-        Ok(LayerAllocation {
-            params,
-            active: ctx.active.clone(),
-        })
+        ctx.allocate(gates, params)
     }
 
     fn emit_traced(

@@ -51,11 +51,7 @@ impl LayerOps for AngleEncoder {
         // Encoders reserve no θ: the range stays empty and the cursor unmoved.
         let per_feature = 1 + usize::from(self.prepend_hadamard);
         let gates = ctx.num_features.checked_mul(per_feature);
-        let params = ctx.reserve(gates, Some(0))?;
-        Ok(LayerAllocation {
-            params,
-            active: ctx.active.clone(),
-        })
+        ctx.allocate(gates, Some(0))
     }
 
     fn emit_traced(

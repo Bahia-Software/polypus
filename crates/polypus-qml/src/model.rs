@@ -11,10 +11,10 @@
 //! A layer behaves in two phases (design doc §5.3), and `LayerOps` names both:
 //!
 //! 1. [`plan`](LayerOps::plan) runs during `compile`, *without* data. It
-//!    validates precondition (enough active qubits?), reserves its slice of the
-//!    global `θ` index space with [`LayerContext::reserve`], and
-//!    records the [`LayerAllocation`] — the single source of truth for its `θ`
-//!    range and the qubits it works on.
+//!    validates precondition (enough active qubits?), then reserves its slice
+//!    of the global `θ` index space and records the [`LayerAllocation`] — the
+//!    single source of truth for its `θ` range and the qubits it works on —
+//!    in one call to [`LayerContext::allocate`].
 //! 2. [`emit_traced`](LayerOps::emit_traced) runs during `template_for(x)`. It
 //!    appends gates to the circuit using the allocation recorded in `plan`,
 //!    never recomputing it — so the two passes cannot diverge by construction.
@@ -83,7 +83,7 @@ pub(crate) struct LayerContext {
     pub(crate) layers_planned: usize,
     /// The gates the layers planned so far emit, never above
     /// [`MAX_MODEL_GATES`]. `plan` adds the layer's own through
-    /// [`reserve`](Self::reserve).
+    /// [`allocate`](Self::allocate).
     pub(crate) gate_count: usize,
 }
 
@@ -99,7 +99,7 @@ impl LayerContext {
     /// layer: [`SizeLimit::Overflow`] when its gates, or the model's with
     /// them, do not fit in a `usize`, and [`SizeLimit::Budget`] when the
     /// model's pass [`MAX_MODEL_GATES`].
-    pub(crate) fn reserve(
+    fn reserve(
         &mut self,
         gates: Option<usize>,
         params: Option<usize>,
@@ -129,6 +129,29 @@ impl LayerContext {
         self.gate_count = gate_count;
         self.param_cursor = end;
         Ok(range)
+    }
+
+    /// Allocate the layer being planned in one step:
+    /// [`reserve`](Self::reserve) its `gates` and its next `params` global `θ`
+    /// indices, and snapshot the qubits it works on from
+    /// [`active`](Self::active). Every layer's [`plan`](LayerOps::plan) gets
+    /// its [`LayerAllocation`] here.
+    ///
+    /// On success, advance [`gate_count`](Self::gate_count) and
+    /// [`param_cursor`](Self::param_cursor) past the layer, as `reserve` does,
+    /// and leave `active` as it was. Otherwise change nothing in the context
+    /// and return `reserve`'s [`ValidationError::ModelTooLarge`] for the
+    /// layer, with [`SizeLimit::Overflow`] or [`SizeLimit::Budget`].
+    pub(crate) fn allocate(
+        &mut self,
+        gates: Option<usize>,
+        params: Option<usize>,
+    ) -> Result<LayerAllocation, ValidationError> {
+        let params = self.reserve(gates, params)?;
+        Ok(LayerAllocation {
+            params,
+            active: self.active.clone(),
+        })
     }
 }
 
@@ -1170,6 +1193,54 @@ mod tests {
             too_large(SizeLimit::Overflow)
         );
         assert_eq!((ctx.gate_count, ctx.param_cursor), (0, usize::MAX));
+    }
+
+    #[test]
+    fn allocate_reserves_like_reserve_and_snapshots_the_active_qubits() {
+        // An `active` out of order and other than `0..n`, a gate count other
+        // than the θ count, and a layer other than the first: swapped
+        // arguments, a made-up snapshot or a wrong layer all show.
+        let mut ctx = LayerContext {
+            active: vec![4, 1, 7],
+            num_features: 0,
+            param_cursor: 5,
+            gate_count: 10,
+            layers_planned: 2,
+        };
+        let alloc = ctx.allocate(Some(6), Some(2)).unwrap();
+        assert_eq!(alloc.params, 5..7);
+        assert_eq!(alloc.active, vec![4, 1, 7]);
+        assert_eq!((ctx.param_cursor, ctx.gate_count), (7, 16));
+        assert_eq!(ctx.active, vec![4, 1, 7]);
+
+        // A refused layer changes nothing in the context.
+        let too_large = |reason| ValidationError::ModelTooLarge { layer: 2, reason };
+        let assert_unchanged = |ctx: &LayerContext| {
+            assert_eq!((ctx.param_cursor, ctx.gate_count), (7, 16));
+            assert_eq!(ctx.active, vec![4, 1, 7]);
+        };
+        assert_eq!(
+            ctx.allocate(None, Some(1)).unwrap_err(),
+            too_large(SizeLimit::Overflow)
+        );
+        assert_unchanged(&ctx);
+        assert_eq!(
+            ctx.allocate(Some(0), None).unwrap_err(),
+            too_large(SizeLimit::Overflow)
+        );
+        assert_unchanged(&ctx);
+        assert_eq!(
+            ctx.allocate(Some(MAX_MODEL_GATES - 16 + 1), Some(0))
+                .unwrap_err(),
+            too_large(SizeLimit::Budget {
+                gates: MAX_MODEL_GATES + 1,
+                max_gates: MAX_MODEL_GATES,
+            })
+        );
+        assert_unchanged(&ctx);
+
+        // The next layer's range starts where the last accepted one ended.
+        assert_eq!(ctx.allocate(Some(0), Some(0)).unwrap().params, 7..7);
     }
 
     #[test]

@@ -148,11 +148,7 @@ impl LayerOps for ConvLayer {
         // *not* per pair. The cursor advances by the block width only, while
         // the gates are the block's on every pair.
         let gates = self.pair_count(active).checked_mul(self.block_gates());
-        let params = ctx.reserve(gates, Some(self.param_count()))?;
-        Ok(LayerAllocation {
-            params,
-            active: ctx.active.clone(),
-        })
+        ctx.allocate(gates, Some(self.param_count()))
     }
 
     fn emit_traced(
