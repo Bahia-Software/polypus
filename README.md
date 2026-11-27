@@ -90,7 +90,7 @@ QUBO and Ising costs are evaluated in Rust, without a Python call per bitstring.
 pip install polypus-quantum
 ```
 
-The package imports as `polypus` (the name `polypus` on PyPI belongs to an unrelated project). Wheels are published for CPython 3.10 to 3.13 on Linux (x86_64, aarch64), macOS on Apple Silicon and Windows (x86_64); elsewhere pip builds the source distribution, which needs Rust 1.85 or newer.
+The package imports as `polypus` (the name `polypus` on PyPI belongs to an unrelated project). Wheels are published for CPython 3.10 to 3.14 on Linux (x86_64, aarch64), macOS on Apple Silicon and Windows (x86_64); elsewhere pip builds the source distribution, which needs Rust 1.85 or newer. The one exception is CPython 3.14 on Linux aarch64: qiskit-aer 0.17, which Polypus requires, has no wheel there, so pip builds both Polypus and qiskit-aer from their source distributions, and qiskit-aer's build also needs a C++ compiler and the BLAS and LAPACK libraries.
 
 | To use | Install |
 |---|---|

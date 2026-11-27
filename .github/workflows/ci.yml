@@ -536,7 +536,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.10", "3.13"]
+        python-version: ["3.10", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -585,7 +585,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.13"]
+        python-version: ["3.10", "3.14"]
         include:
           - python-version: "3.12"
             qiskit: fixtures
@@ -636,14 +636,14 @@ jobs:
       # missing one fail. Pinned, like ruff and mypy, so that a new release
       # cannot turn CI red without a deliberate bump. Latest leg only.
       - name: Install Optuna, Nevergrad and pycma
-        if: matrix.python-version == '3.13'
+        if: matrix.python-version == '3.14'
         run: pip install optuna==5.0.0 nevergrad==1.0.12 cma==4.5.0
       # PyTorch for the tests of polypus.torch
       # (tests/python/test_torch_quantum_layer.py); POLYPUS_REQUIRE_TORCH below
       # makes a missing one fail. The CPU wheel, pinned like the libraries
       # above (the floor of the `torch` extra). Latest leg only.
       - name: Install PyTorch (CPU)
-        if: matrix.python-version == '3.13'
+        if: matrix.python-version == '3.14'
         run: pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
       # Examples and benchmarks are not executed (no __main__ guards; some
       # need optional deps like cunqa), but they must at least stay valid
@@ -663,16 +663,16 @@ jobs:
         env:
           POLYPUS_REQUIRE_LLVM_AS: "1"
           POLYPUS_REQUIRE_FIXTURES_QISKIT: ${{ matrix.qiskit == 'fixtures' && '1' || '' }}
-          POLYPUS_REQUIRE_EXTERNAL_LIBRARIES: ${{ matrix.python-version == '3.13' && '1' || '' }}
-          POLYPUS_REQUIRE_TORCH: ${{ matrix.python-version == '3.13' && '1' || '' }}
+          POLYPUS_REQUIRE_EXTERNAL_LIBRARIES: ${{ matrix.python-version == '3.14' && '1' || '' }}
+          POLYPUS_REQUIRE_TORCH: ${{ matrix.python-version == '3.14' && '1' || '' }}
           POLYPUS_ALLOWED_SKIPS: >-
             test_cunqa_real.py
             test_determinism_baseline.py::TestSameBuildStrict
             ${{ matrix.qiskit != 'fixtures' && 'test_qasm3_interop.py' || '' }}
-            ${{ matrix.python-version != '3.13' && 'test_ask_tell_adapters.py' || '' }}
-            ${{ matrix.python-version != '3.13' && 'test_torch_quantum_layer.py' || '' }}
-            ${{ matrix.python-version != '3.13' && 'test_typing_stubs.py::TestTorchTypes' || '' }}
-            ${{ matrix.python-version != '3.13' && 'test_typing_stubs.py::TestStubsCoverPublicApi::test_every_exported_name_has_a_stub[polypus.torch]' || '' }}
+            ${{ matrix.python-version != '3.14' && 'test_ask_tell_adapters.py' || '' }}
+            ${{ matrix.python-version != '3.14' && 'test_torch_quantum_layer.py' || '' }}
+            ${{ matrix.python-version != '3.14' && 'test_typing_stubs.py::TestTorchTypes' || '' }}
+            ${{ matrix.python-version != '3.14' && 'test_typing_stubs.py::TestStubsCoverPublicApi::test_every_exported_name_has_a_stub[polypus.torch]' || '' }}
         run: just pytest
       # The hand-written typing stubs (python/polypus/*.pyi) must match the
       # compiled extension just installed: stubtest fails on a renamed or
@@ -682,14 +682,14 @@ jobs:
       # for 3.10 users. The recipe sets POLYPUS_NO_AUTOCALIBRATE: importing
       # polypus would otherwise calibrate the machine (#176).
       - name: Check typing stubs against the extension (stubtest)
-        if: matrix.python-version == '3.13'
+        if: matrix.python-version == '3.14'
         run: just stubtest
       # The conformance battery against the Aer backend
       # (polypus-infrastructure/tests/conformance.rs) needs Qiskit Aer and the
       # wheel's polypus_python, so it is #[ignore]d in the Rust job and runs
       # here, on one OpenMP thread (the recipe sets it).
       - name: Conformance battery against the Aer backend
-        if: matrix.python-version == '3.13'
+        if: matrix.python-version == '3.14'
         env:
           POLYPUS_REQUIRE_AER: "1"
         run: just conformance-aer

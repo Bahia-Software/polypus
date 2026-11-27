@@ -86,7 +86,7 @@ jobs:
             clippy.json
           retention-days: 14
 
-  # The pytest suite against the installed wheel, as in the 3.13 leg of
+  # The pytest suite against the installed wheel, as in the 3.14 leg of
   # `python-tests` (ci.yml). Coverage maps site-packages back to python/
   # ([tool.coverage] in pyproject.toml). The wheel is built with
   # cargo-llvm-cov's instrumentation, so the same run also measures the Rust
@@ -105,7 +105,7 @@ jobs:
           sparse-checkout-cone-mode: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.13"
+          python-version: "3.14"
       - name: Install Rust (rust-toolchain.toml) + llvm-tools
         run: |
           rustup toolchain install --no-self-update

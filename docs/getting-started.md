@@ -6,7 +6,7 @@
 pip install polypus-quantum
 ```
 
-The package imports as `polypus`. Wheels are published for CPython 3.10 to 3.13 on Linux (x86_64 and aarch64), macOS on Apple Silicon and Windows (x86_64). On other platforms, Intel Macs included, pip builds the source distribution, which needs a Rust toolchain (1.85 or newer).
+The package imports as `polypus`. Wheels are published for CPython 3.10 to 3.14 on Linux (x86_64 and aarch64), macOS on Apple Silicon and Windows (x86_64). On other platforms, Intel Macs included, pip builds the source distribution, which needs a Rust toolchain (1.85 or newer). The one exception is CPython 3.14 on Linux aarch64: qiskit-aer 0.17, which Polypus requires, has no wheel there, so pip builds both Polypus and qiskit-aer from their source distributions, and qiskit-aer's build also needs a C++ compiler and the BLAS and LAPACK libraries.
 
 | To use | Install |
 |---|---|
