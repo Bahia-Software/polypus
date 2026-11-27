@@ -2146,10 +2146,12 @@ labels.
 - **Labels.** `y_train` (keyword-only, optional) holds **exactly one label per
   `x_train` row**, in row order, because the oracle pairs circuits with labels by
   position; a mismatch is a `ValueError` naming both counts. Each label is a
-  single finite number: a `str`, another non-number or a nested row (one-hot,
-  column vector) is a `TypeError`, and `NaN`/`inf` a `ValueError`, each naming the
-  0-based index. All-integer labels reach the objective as `int`, otherwise all as
-  `float`. With labels, `expectation_function` must be a callable
+  single finite real number: a `str`, a complex number (Python's or NumPy's,
+  whatever its imaginary part, refused by its type before `float()` could drop
+  that part), another non-number or a nested row (one-hot, column vector) is a
+  `TypeError`, and `NaN`/`inf` a `ValueError`, each naming the 0-based index.
+  All-integer labels reach the objective as `int`, otherwise all as `float`.
+  With labels, `expectation_function` must be a callable
   `(bitstring, label) -> float`, a `polypus.CachedCost(callable)` or a
   `polypus.SampleCost((counts, label) -> float)`; a `Qubo`/`Ising` is a
   `TypeError`, and so is a `SampleCost` without labels. These checks run before
@@ -2173,7 +2175,9 @@ than the feature map, a feature value Qiskit rejects) is raised as
 #218).
 
 **Enforcing test:** `tests/python/test_qml_train_validation.py` (every rejection,
-with nothing executed), `tests/python/test_qml_supervised.py` (each sample's
+with nothing executed, NumPy's complex labels included), the `extract_labels_*`
+unit tests in `crates/polypus/src/bindings/extract.rs` (the label checks, a
+complex label included), `tests/python/test_qml_supervised.py` (each sample's
 counts meet its own label; the objective calling convention) and
 `tests/python/test_qml_predict.py` (the inference agreements) and
 `tests/python/test_qml_native.py` (native pieces rejected by both).
@@ -2895,10 +2899,18 @@ is also a `ValueError` (#418), as `train`'s do:
 
 - **Data.** `x` is rows of features or a `polypus.qml.Dataset`; with a
   `Dataset`, `y` is an error (it carries its own labels, or none).
-  Labels from `y` follow C-8's checks; the rows must be non-empty, each with
-  at least one feature (a zero-width row would encode nothing and predict a
-  constant, #513), of equal width and finite. Fewer features than qubits
-  stays accepted.
+  Labels from `y` follow C-8's checks, their messages naming `y`; the rows
+  must be non-empty, each with at least one feature (a zero-width row would
+  encode nothing and predict a constant, #513), of equal width and finite.
+  Fewer features than qubits stays accepted. Every value of `x` is a real
+  number (a `bool` reads as 0 or 1): a complex one, Python's or NumPy's, in
+  any container (a list, a NumPy array of complex dtype, an object array, a
+  0-d array in a list, or a 0-d object array holding one), is a `TypeError`
+  naming its 0-based row and column, whatever its imaginary part, rather than
+  losing its imaginary part (#602).
+  The same holds for every native reader of rows (`predict`, `run`,
+  `qml.Dataset`, the primitives, `qml.kernel_matrix`) and, naming the index,
+  for the labels of `y` and of `qml.Dataset(x, y)`.
 - **Labels and loss.** With labels, `loss` is required and is a supervised
   loss; `"expectation"` (which ignores labels) is an error. Without
   labels (`y=None`, or a `Dataset` built without them), `loss=None` means
@@ -2977,7 +2989,9 @@ the native simulator with the same seed and shots it gives `run([x])`'s counts,
 and its statevector gives `run([x], exact=True)`'s probabilities. `x` is
 checked as a row of `fit`: a feature count the encoders cannot carry, a
 non-finite value or, for the amplitude encoder, a zero sample is a
-`ValueError`; several rows or a `Dataset` is a `TypeError`. These are plain
+`ValueError`; several rows or a `Dataset` is a `TypeError`, and so is a
+complex value, naming its 0-based position in `x` as a row's does (not the
+`TypeError` for what is not one sample). These are plain
 `ValueError`s, as `bind` raises, not `polypus.ConfigurationError`: `circuit`
 builds a circuit and runs nothing, so the same row that `run` rejects with a
 `ConfigurationError` is a `ValueError` here. The model is unchanged, and each
@@ -2997,11 +3011,12 @@ Python, for a training loop of the caller's own:
   by infrastructure, `seed` is drawn when omitted and refused on `qmio` (C-7).
   `vjp`'s `cotangent`, `v`, is rows as lists or tuples, or a NumPy array, of
   shape exactly `(rows, observables)`, the rows of `x` and the model's
-  observables; a complex one is refused rather than losing its imaginary
-  part. Its values are read as `x`'s are, each a real number (a `bool`
+  observables. Its values are read as `x`'s are, each a real number (a `bool`
   included; a real or boolean NumPy dtype is converted to `float64`), so a
-  string, `None` or another object is the `TypeError` `x` raises for it; a
-  `NaN` or an infinity is taken as it is, not refused.
+  string, `None`, another object or a complex value (a complex dtype, or a
+  complex number in an object array) is the `TypeError` `x` raises for it,
+  rather than losing its imaginary part; a `NaN` or an infinity is taken as
+  it is, not refused.
 - **Results.** `float64` `numpy.ndarray`s, C-contiguous, rows in row order:
   `expval` → `(rows, observables)` with every readout observable, whatever the
   decision (one column per class for `"argmax"`, the weighted sum for an
@@ -3062,19 +3077,20 @@ Python, for a training loop of the caller's own:
   of them (for `vjp`'s `"params"`, which sums over the rows, their sum, to
   rounding: the rows are summed in row order whatever the blocks).
 - **Checks.** Every one runs before a backend exists and raises
-  `polypus.ConfigurationError`, the cotangent's values excepted (`x`'s
-  `TypeError`, below), in order: `wrt`; `shots`, then `n_qpus` (each its
-  range, then `>= 1`), `nodes`, then `cores_per_qpu` (each its range, on
-  every infrastructure, then its part of the CUNQA allocation), the rest of
-  the CUNQA allocation and `exact`; the rows against the
-  model; `params`; for
-  `vjp`, the `cotangent` (its rows not ragged, real, then its shape, the
-  error naming the expected and the received one; then each value read as a
-  number, a `TypeError` as for `x`); the model and rows against `wrt` ((g)'s
-  errors); the range of `seed`, then a `seed` on `qmio`, then a `seed` of
-  `2**63` or more on Aer or CUNQA (C-7). The `TypeError`
-  for `model` comes first, and before it, as the arguments are read, that
-  of an execution integer that is not an integer (a `bool` included). Only
+  `polypus.ConfigurationError`, the `TypeError`s of `x`'s and the
+  cotangent's values excepted (below), in order: `wrt`; `shots`, then
+  `n_qpus` (each its range, then `>= 1`), `nodes`, then `cores_per_qpu` (each
+  its range, on every infrastructure, then its part of the CUNQA allocation),
+  the rest of the CUNQA allocation and `exact`; the rows (each value read as
+  a real number, a complex one `x`'s `TypeError`), then the rows against the
+  model; `params`; for `vjp`, the `cotangent` (its rows not ragged; a complex
+  dtype, `x`'s `TypeError`; then its shape, the error naming the expected and
+  the received one; then each value read as a number, a `TypeError` as for
+  `x`); the model and rows against `wrt` ((g)'s errors); the range of `seed`,
+  then a `seed` on `qmio`, then a `seed` of `2**63` or more on Aer or CUNQA
+  (C-7). The `TypeError` for `model` comes first, and before it, as the
+  arguments are read, that of an execution integer that is not an integer (a
+  `bool` included). Only
   NumPy's `ValueError` becomes the cotangent's `ConfigurationError`; any other
   exception of NumPy's (a `MemoryError`) propagates as it is.
 
@@ -3135,13 +3151,14 @@ seed=None, exact=False)` exposes (h) to Python:
   `shots`, then `n_qpus` (each its range, then `>= 1`), `nodes`, then
   `cores_per_qpu` (each its range, on every infrastructure, then its part of
   the CUNQA allocation), the rest of the CUNQA allocation and `exact`; the
-  rows of `x1`
-  (empty, zero-width, ragged, non-finite), an `Encoder` with no layers, the
-  feature count against the encoder and every sample the encoders reject (a
-  zero sample for amplitude encoding, a non-binary one for basis encoding);
-  the same for `x2`, whose rows must be as wide as `x1`'s; a matrix too large;
-  the range of `seed`, then a `seed` on `qmio`, then a `seed` of `2**63` or
-  more on Aer or CUNQA (C-7). The messages name `x1` or `x2`.
+  rows of `x1` (a complex value, read before the other checks of the rows, is
+  `x`'s `TypeError` naming `x1` and its position; then empty, zero-width,
+  ragged, non-finite), an `Encoder` with no layers, the feature count against
+  the encoder and every sample the encoders reject (a zero sample for
+  amplitude encoding, a non-binary one for basis encoding); the same for
+  `x2`, whose rows must be as wide as `x1`'s; a matrix too large; the range
+  of `seed`, then a `seed` on `qmio`, then a `seed` of `2**63` or more on Aer
+  or CUNQA (C-7). The messages name `x1` or `x2`.
 
 **The PyTorch layer (`polypus.torch`).** `polypus.torch.QuantumLayer(model, *,
 initial_params=None, <qml.expval's execution arguments>)` is a
@@ -3183,7 +3200,9 @@ above.
 - **dtype and device.** The computation is `float64` on the CPU: the input and
   parameter are converted at the boundary; the output comes back in the
   input's dtype (`float64` for a non-floating input) and device, each gradient
-  in its tensor's dtype and device.
+  in its tensor's dtype and device. A complex input is a `TypeError`, after the
+  one for an input that is not a tensor and before the shape's `ValueError`,
+  and before `qml.expval` is called (#602).
 - **Seeds (C-7).** With `seed=s`, forward pass `n` (counted per layer from 0,
   not in the `state_dict`, so not thread-safe) calls `expval` with
   `SeedSequence([s, n, 0]).generate_state(1, uint64)[0] & (2**63 - 1)` (below
@@ -3326,6 +3345,11 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   shaped cotangent, a row that cannot be combined leaving the others bit for
   bit, the cotangent taking exactly the values `x` takes, NumPy's other
   errors propagating, every rejection),
+  `test_qml_native_complex.py` (a complex value refused with a `TypeError`
+  naming its position, and no `ComplexWarning`, by every native reader of
+  `x`, `x1`/`x2` and `y`, in every container, whatever its imaginary part;
+  `x` read before the cotangent; a `bool` still 0 or 1; the other rejections
+  of `x` unchanged),
   `test_qml_native_kernel.py` (`qml.kernel_matrix`: types, shape and
   contiguity, every encoder against a NumPy closed form and Qiskit's own
   statevectors, symmetry bit for bit, the executed diagonal, PSD, the circuits

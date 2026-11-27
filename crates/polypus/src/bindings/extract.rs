@@ -163,11 +163,164 @@ pub(super) fn extract_supervised_objective(
     ))
 }
 
-/// Normalise `y_train` into one [`Label`] per sample (contract C-8). If every
+/// Reads real numbers from Python as PyO3's `f64` extraction does (through
+/// `float()`), except that a complex number is refused first, by its type,
+/// whatever its imaginary part: Python's `complex`, anything with a NumPy
+/// `dtype` of kind `c` (the scalars `complex64`, `complex128` and
+/// `clongdouble`, and a 0-d array), or else one of `numbers.Complex` that is
+/// not `numbers.Real`; and a 0-d NumPy object array holding any of these.
+/// NumPy's complex scalars (and a `clongdouble` 0-d array, or an object one
+/// holding a NumPy complex scalar) answer `float()` by dropping their
+/// imaginary part with a `ComplexWarning`, so without this a complex value in
+/// a NumPy array was taken cut while the same value in a list was a
+/// `TypeError` (#602). The refusal is a `TypeError` naming the value's
+/// position; a `bool`, Python's or NumPy's, is not complex and reads as 0
+/// or 1. Shared by every native QML reader of `x`, `y` and the cotangent, and
+/// by [`extract_labels`].
+pub(super) struct RealReader<'py> {
+    complex: Bound<'py, PyAny>,
+    real: Bound<'py, PyAny>,
+}
+
+impl<'py> RealReader<'py> {
+    pub(super) fn new(py: Python<'py>) -> PyResult<Self> {
+        let numbers = py.import("numbers")?;
+        Ok(Self {
+            complex: numbers.getattr("Complex")?,
+            real: numbers.getattr("Real")?,
+        })
+    }
+
+    /// The `TypeError` naming `at` (as `x[0][1]`) when `value` is a complex
+    /// number, before anything calls its `float()`.
+    fn refuse_complex(
+        &self,
+        value: &Bound<'py, PyAny>,
+        at: impl FnOnce() -> String,
+    ) -> PyResult<()> {
+        use pyo3::exceptions::PyTypeError;
+
+        if !self.is_complex(value, true)? {
+            return Ok(());
+        }
+        // For the message only, so an unprintable value is not itself an error.
+        let shown = value
+            .repr()
+            .map_or_else(|_| "a value".to_string(), |repr| repr.to_string());
+        Err(PyTypeError::new_err(format!(
+            "{} is {shown}, a complex number; it must be a real number (the imaginary part \
+             is never dropped, even when it is zero)",
+            at()
+        )))
+    }
+
+    /// Whether `value` is a complex number, by its type. With `look_inside`, a
+    /// 0-d NumPy object array is decided by the value it holds, since its
+    /// `float()` is that value's: a NumPy complex scalar held in one would be
+    /// cut. One level only: `numpy.array` unwraps a 0-d array it is given, so
+    /// only an array filled by hand holds another, and one can hold itself.
+    fn is_complex(&self, value: &Bound<'py, PyAny>, look_inside: bool) -> PyResult<bool> {
+        use pyo3::types::{PyComplex, PyFloat, PyInt};
+
+        // The common cases skip the ABCs: a float (`numpy.float64` is one), an
+        // int or a bool; Python's `complex` (`numpy.complex128` is one).
+        if value.is_instance_of::<PyFloat>() || value.is_instance_of::<PyInt>() {
+            return Ok(false);
+        }
+        if value.is_instance_of::<PyComplex>() {
+            return Ok(true);
+        }
+        match numpy_dtype_kind(value).as_deref() {
+            Some("O") if look_inside && numpy_ndim(value) == Some(0) => {
+                match value.call_method0("item") {
+                    Ok(held) => self.is_complex(&held, false),
+                    // Left to its `float()`, which reports it as before.
+                    Err(_) => Ok(false),
+                }
+            }
+            // A NumPy scalar or array: its dtype decides. A 0-d array is not
+            // registered with `numbers.Complex`, so the ABCs would miss it.
+            Some(kind) => Ok(kind == "c"),
+            None => Ok(value.is_instance(&self.complex)? && !value.is_instance(&self.real)?),
+        }
+    }
+
+    /// The flat sequence `values`, its `i`-th value named `name[i]`: the
+    /// sequence read as PyO3 reads a `Vec<f64>` (a `str` or a non-sequence is
+    /// its `TypeError`), then each value refused if complex, else read as an
+    /// `f64`. `pyo3_err` maps PyO3's own errors (the sequence's and
+    /// `float()`'s), never the refusal of a complex value. One value object at
+    /// a time is converted, the sequence's items held only for this sequence.
+    /// A NumPy array of a real or boolean dtype (kind `f`, `i`, `u` or `b`)
+    /// holds no complex value, so its values skip the check: a `float32` or
+    /// `int64` value would otherwise pay two ABC `isinstance` calls.
+    pub(super) fn values(
+        &self,
+        values: &Bound<'py, PyAny>,
+        name: &str,
+        pyo3_err: impl Fn(PyErr) -> PyErr,
+    ) -> PyResult<Vec<f64>> {
+        let items: Vec<Bound<'py, PyAny>> = values.extract().map_err(&pyo3_err)?;
+        let all_real = numpy_dtype_kind(values)
+            .is_some_and(|kind| matches!(kind.as_str(), "f" | "i" | "u" | "b"));
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                if !all_real {
+                    self.refuse_complex(item, || format!("{name}[{i}]"))?;
+                }
+                item.extract::<f64>().map_err(&pyo3_err)
+            })
+            .collect()
+    }
+
+    /// The rows of `x`, the value in row `r`, column `c` named `name[r][c]`:
+    /// `x` and each row read as PyO3 reads a `Vec<Vec<f64>>`, each row through
+    /// [`values`](Self::values) in turn, so a row's value objects never outlive
+    /// it. `pyo3_err` is as for `values`.
+    pub(super) fn rows(
+        &self,
+        x: &Bound<'py, PyAny>,
+        name: &str,
+        pyo3_err: impl Fn(PyErr) -> PyErr,
+    ) -> PyResult<Vec<Vec<f64>>> {
+        let rows: Vec<Bound<'py, PyAny>> = x.extract().map_err(&pyo3_err)?;
+        rows.iter()
+            .enumerate()
+            .map(|(r, row)| self.values(row, &format!("{name}[{r}]"), &pyo3_err))
+            .collect()
+    }
+}
+
+/// The `dtype.kind` of a NumPy scalar or array (`"f"`, `"c"`, `"b"`, ...), or
+/// `None` for anything without one, read by attribute so NumPy is never
+/// imported.
+fn numpy_dtype_kind(value: &Bound<'_, PyAny>) -> Option<String> {
+    value
+        .getattr("dtype")
+        .and_then(|dtype| dtype.getattr("kind"))
+        .and_then(|kind| kind.extract::<String>())
+        .ok()
+}
+
+/// The `ndim` of a NumPy scalar or array, or `None` for anything without
+/// one.
+fn numpy_ndim(value: &Bound<'_, PyAny>) -> Option<usize> {
+    value
+        .getattr("ndim")
+        .and_then(|ndim| ndim.extract::<usize>())
+        .ok()
+}
+
+/// Normalise the labels `labels`, the argument `name` (`y_train`, or `y` for
+/// `Model.fit`), into one [`Label`] per sample (contract C-8). If every
 /// element is an integer (Python or NumPy ints and bools) they are `Class` labels,
-/// otherwise all are `Real`. A non-number or a nested row is a `TypeError`, and
-/// `NaN`/`inf` a `ValueError`, naming the index. The caller checks the count.
-pub(super) fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
+/// otherwise all are `Real`. A non-number, a complex number (Python's or NumPy's,
+/// whatever its imaginary part, refused by [`RealReader`] before its `float()`
+/// drops that part) or a nested row is a `TypeError`, and `NaN`/`inf` a
+/// `ValueError`, naming `name` and the index. The caller checks the count.
+pub(super) fn extract_labels(labels: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<Label>> {
     use pyo3::exceptions::PyTypeError;
     use pyo3::types::PyString;
 
@@ -179,14 +332,15 @@ pub(super) fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>>
     let type_name = |item: &Bound<'_, PyAny>| {
         item.get_type()
             .name()
-            .map_or_else(|_| "an unknown type".to_string(), |name| name.to_string())
+            .map_or_else(|_| "an unknown type".to_string(), |found| found.to_string())
     };
+    let reals = RealReader::new(labels.py())?;
     let mut raw = Vec::new();
-    for (idx, item) in y_train.try_iter()?.enumerate() {
+    for (idx, item) in labels.try_iter()?.enumerate() {
         let item = item?;
         if item.is_instance_of::<PyString>() {
             return Err(PyTypeError::new_err(format!(
-                "y_train[{idx}] is a str; labels must be numbers (int class labels or float \
+                "{name}[{idx}] is a str; labels must be numbers (int class labels or float \
                  targets) — encode class names as integers first"
             )));
         }
@@ -194,12 +348,15 @@ pub(super) fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>>
         // float, which would silently accept a column vector.
         if let Ok(len) = item.len() {
             return Err(PyTypeError::new_err(format!(
-                "y_train[{idx}] is a sequence ({} of length {len}), not a single label; pass \
-                 one number per x_train row (class indices rather than one-hot rows; \
+                "{name}[{idx}] is a sequence ({} of length {len}), not a single label; pass \
+                 one number per sample (class indices rather than one-hot rows; \
                  y.ravel() for a column vector)",
                 type_name(&item)
             )));
         }
+        // Before any numeric read: `float()` would drop the imaginary part of a
+        // NumPy complex label.
+        reals.refuse_complex(&item, || format!("{name}[{idx}]"))?;
         // Through `__index__`: accepts Python and NumPy integers, never truncates
         // a float.
         if let Ok(value) = item.extract::<i64>() {
@@ -208,11 +365,7 @@ pub(super) fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>>
         }
         // A NumPy bool has no `__index__`, but a boolean mask is a natural binary
         // `y`. Detected through `dtype.kind`, so NumPy is never imported.
-        let is_numpy_bool = item
-            .getattr("dtype")
-            .and_then(|dtype| dtype.getattr("kind"))
-            .and_then(|kind| kind.extract::<String>())
-            .is_ok_and(|kind| kind == "b");
+        let is_numpy_bool = numpy_dtype_kind(&item).is_some_and(|kind| kind == "b");
         if is_numpy_bool {
             raw.push(Raw::Int(i64::from(item.is_truthy()?)));
             continue;
@@ -221,12 +374,12 @@ pub(super) fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>>
             Ok(value) if value.is_finite() => raw.push(Raw::Float(value)),
             Ok(value) => {
                 return Err(crate::exceptions::configuration_error(format!(
-                    "y_train[{idx}] is {value}; labels must be finite numbers"
+                    "{name}[{idx}] is {value}; labels must be finite numbers"
                 )));
             }
             Err(_) => {
                 return Err(PyTypeError::new_err(format!(
-                    "y_train[{idx}] has type {}; labels must be numbers (int class labels or \
+                    "{name}[{idx}] has type {}; labels must be numbers (int class labels or \
                      float targets)",
                     type_name(&item)
                 )));
@@ -248,7 +401,7 @@ pub(super) fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>>
 mod tests {
     use super::*;
     use crate::bindings::test_support::uniform3_qasm;
-    use pyo3::types::PyString;
+    use pyo3::types::{PyDict, PyString};
 
     #[test]
     fn extract_bound_circuit_reads_a_qasm_string() {
@@ -359,7 +512,7 @@ mod tests {
         let y_train = py
             .eval(expr, None, None)
             .expect("the test expression evaluates");
-        extract_labels(&y_train)
+        extract_labels(&y_train, "y_train")
     }
 
     /// The `(class, message)` of a rejected `y_train`.
@@ -425,6 +578,143 @@ mod tests {
             let (class, msg) = label_error(py, c"[None]");
             assert_eq!(class, "TypeError");
             assert!(msg.contains("y_train[0] has type NoneType"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn extract_labels_rejects_complex_numbers_naming_the_index() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            // Python's `complex` (`numpy.complex128` is a subclass), even with
+            // no imaginary part: the type decides, not the value.
+            let (class, msg) = label_error(py, c"[0, 1+0j]");
+            assert_eq!(class, "TypeError");
+            assert!(
+                msg.contains("y_train[1] is (1+0j), a complex number"),
+                "{msg}"
+            );
+
+            // NumPy's `complex64` is no subclass of `complex`, only registered
+            // with `numbers.Complex`, and its `float()` drops the imaginary
+            // part (#602). NumPy is not installed where the Rust tests run, so
+            // a registered stand-in plays it; the NumPy types themselves are
+            // tested from Python.
+            let scope = PyDict::new(py);
+            py.run(
+                c"import numbers\n\
+                  class Complex64:\n\
+                  \x20   def __float__(self):\n\
+                  \x20       return 1.0\n\
+                  \x20   def __repr__(self):\n\
+                  \x20       return 'Complex64(1+0j)'\n\
+                  numbers.Complex.register(Complex64)\n\
+                  y = [1.5, Complex64()]\n",
+                Some(&scope),
+                None,
+            )
+            .expect("the stand-in is defined");
+            let y = scope
+                .get_item("y")
+                .expect("the scope is a dict")
+                .expect("y is defined");
+            let err = extract_labels(&y, "y_train").expect_err("a complex label is refused");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            assert!(
+                err.to_string()
+                    .contains("y_train[1] is Complex64(1+0j), a complex number"),
+                "{err}"
+            );
+
+            // A NumPy 0-d array (`numpy.array(1j)`) is not registered with
+            // `numbers.Complex`, and a `clongdouble` one's `float()` drops the
+            // imaginary part: its dtype's kind decides. A stand-in with only a
+            // `dtype` plays it; the message names the argument it is given
+            // (`y` for `Model.fit`). The same stand-in with a real dtype is a
+            // label.
+            py.run(
+                c"from types import SimpleNamespace\n\
+                  class ZeroDim:\n\
+                  \x20   def __init__(self, kind):\n\
+                  \x20       self.dtype = SimpleNamespace(kind=kind)\n\
+                  \x20   def __float__(self):\n\
+                  \x20       return 1.0\n\
+                  \x20   def __repr__(self):\n\
+                  \x20       return f'ZeroDim({self.dtype.kind!r})'\n\
+                  y = [1.5, ZeroDim('c')]\n\
+                  y_real = [1.5, ZeroDim('f')]\n",
+                Some(&scope),
+                None,
+            )
+            .expect("the stand-in is defined");
+            let item = |name: &str| {
+                scope
+                    .get_item(name)
+                    .expect("the scope is a dict")
+                    .expect("the labels are defined")
+            };
+            let err = extract_labels(&item("y"), "y").expect_err("a complex dtype is refused");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            assert!(
+                err.to_string()
+                    .contains("y[1] is ZeroDim('c'), a complex number"),
+                "{err}"
+            );
+            assert_eq!(
+                extract_labels(&item("y_real"), "y").expect("a real dtype is a label"),
+                [1.5, 1.0].map(Label::Real)
+            );
+
+            // A 0-d object array (`numpy.array(numpy.complex128(1j),
+            // dtype=object)`) has kind `O`, and its `float()` is the held
+            // value's, which drops a NumPy complex scalar's imaginary part: the
+            // held value decides. A stand-in with a `dtype`, `ndim` and `item()`
+            // plays it. One holding itself must still be read, not loop.
+            py.run(
+                c"class Held:\n\
+                  \x20   dtype = SimpleNamespace(kind='O')\n\
+                  \x20   ndim = 0\n\
+                  \x20   def __init__(self, held):\n\
+                  \x20       self.held = held\n\
+                  \x20   def item(self):\n\
+                  \x20       return self.held\n\
+                  \x20   def __float__(self):\n\
+                  \x20       return 1.0\n\
+                  \x20   def __repr__(self):\n\
+                  \x20       return 'Held(...)'\n\
+                  y_held = [1.5, Held(ZeroDim('c'))]\n\
+                  y_held_real = [1.5, Held(2.5)]\n\
+                  itself = Held(None)\n\
+                  itself.held = itself\n\
+                  y_itself = [1.5, itself]\n",
+                Some(&scope),
+                None,
+            )
+            .expect("the stand-in is defined");
+            let err = extract_labels(&item("y_held"), "y").expect_err("a held complex is refused");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            assert!(
+                err.to_string()
+                    .contains("y[1] is Held(...), a complex number"),
+                "{err}"
+            );
+            assert_eq!(
+                extract_labels(&item("y_held_real"), "y").expect("a held real is a label"),
+                [1.5, 1.0].map(Label::Real)
+            );
+            assert_eq!(
+                extract_labels(&item("y_itself"), "y").expect("one level is looked into"),
+                [1.5, 1.0].map(Label::Real)
+            );
+
+            // A bool stays a class label, and a float stays a float.
+            assert_eq!(
+                labels_of(py, c"[True, False, 2]").expect("bools are labels"),
+                [1, 0, 2].map(Label::Class)
+            );
+            assert_eq!(
+                labels_of(py, c"[0.5, 1]").expect("reals are labels"),
+                [0.5, 1.0].map(Label::Real)
+            );
         });
     }
 

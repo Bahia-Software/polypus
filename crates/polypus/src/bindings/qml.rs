@@ -41,7 +41,7 @@ use super::backend_config::{
 };
 use super::callback::validate_callback;
 use super::circuit::Circuit;
-use super::extract::extract_labels;
+use super::extract::{extract_labels, RealReader};
 use super::interrupt::interruptible_token;
 use super::optimizer::{
     is_rotosolve, method_from_pyclass, training_observer, validate_final_shots, validate_method,
@@ -1169,10 +1169,12 @@ impl PyReadout {
 /// `qml.train` (then without `y_train`) or the `x` slot of `qml.predict`.
 ///
 /// `Dataset(x, y=None)` validates the rows (non-empty, at least one feature,
-/// equal length, finite) and, if given, one finite label per row. Without `y` the dataset is
-/// *unlabeled* (plan F4): it trains only with `loss="expectation"`, and the mark
-/// survives a split. Labels are `float`s; class indices for
-/// `"categorical_cross_entropy"` are whole numbers.
+/// equal length, finite) and, if given, one finite label per row. A complex
+/// value in `x` or `y` (Python's or NumPy's, whatever its imaginary part) is a
+/// `TypeError` naming its position, never a value cut to its real part.
+/// Without `y` the dataset is *unlabeled* (plan F4): it trains only with
+/// `loss="expectation"`, and the mark survives a split. Labels are `float`s;
+/// class indices for `"categorical_cross_entropy"` are whole numbers.
 #[pyclass(module = "polypus.qml", name = "Dataset")]
 pub struct PyDataset {
     pub(crate) inner: polypus_qml::Dataset,
@@ -1184,9 +1186,10 @@ impl PyDataset {
     #[new]
     #[pyo3(signature = (x, y=None))]
     fn new(x: Bound<'_, PyAny>, y: Option<Bound<'_, PyAny>>) -> PyResult<Self> {
-        let rows: Vec<Vec<f64>> = x.extract()?;
+        let reals = RealReader::new(x.py())?;
+        let rows = reals.rows(&x, "x", |e| e)?;
         let (labels, labeled) = match y {
-            Some(y) => (y.extract::<Vec<f64>>()?, true),
+            Some(y) => (reals.values(&y, "y", |e| e)?, true),
             // Unlabeled: zeros satisfy the pure crate, which always carries
             // labels; `labeled` keeps them from ever reaching a supervised loss.
             None => (vec![0.0; rows.len()], false),
@@ -1434,7 +1437,8 @@ impl Model {
     /// `params` it is `self.bind(params).circuit(x)`, every angle fixed, and
     /// `params` is checked as `bind` checks it. `x` is checked as one row of
     /// `fit` is: a feature count the encoders cannot carry, or a value that is
-    /// not finite, is a `ValueError`.
+    /// not finite, is a `ValueError`; a complex value (Python's or NumPy's,
+    /// whatever its imaginary part) is a `TypeError` naming its position.
     #[pyo3(signature = (x, params=None))]
     fn circuit(&self, x: &Bound<'_, PyAny>, params: Option<Vec<f64>>) -> PyResult<Circuit> {
         match params {
@@ -1485,10 +1489,12 @@ impl Model {
     ///
     /// Every check runs before a backend exists and raises
     /// `polypus.ConfigurationError` (a `ValueError`), except a value of the
-    /// wrong type (a `bool` or another non-integer as `shots`, `n_qpus`,
-    /// `nodes`, `cores_per_qpu`, `seed` or `final_shots`, a `callback` that is
-    /// neither callable nor `None`), a `TypeError`. The fitness is the
-    /// negated mean loss over the samples, which the optimizers maximise.
+    /// wrong type (a value of `x` or `y` that is not a real number, a complex
+    /// one included whatever its imaginary part; a `bool` or another
+    /// non-integer as `shots`, `n_qpus`, `nodes`, `cores_per_qpu`, `seed` or
+    /// `final_shots`; a `callback` that is neither callable nor `None`), a
+    /// `TypeError`. The fitness is the negated mean loss over the samples,
+    /// which the optimizers maximise.
     #[pyo3(
         signature = (
             x, y=None, *, method, loss=None, shots=UnsignedArg::of(1024),
@@ -1699,7 +1705,8 @@ fn check_exact_final_shots(exact: bool, final_shots: Option<u32>) -> PyResult<()
 
 /// The training set and whether it has labels: a [`Dataset`](PyDataset) as it
 /// is (then `y` is an error), or rows plus an optional `y`, read with the same
-/// label checks as `qml.train`'s `y_train`.
+/// label checks as `qml.train`'s `y_train`. A complex value in the rows is a
+/// `TypeError` naming its row and column (see [`RealReader`]).
 fn native_dataset(
     x: &Bound<'_, PyAny>,
     y: Option<&Bound<'_, PyAny>>,
@@ -1714,10 +1721,10 @@ fn native_dataset(
         let dataset = dataset.try_borrow()?;
         return Ok((dataset.inner.clone(), dataset.labeled));
     }
-    let rows: Vec<Vec<f64>> = x.extract()?;
+    let rows = RealReader::new(x.py())?.rows(x, "x", |e| e)?;
     let labels = y
         .map(|y| {
-            extract_labels(y).map(|labels| {
+            extract_labels(y, "y").map(|labels| {
                 labels
                     .into_iter()
                     .map(|label| match label {
@@ -2313,13 +2320,16 @@ impl TrainedModel {
 /// The circuit `spec` runs for the one sample `x`, as `run_rows` builds it for
 /// a row: compiled for `x`'s feature count and with the template's free angles
 /// or, with `params` (already checked against the model), bound to them. `x`
-/// goes through the checks a row does, through the same `Dataset`.
+/// goes through the checks a row does, through the same `Dataset`. A complex
+/// value in `x` is the `TypeError` naming its position that a row raises, not
+/// the generic "one sample" one, which covers what is not a flat sequence of
+/// real numbers.
 fn sample_circuit(
     spec: &QuantumModel,
     x: &Bound<'_, PyAny>,
     params: Option<&[f64]>,
 ) -> PyResult<Circuit> {
-    let x: Vec<f64> = x.extract().map_err(|e: PyErr| {
+    let x = RealReader::new(x.py())?.values(x, "x", |e: PyErr| {
         if e.is_instance_of::<PyTypeError>(x.py()) {
             let err = PyTypeError::new_err("x must be one sample, a flat sequence of floats");
             err.set_cause(x.py(), Some(e));
@@ -3504,9 +3514,10 @@ fn shape_to_py_err(e: ShapeError) -> PyErr {
 ///   whole call, with the GIL released; Ctrl+C stops it between blocks.
 ///
 /// Every check runs before a backend exists and raises
-/// `polypus.ConfigurationError` (a `ValueError`), except a `bool` or another
-/// non-integer as `shots`, `n_qpus`, `nodes`, `cores_per_qpu` or `seed`: a
-/// `TypeError`.
+/// `polypus.ConfigurationError` (a `ValueError`), except an `x` that is not
+/// rows of real numbers (a complex value, Python's or NumPy's, whatever its
+/// imaginary part, names its position) and a `bool` or another non-integer as
+/// `shots`, `n_qpus`, `nodes`, `cores_per_qpu` or `seed`: a `TypeError`.
 #[pyfunction(
     name = "expval",
     signature = (
@@ -3593,9 +3604,10 @@ pub fn expval<'py>(
 ///   circuit.
 ///
 /// Every check runs before a backend exists and raises
-/// `polypus.ConfigurationError` (a `ValueError`), except a `bool` or another
-/// non-integer as `shots`, `n_qpus`, `nodes`, `cores_per_qpu` or `seed`: a
-/// `TypeError`.
+/// `polypus.ConfigurationError` (a `ValueError`), except an `x` that is not
+/// rows of real numbers (a complex value, Python's or NumPy's, whatever its
+/// imaginary part, names its position) and a `bool` or another non-integer as
+/// `shots`, `n_qpus`, `nodes`, `cores_per_qpu` or `seed`: a `TypeError`.
 #[pyfunction(
     name = "jacobian",
     signature = (
@@ -3706,13 +3718,15 @@ fn shape_repr(shape: &[usize]) -> String {
 /// - **Structure first**, through `numpy.asarray(cotangent)`: rows as lists or
 ///   tuples, or a NumPy array. Ragged rows (NumPy's `ValueError`) or a shape
 ///   other than `(rows, observables)` is a `polypus.ConfigurationError` naming
-///   the expected shape; a complex dtype too, rather than losing the
+///   the expected shape. A complex dtype is checked before the shape, and is
+///   the `TypeError` `x` raises for a complex value rather than losing the
 ///   imaginary part in the conversion. Any other exception of NumPy's (a
 ///   `MemoryError`, say) propagates as it is.
 /// - **Then the values**: a real or boolean dtype is converted to `float64`
-///   in one go; any other (strings, objects such as `None`) is read value by
-///   value as `x` is, so a value that is not a real number is the `TypeError`
-///   `x` raises for it. Non-finite values are taken as they are.
+///   in one go; any other (strings, objects such as `None` or a complex
+///   number) is read value by value as `x` is, through [`RealReader`], so a
+///   value that is not a real number is the `TypeError` `x` raises for it.
+///   Non-finite values are taken as they are.
 fn cotangent_values(
     cotangent: &Bound<'_, PyAny>,
     rows: usize,
@@ -3732,11 +3746,13 @@ fn cotangent_values(
             e
         }
     })?;
-    let kind: String = as_is.getattr("dtype")?.getattr("kind")?.extract()?;
+    let dtype = as_is.getattr("dtype")?;
+    let kind: String = dtype.getattr("kind")?.extract()?;
     if kind == "c" {
-        return Err(configuration_error(format!(
-            "cotangent must be a (rows, observables) = {expected} array of real values, got \
-             complex ones"
+        return Err(PyTypeError::new_err(format!(
+            "cotangent must hold real numbers, as x does, got a complex array ({}); the \
+             imaginary part is never dropped, even when it is zero",
+            dtype.str()?
         )));
     }
     let shape: Vec<usize> = as_is.getattr("shape")?.extract()?;
@@ -3753,21 +3769,19 @@ fn cotangent_values(
         return Ok(array.as_array().iter().copied().collect());
     }
     // Strings, objects, dates: value by value, with `x`'s `TypeError` for the
-    // first that is not a real number.
-    as_is
-        .call_method0("ravel")?
-        .call_method0("tolist")?
-        .extract::<Vec<f64>>()
-        .map_err(|e| {
-            if e.is_instance_of::<PyTypeError>(py) {
-                PyTypeError::new_err(format!(
-                    "cotangent must hold real numbers, as x does: {}",
-                    e.value(py)
-                ))
-            } else {
-                e
-            }
-        })
+    // first that is not a real number. `tolist` keeps an object array's own
+    // values, so a NumPy complex scalar reaches the reader as it is.
+    let values = RealReader::new(py)?.rows(&as_is.call_method0("tolist")?, "cotangent", |e| {
+        if e.is_instance_of::<PyTypeError>(py) {
+            PyTypeError::new_err(format!(
+                "cotangent must hold real numbers, as x does: {}",
+                e.value(py)
+            ))
+        } else {
+            e
+        }
+    })?;
+    Ok(values.into_iter().flatten().collect())
 }
 
 /// `polypus.qml.vjp(model, x, params, cotangent, *, wrt="params", …)`: the
@@ -3781,8 +3795,8 @@ fn cotangent_values(
 ///   encoder is [`jacobian`]'s `polypus.ConfigurationError`); **`"both"`** the
 ///   tuple `(by_params, by_inputs)`, each identical to its separate call. Any
 ///   other `wrt` is a `polypus.ConfigurationError`.
-/// - **`cotangent`** is rows of real values or a 2-D NumPy array (complex is
-///   refused), of shape exactly `(rows, observables)` (otherwise a
+/// - **`cotangent`** is rows of real values or a 2-D NumPy array (a complex
+///   value is `x`'s `TypeError`), of shape exactly `(rows, observables)` (otherwise a
 ///   `polypus.ConfigurationError`), its values read as `x`'s are (a string or
 ///   `None` is the same `TypeError`) and taken as they are: a `NaN` or an
 ///   infinity propagates to the product as it does through the contraction of
@@ -3800,9 +3814,10 @@ fn cotangent_values(
 ///   [`jacobian`]'s, with its rules.
 ///
 /// Every check runs before a backend exists and raises
-/// `polypus.ConfigurationError` (a `ValueError`), except a cotangent value
-/// that is not a real number, the `TypeError` `x` raises for one, and a
-/// `bool` or another non-integer as an execution integer, a `TypeError`.
+/// `polypus.ConfigurationError` (a `ValueError`), except an `x` that is not
+/// rows of real numbers ([`expval`]'s `TypeError`), a cotangent value that is
+/// not a real number (the `TypeError` `x` raises for one), and a `bool` or
+/// another non-integer as an execution integer: a `TypeError`.
 #[pyfunction(
     name = "vjp",
     signature = (
@@ -3903,14 +3918,15 @@ fn kernel_encoder<'py>(encoder: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Encod
 }
 
 /// The rows of `x` (rows or a `Dataset`, whose labels are not used) for
-/// `qml.kernel_matrix`, checked as `qml.expval` checks its rows (empty,
-/// zero-width, ragged, non-finite), each a `polypus.ConfigurationError`
-/// naming `name`.
+/// `qml.kernel_matrix`, checked as `qml.expval` checks its rows: a complex
+/// value is a `TypeError` naming `name` and its position (see
+/// [`RealReader`]); then empty, zero-width, ragged or non-finite rows, each a
+/// `polypus.ConfigurationError` naming `name`.
 fn kernel_rows(x: &Bound<'_, PyAny>, name: &str) -> PyResult<polypus_qml::Dataset> {
     if let Ok(dataset) = x.cast::<PyDataset>() {
         return Ok(dataset.try_borrow()?.inner.clone());
     }
-    let rows: Vec<Vec<f64>> = x.extract()?;
+    let rows = RealReader::new(x.py())?.rows(x, name, |e| e)?;
     polypus_qml::Dataset::from_rows(&rows, &vec![0.0; rows.len()])
         .map_err(|e| configuration_error(format!("{name}: {e}")))
 }
@@ -3950,9 +3966,10 @@ fn kernel_states(
 ///   not be positive semi-definite.
 ///
 /// Every check runs before a backend exists and raises
-/// `polypus.ConfigurationError` (a `ValueError`), except a `bool` or another
-/// non-integer as `shots`, `n_qpus`, `nodes`, `cores_per_qpu` or `seed`: a
-/// `TypeError`.
+/// `polypus.ConfigurationError` (a `ValueError`), except an `x1` or `x2` that
+/// is not rows of real numbers (a complex value, Python's or NumPy's, whatever
+/// its imaginary part, names its position) and a `bool` or another non-integer
+/// as `shots`, `n_qpus`, `nodes`, `cores_per_qpu` or `seed`: a `TypeError`.
 #[pyfunction(
     name = "kernel_matrix",
     signature = (
