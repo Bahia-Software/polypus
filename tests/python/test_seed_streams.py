@@ -16,8 +16,7 @@ pytest.importorskip("qiskit_aer")
 
 import polypus  # noqa: E402
 from fake_cunqa import FakeCunqa  # noqa: E402
-
-_MASK = 0x7FFFFFFFFFFFFFFF
+from seed_reference import call_seed, qpu_seed  # noqa: E402
 
 
 def _all_ones(bitstring):
@@ -116,11 +115,18 @@ class TestCunqa:
         for call in calls:
             (qpu0, base), *rest = call
             assert qpu0 == 0
-            # QPU k of a call runs with the call's seed + k.
-            assert all(seed == (base + qpu) & _MASK for qpu, seed in rest)
             bases.append(base)
         assert bases[0] == 3
         assert len(set(bases)) == len(bases)
+        # Call n runs QPU 0 with its own seed (the run's on call 0) and QPU k
+        # with a stream of that seed, all masked to 63 bits (#635).
+        for n, call in enumerate(calls):
+            seed = call_seed(3, n)
+            assert call == [(qpu, qpu_seed(seed, qpu)) for qpu, _ in call], n
+        # No two QPUs of the run share a seed, across calls too: no two calls
+        # share shot noise (C-7).
+        every = [seed for call in calls for _, seed in call]
+        assert len(set(every)) == len(every)
 
     def test_the_seed_replays_the_sequence(self, monkeypatch):
         first = FakeCunqa().install(monkeypatch)

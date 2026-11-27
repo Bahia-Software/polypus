@@ -18,6 +18,7 @@ pytest.importorskip("qiskit_aer")
 import polypus
 from call_trace import check_trace, read_trace, result_bits
 from fake_cunqa import FakeCunqa
+from seed_reference import qpu_seed
 
 
 def _uniform3():
@@ -76,7 +77,7 @@ def test_cunqa_train_trace_forwarding(monkeypatch, tmp_path):
         )
         seen[traced] = (fake.names(), _runs(fake), result_bits(result))
     assert seen[True] == seen[False]
-    assert [seed for _, seed, _ in seen[True][1][:2]] == [3, 4]
+    assert [seed for _, seed, _ in seen[True][1][:2]] == [3, qpu_seed(3, 1)]
     trace = read_trace(tmp_path / "train.jsonl")
     check_trace(trace)
     waves = trace.events("wave")

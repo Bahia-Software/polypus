@@ -178,15 +178,23 @@ class Cunqa(Infraestructure):
         qcs = [qc for qc, _ in prepared]
         shots = args["shots"]
 
-        # This call's seed: the Rust side gives every call of a run its own
-        # (contract C-7), so successive waves and generations do not share
-        # shot noise.
-        seed = args.get("seed", None)
+        # One seed per circuit, the one its QPU runs with, or absent when the
+        # run is unseeded. The Rust side derives them (contract C-7, #635):
+        # every call of a run has its own seed, and QPU `k` of a call runs
+        # with the call's seed on QPU 0 and a SplitMix64 stream of it on the
+        # others, already masked to the 63 bits Aer takes; this side forwards
+        # them as they are.
+        seeds = args.get("seeds", None)
+        if seeds is not None and len(seeds) != len(qcs):
+            raise ValueError(
+                f"run_qcs got {len(seeds)} seed(s) for {len(qcs)} circuit(s) "
+                "(contract C-1)"
+            )
 
         # Where these circuits start among the family's QPUs: circuit `i` runs on
-        # QPU `qpu_offset + i` with seed `seed + qpu_offset + i`. The Rust side
-        # sends one call per batch size when the shots split unevenly across the
-        # QPUs, and this keeps every replica on its own QPU and seed (#370).
+        # QPU `qpu_offset + i`. The Rust side sends one call per batch size when
+        # the shots split unevenly across the QPUs, and this keeps every replica
+        # on its own QPU, with its QPU's seed (#370).
         qpu_offset = args.get("qpu_offset", 0)
 
         # Simulation method for the vQPUs' Aer backend. The Rust side always
@@ -214,26 +222,18 @@ class Cunqa(Infraestructure):
             qjobs = []
             for i, qc in enumerate(qcs):
                 k = qpu_offset + i
-                if seed is not None:
+                if seeds is not None:
                     # `seed` (not `seed_simulator`) is the kwarg CUNQA's own
-                    # docs name (reference/api/run_configuration.html).
-                    # Offset by QPU index so each QPU gets a distinct,
-                    # deterministic seed instead of every QPU reproducing the
-                    # exact same counts; masked to the 63-bit range Aer
-                    # accepts, since CUNQA's simulated QPUs are Aer-based (same
-                    # reason as local.py's mask) (contract C-7). The base seed
-                    # is below 2**63 (#393); `+ k` and the derived per-call
-                    # seeds can reach past it, and wrap.
+                    # docs name (reference/api/run_configuration.html). Each
+                    # QPU gets its own deterministic seed, so the QPUs do not
+                    # reproduce each other's counts (contract C-7).
                     #
                     # Pinned against a fake CUNQA (tests/python/
-                    # test_cunqa_run_flow.py) and checked on CUNQA 3.0.0
-                    # (tests/python/test_cunqa_real.py, opt-in).
-                    qjob = run(
-                        qc,
-                        qpus[k],
-                        seed=(seed + k) & 0x7FFFFFFFFFFFFFFF,
-                        **run_kwargs,
-                    )
+                    # test_cunqa_run_flow.py). The opt-in
+                    # tests/python/test_cunqa_real.py passed on CUNQA 3.0.0
+                    # with the seeds before #635, whose QPUs k >= 1 now get
+                    # seeds near 2**63; it is still to be run with them.
+                    qjob = run(qc, qpus[k], seed=seeds[i], **run_kwargs)
                 else:
                     qjob = run(qc, qpus[k], **run_kwargs)
                 qjobs.append(qjob)

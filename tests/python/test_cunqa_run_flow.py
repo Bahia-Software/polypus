@@ -6,7 +6,8 @@
 call against CUNQA's real signatures at one release tag and simulates each job
 with Aer. Pinned here: the ``qraise`` reservation, one ``run`` per QPU with the
 run options, ``gather``, the release with ``qdrop`` (also after a failure), the
-C-3 counts shape and the C-7 per-QPU seeds, the C-3 keys the seal makes
+C-3 counts shape and the C-7 per-QPU seeds (the run's on QPU 0, a SplitMix64
+stream of it on the others, #635), the C-3 keys the seal makes
 of what CUNQA 3.0.0 returns for a circuit without measurements (#253) and with
 several or wider classical registers (#304), and one ``get_QPUs`` per family
 rather than per wave (#437).
@@ -26,6 +27,8 @@ from fake_cunqa import (  # noqa: E402
     circuit_in_form,
 )
 from qiskit import QuantumCircuit  # noqa: E402
+from seed_reference import qpu_seed as _qpu_seed  # noqa: E402
+from seed_reference import stream_seed as _stream_seed  # noqa: E402
 
 _MASK = 0x7FFFFFFFFFFFFFFF
 
@@ -78,7 +81,12 @@ def test_run_flow_end_to_end(monkeypatch, tag):
     assert all(isinstance(run["circuit"], QuantumCircuit) for run in fake.runs)
     assert [run["options"] for run in fake.runs] == [
         {"shots": 32, "transpile": False, "method": "statevector", "seed": 11},
-        {"shots": 32, "transpile": False, "method": "statevector", "seed": 12},
+        {
+            "shots": 32,
+            "transpile": False,
+            "method": "statevector",
+            "seed": _qpu_seed(11, 1),
+        },
     ]
     assert fake.dropped == [result.id]
 
@@ -93,15 +101,26 @@ def test_run_flow_end_to_end(monkeypatch, tag):
     assert result.infrastructure == "cunqa"
 
 
+def test_the_reference_stream_matches_rust():
+    # seed_reference.stream_seed is polypus_backend::stream_seed: SplitMix64
+    # seeded with state 0 gives the value `stream_seed_is_pinned` pins in
+    # crates/polypus-backend/src/seed.rs.
+    assert _stream_seed(0, 0) == 0xE220A8397B1DCDAF
+    # A non-zero base, so the mixing of the base seed is checked too; the Rust
+    # qpu_seed tests pin the same two values.
+    assert _stream_seed(42, 9) == 0x3E69C285108DBB77
+    assert _qpu_seed(42, 9) == 0x20667245060A8EED
+
+
 def test_counts_match_aer_with_the_same_per_qpu_seed(monkeypatch):
     # The counts are the vQPUs' own, unmodified: QPU i equals Aer run with
-    # seed_simulator = seed + i.
+    # its QPU's seed, the run's on QPU 0 (C-7).
     from qiskit_aer import AerSimulator
 
     result = _run(FakeCunqa(), monkeypatch, seed=5)
     qc = QuantumCircuit.from_qasm_str(_uniform3().to_qasm2())
     for i, counts in enumerate(result.counts):
-        expected = AerSimulator().run(qc, shots=32, seed_simulator=5 + i)
+        expected = AerSimulator().run(qc, shots=32, seed_simulator=_qpu_seed(5, i))
         assert counts == expected.result().get_counts()
 
 
@@ -113,20 +132,37 @@ def test_same_seed_reproduces_counts(monkeypatch):
 
 
 def test_qpus_get_distinct_seeds(monkeypatch):
-    # C-7: each QPU is seeded `seed + i`, so replicas of one circuit are not
-    # copies of each other.
+    # C-7: each QPU gets its own seed, the run's on QPU 0, so replicas of one
+    # circuit are not copies of each other.
     fake = FakeCunqa()
     result = _run(fake, monkeypatch, seed=7, n_qpus=4, shots=400)
-    assert [run["options"]["seed"] for run in fake.runs] == [7, 8, 9, 10]
+    seeds = [run["options"]["seed"] for run in fake.runs]
+    assert seeds == [_qpu_seed(7, k) for k in range(4)]
+    assert seeds[0] == 7 and len(set(seeds)) == 4
     assert len({tuple(sorted(c.items())) for c in result.counts}) == 4
 
 
-def test_the_per_qpu_offset_wraps_inside_the_aer_range(monkeypatch):
+def test_neighbouring_seeds_do_not_share_qpus_shifted_by_one(monkeypatch):
+    # #635: with `seed + k`, QPU k of seed s ran with the seed of QPU k - 1 of
+    # seed s + 1, so repetitions seeded 0, 1, 2, ... overlapped across QPUs;
+    # now they meet only by a SplitMix64 collision (chance about 2**-63).
+    runs = {}
+    for seed in (40, 41):
+        fake = FakeCunqa()
+        _run(fake, monkeypatch, seed=seed, n_qpus=3)
+        runs[seed] = [run["options"]["seed"] for run in fake.runs]
+    assert all(runs[40][k] != runs[41][k - 1] for k in (1, 2))
+    assert not set(runs[40]) & set(runs[41])
+
+
+def test_every_qpu_seed_is_inside_the_aer_range(monkeypatch):
     # CUNQA's vQPUs are Aer-based: the largest seed they take is 2**63 - 1, and
-    # the per-QPU offset `seed + k` is masked to 63 bits, so it wraps to 0.
+    # every QPU's seed is masked to 63 bits.
     fake = FakeCunqa()
-    _run(fake, monkeypatch, seed=_MASK)
-    assert [run["options"]["seed"] for run in fake.runs] == [_MASK, 0]
+    _run(fake, monkeypatch, seed=_MASK, n_qpus=3)
+    seeds = [run["options"]["seed"] for run in fake.runs]
+    assert seeds == [_qpu_seed(_MASK, k) for k in range(3)]
+    assert seeds[0] == _MASK and all(0 <= s <= _MASK for s in seeds)
 
 
 @pytest.mark.parametrize("seed", [2**63, 2**64 - 1])
@@ -202,12 +238,16 @@ def test_train_runs_each_wave_on_the_family(monkeypatch):
     for run in fake.runs:
         assert run["options"]["shots"] == 16
         assert run["qpu"].family == result.id
-    # Within a wave, QPU i gets the wave's seed + i; the first wave's is the
-    # run's, the next ones their own (C-7, test_seed_streams.py).
+    # Within a wave, QPU i gets the wave's seed on QPU 0 and its stream on the
+    # others; the first wave's seed is the run's, the next ones their own
+    # (C-7, test_seed_streams.py).
     first, second = fake.runs[:2], fake.runs[2:4]
-    assert [run["options"]["seed"] for run in first] == [3, 4]
-    assert second[1]["options"]["seed"] == second[0]["options"]["seed"] + 1
-    assert second[0]["options"]["seed"] != 3
+    assert [run["options"]["seed"] for run in first] == [3, _qpu_seed(3, 1)]
+    wave = _stream_seed(3, 1)
+    assert [run["options"]["seed"] for run in second] == [
+        _qpu_seed(wave, 0),
+        _qpu_seed(wave, 1),
+    ]
 
 
 def test_get_qpus_runs_once_per_family(monkeypatch):
@@ -243,7 +283,7 @@ def test_failed_wave_refreshes_the_qpus(monkeypatch, stage, error):
     fake.qraise(2, "00:10:00", family="fam")
 
     def wave():
-        return Cunqa().run_qcs(qcs=[_ONE_QUBIT], shots=8, family_id="fam", seed=1)
+        return Cunqa().run_qcs(qcs=[_ONE_QUBIT], shots=8, family_id="fam", seeds=[1])
 
     assert wave() == wave() == [{"1": 8}]
     assert fake.names().count("get_QPUs") == 1
@@ -263,7 +303,7 @@ def test_family_raised_again_after_qdrop_gets_its_new_qpus(monkeypatch):
     from polypus_python.cunqa import Cunqa
 
     def wave():
-        return Cunqa().run_qcs(qcs=[_ONE_QUBIT], shots=8, family_id="fam", seed=1)
+        return Cunqa().run_qcs(qcs=[_ONE_QUBIT], shots=8, family_id="fam", seeds=[1])
 
     fake.qraise(2, "00:10:00", family="fam")
     assert wave() == [{"1": 8}]
@@ -293,7 +333,22 @@ def test_uneven_shot_split_gives_every_replica_its_own_qpu_and_seed(monkeypatch)
     result = _run(fake, monkeypatch, seed=11, shots=10, n_qpus=3)
     assert [sum(c.values()) for c in result.counts] == [4, 3, 3]
     assert sorted(run["qpu"].index for run in fake.runs) == [0, 1, 2]
-    assert sorted(run["options"]["seed"] for run in fake.runs) == [11, 12, 13]
+    by_qpu = {run["qpu"].index: run["options"]["seed"] for run in fake.runs}
+    assert by_qpu == {k: _qpu_seed(11, k) for k in range(3)}
+
+
+def test_run_qcs_refuses_a_seed_count_that_is_not_the_circuit_count(monkeypatch):
+    # C-1: the Rust side sends one seed per circuit; anything else is a
+    # contract break, refused before any job runs.
+    fake = FakeCunqa().install(monkeypatch)
+    from polypus_python.cunqa import Cunqa
+
+    fake.qraise(2, "00:10:00", family="fam")
+    with pytest.raises(ValueError, match="2 seed"):
+        Cunqa().run_qcs(qcs=[_ONE_QUBIT], shots=8, family_id="fam", seeds=[1, 2])
+    with pytest.raises(ValueError, match="0 seed"):
+        Cunqa().run_qcs(qcs=[_ONE_QUBIT], shots=8, family_id="fam", seeds=[])
+    assert fake.runs == []
 
 
 def test_fewer_shots_than_qpus_runs_only_the_replicas_with_shots(monkeypatch):

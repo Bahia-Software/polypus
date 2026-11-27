@@ -136,12 +136,18 @@ def test_run_and_drop_bind_against_cunqa(install_cunqa, tag):
     qc.measure([0, 1], [0, 1])
 
     counts = cunqa.run_qcs(
-        family_id="fam", qcs=[qc, qc], shots=8, sim_method="statevector", seed=7
+        family_id="fam",
+        qcs=[qc, qc],
+        shots=8,
+        sim_method="statevector",
+        seeds=[7, 1234],
     )
     cunqa.drop_qpus(family="fam")
 
     assert counts == [{"00": 4, "11": 4}] * 2
     assert calls["get_QPUs"][0][1] == {"co_located": True, "family": "fam"}
-    assert [c[1]["seed"] for c in calls["run"]] == [7, 8]
+    # One seed per circuit, derived on the Rust side and forwarded as is
+    # (C-1, C-7, #635).
+    assert [c[1]["seed"] for c in calls["run"]] == [7, 1234]
     assert calls["run"][0][1]["method"] == "statevector"
     assert calls["qdrop"] == [(("fam",), {})]
