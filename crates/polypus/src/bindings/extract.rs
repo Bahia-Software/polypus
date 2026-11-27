@@ -168,13 +168,15 @@ pub(super) fn extract_supervised_objective(
 /// whatever its imaginary part: Python's `complex`, anything with a NumPy
 /// `dtype` of kind `c` (the scalars `complex64`, `complex128` and
 /// `clongdouble`, and a 0-d array), or else one of `numbers.Complex` that is
-/// not `numbers.Real`. NumPy's complex scalars (and a `clongdouble` 0-d array)
-/// answer `float()` by dropping their imaginary part with a `ComplexWarning`,
-/// so without this a complex value in a NumPy array was taken cut while the
-/// same value in a list was a `TypeError` (#602). The refusal is a `TypeError` naming the value's
-/// position; a `bool`, Python's or NumPy's, is not complex and reads as 0 or 1.
-/// Shared by every native QML reader of `x`, `y` and the cotangent, and by
-/// [`extract_labels`].
+/// not `numbers.Real`; and a 0-d NumPy object array holding any of these.
+/// NumPy's complex scalars (and a `clongdouble` 0-d array, or an object one
+/// holding a NumPy complex scalar) answer `float()` by dropping their
+/// imaginary part with a `ComplexWarning`, so without this a complex value in
+/// a NumPy array was taken cut while the same value in a list was a
+/// `TypeError` (#602). The refusal is a `TypeError` naming the value's
+/// position; a `bool`, Python's or NumPy's, is not complex and reads as 0
+/// or 1. Shared by every native QML reader of `x`, `y` and the cotangent, and
+/// by [`extract_labels`].
 pub(super) struct RealReader<'py> {
     complex: Bound<'py, PyAny>,
     real: Bound<'py, PyAny>,
@@ -197,23 +199,8 @@ impl<'py> RealReader<'py> {
         at: impl FnOnce() -> String,
     ) -> PyResult<()> {
         use pyo3::exceptions::PyTypeError;
-        use pyo3::types::{PyComplex, PyFloat, PyInt};
 
-        // The common cases skip the ABCs: a float (`numpy.float64` is one), an
-        // int or a bool; Python's `complex` (`numpy.complex128` is one).
-        if value.is_instance_of::<PyFloat>() || value.is_instance_of::<PyInt>() {
-            return Ok(());
-        }
-        let complex = if value.is_instance_of::<PyComplex>() {
-            true
-        } else if let Some(kind) = numpy_dtype_kind(value) {
-            // A NumPy scalar or array: its dtype decides. A 0-d array is not
-            // registered with `numbers.Complex`, so the ABCs would miss it.
-            kind == "c"
-        } else {
-            value.is_instance(&self.complex)? && !value.is_instance(&self.real)?
-        };
-        if !complex {
+        if !self.is_complex(value, true)? {
             return Ok(());
         }
         // For the message only, so an unprintable value is not itself an error.
@@ -225,6 +212,37 @@ impl<'py> RealReader<'py> {
              is never dropped, even when it is zero)",
             at()
         )))
+    }
+
+    /// Whether `value` is a complex number, by its type. With `look_inside`, a
+    /// 0-d NumPy object array is decided by the value it holds, since its
+    /// `float()` is that value's: a NumPy complex scalar held in one would be
+    /// cut. One level only: `numpy.array` unwraps a 0-d array it is given, so
+    /// only an array filled by hand holds another, and one can hold itself.
+    fn is_complex(&self, value: &Bound<'py, PyAny>, look_inside: bool) -> PyResult<bool> {
+        use pyo3::types::{PyComplex, PyFloat, PyInt};
+
+        // The common cases skip the ABCs: a float (`numpy.float64` is one), an
+        // int or a bool; Python's `complex` (`numpy.complex128` is one).
+        if value.is_instance_of::<PyFloat>() || value.is_instance_of::<PyInt>() {
+            return Ok(false);
+        }
+        if value.is_instance_of::<PyComplex>() {
+            return Ok(true);
+        }
+        match numpy_dtype_kind(value).as_deref() {
+            Some("O") if look_inside && numpy_ndim(value) == Some(0) => {
+                match value.call_method0("item") {
+                    Ok(held) => self.is_complex(&held, false),
+                    // Left to its `float()`, which reports it as before.
+                    Err(_) => Ok(false),
+                }
+            }
+            // A NumPy scalar or array: its dtype decides. A 0-d array is not
+            // registered with `numbers.Complex`, so the ABCs would miss it.
+            Some(kind) => Ok(kind == "c"),
+            None => Ok(value.is_instance(&self.complex)? && !value.is_instance(&self.real)?),
+        }
     }
 
     /// The flat sequence `values`, its `i`-th value named `name[i]`: the
@@ -283,6 +301,15 @@ fn numpy_dtype_kind(value: &Bound<'_, PyAny>) -> Option<String> {
         .getattr("dtype")
         .and_then(|dtype| dtype.getattr("kind"))
         .and_then(|kind| kind.extract::<String>())
+        .ok()
+}
+
+/// The `ndim` of a NumPy scalar or array, or `None` for anything without
+/// one.
+fn numpy_ndim(value: &Bound<'_, PyAny>) -> Option<usize> {
+    value
+        .getattr("ndim")
+        .and_then(|ndim| ndim.extract::<usize>())
         .ok()
 }
 
@@ -634,6 +661,48 @@ mod tests {
             );
             assert_eq!(
                 extract_labels(&item("y_real"), "y").expect("a real dtype is a label"),
+                [1.5, 1.0].map(Label::Real)
+            );
+
+            // A 0-d object array (`numpy.array(numpy.complex128(1j),
+            // dtype=object)`) has kind `O`, and its `float()` is the held
+            // value's, which drops a NumPy complex scalar's imaginary part: the
+            // held value decides. A stand-in with a `dtype`, `ndim` and `item()`
+            // plays it. One holding itself must still be read, not loop.
+            py.run(
+                c"class Held:\n\
+                  \x20   dtype = SimpleNamespace(kind='O')\n\
+                  \x20   ndim = 0\n\
+                  \x20   def __init__(self, held):\n\
+                  \x20       self.held = held\n\
+                  \x20   def item(self):\n\
+                  \x20       return self.held\n\
+                  \x20   def __float__(self):\n\
+                  \x20       return 1.0\n\
+                  \x20   def __repr__(self):\n\
+                  \x20       return 'Held(...)'\n\
+                  y_held = [1.5, Held(ZeroDim('c'))]\n\
+                  y_held_real = [1.5, Held(2.5)]\n\
+                  itself = Held(None)\n\
+                  itself.held = itself\n\
+                  y_itself = [1.5, itself]\n",
+                Some(&scope),
+                None,
+            )
+            .expect("the stand-in is defined");
+            let err = extract_labels(&item("y_held"), "y").expect_err("a held complex is refused");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            assert!(
+                err.to_string()
+                    .contains("y[1] is Held(...), a complex number"),
+                "{err}"
+            );
+            assert_eq!(
+                extract_labels(&item("y_held_real"), "y").expect("a held real is a label"),
+                [1.5, 1.0].map(Label::Real)
+            );
+            assert_eq!(
+                extract_labels(&item("y_itself"), "y").expect("one level is looked into"),
                 [1.5, 1.0].map(Label::Real)
             );
 

@@ -2858,8 +2858,9 @@ is also a `ValueError` (#418), as `train`'s do:
   Fewer features than qubits stays accepted. Every value of `x` is a real
   number (a `bool` reads as 0 or 1): a complex one, Python's or NumPy's, in
   any container (a list, a NumPy array of complex dtype, an object array, a
-  0-d array in a list), is a `TypeError` naming its 0-based row and column,
-  whatever its imaginary part, rather than losing its imaginary part (#602).
+  0-d array in a list, or a 0-d object array holding one), is a `TypeError`
+  naming its 0-based row and column, whatever its imaginary part, rather than
+  losing its imaginary part (#602).
   The same holds for every native reader of rows (`predict`, `run`,
   `qml.Dataset`, the primitives, `qml.kernel_matrix`) and, naming the index,
   for the labels of `y` and of `qml.Dataset(x, y)`.

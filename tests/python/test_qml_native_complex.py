@@ -89,6 +89,12 @@ CONTAINERS_2D = {
         _set(rows, lambda v: np.array(v + 0.5j, dtype=np.clongdouble)),
         (1, 0),
     ),
+    # (h) a list holding a 0-d object array, whose `float()` is that of the
+    # NumPy complex scalar it holds: it dropped the imaginary part.
+    "list-0d-object": lambda rows: (
+        _set(rows, lambda v: np.array(np.complex128(v + 0.5j), dtype=object)),
+        (1, 0),
+    ),
 }
 
 
@@ -113,6 +119,10 @@ CONTAINERS_1D = {
     "list-0d-array": lambda v: (_set_1d(v, lambda x: np.array(x + 0.5j)), 1),
     "list-0d-clongdouble": lambda v: (
         _set_1d(v, lambda x: np.array(x + 0.5j, dtype=np.clongdouble)),
+        1,
+    ),
+    "list-0d-object": lambda v: (
+        _set_1d(v, lambda x: np.array(np.complex128(x + 0.5j), dtype=object)),
         1,
     ),
 }
@@ -300,13 +310,17 @@ def test_a_bool_still_reads_as_zero_or_one(booleans):
         np.array([[1, 0], [0, 2]], dtype=np.int64),
         np.array([[1, 0], [0, 2]], dtype=np.uint8),
         [[np.array(1.0), np.array(0)], [np.float32(0.0), np.int64(2)]],
+        [
+            [np.array(np.float32(1.0), dtype=object), np.array(0, dtype=object)],
+            [np.array(0.0, dtype=object), np.array(True, dtype=object)],
+        ],
     ],
-    ids=["float32", "int64", "uint8", "list-0d-and-scalars"],
+    ids=["float32", "int64", "uint8", "list-0d-and-scalars", "list-0d-object"],
 )
 def test_real_numpy_values_read_as_python_floats(rows):
     # A guard: a NumPy array of a real dtype skips the per-value check, and a
-    # real 0-d array or NumPy scalar in a list passes it, each read as the
-    # same Python floats would be.
+    # real 0-d array (an object one too) or NumPy scalar in a list passes it,
+    # each read as the same Python floats would be.
     model = _model()
     params = _params(model)
     as_floats = [[float(value) for value in row] for row in rows]
