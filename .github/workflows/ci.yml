@@ -536,16 +536,27 @@ jobs:
   # fixtures (contract C-10), whose test skips with any other.
   # ---------------------------------------------------------------------------
   python-tests:
-    name: test (Python ${{ matrix.python-version }}${{ matrix.qiskit == 'fixtures' && ', Qiskit of the C-10 fixtures' || '' }})
+    name: test (Python ${{ matrix.python-version }}${{ matrix.qiskit == 'fixtures' && ', Qiskit of the C-10 fixtures' || '' }}${{ matrix.log-bridge && ', logging bridge' || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.13"]
+        # Only the last leg below sets it to true. It is a matrix value so that
+        # that leg is a leg of its own: an `include` that changes no value of an
+        # existing leg is merged into that leg instead.
+        log-bridge: [false]
         include:
           - python-version: "3.12"
             qiskit: fixtures
+          # The suite with polypus.log_to_python() installed at DEBUG and a
+          # handler that formats every record (tests/python/conftest.py), so a
+          # record emitted while holding a lock that a thread holding the GIL
+          # waits for (docs/ENGINEERING.md §9) hangs a test here and the job's
+          # timeout fails it.
+          - python-version: "3.13"
+            log-bridge: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -614,17 +625,20 @@ jobs:
       # fails the run unless POLYPUS_ALLOWED_SKIPS lists it (tests/python/
       # skip_guard.py): the real-CUNQA tests (opt-in), the C-7 tier pinned to
       # the fixture's build (its trainings are compared across two processes
-      # instead), and per leg the C-10 fixtures, the external libraries and
-      # the PyTorch layer.
+      # instead), and per leg the C-10 fixtures, the external libraries, the
+      # PyTorch layer and, with the logging bridge, the test that needs its own
+      # init_logger to be the first install of the process.
       - name: Run Python tests
         env:
           POLYPUS_REQUIRE_LLVM_AS: "1"
           POLYPUS_REQUIRE_FIXTURES_QISKIT: ${{ matrix.qiskit == 'fixtures' && '1' || '' }}
           POLYPUS_REQUIRE_EXTERNAL_LIBRARIES: ${{ matrix.python-version == '3.13' && '1' || '' }}
           POLYPUS_REQUIRE_TORCH: ${{ matrix.python-version == '3.13' && '1' || '' }}
+          POLYPUS_TEST_LOG_TO_PYTHON: ${{ matrix.log-bridge && '1' || '' }}
           POLYPUS_ALLOWED_SKIPS: >-
             test_cunqa_real.py
             test_determinism_baseline.py::TestSameBuildStrict
+            ${{ matrix.log-bridge && 'test_logging.py::test_default_is_file_and_reinit_is_noop' || '' }}
             ${{ matrix.qiskit != 'fixtures' && 'test_qasm3_interop.py' || '' }}
             ${{ matrix.python-version != '3.13' && 'test_ask_tell_adapters.py' || '' }}
             ${{ matrix.python-version != '3.13' && 'test_torch_quantum_layer.py' || '' }}
@@ -639,14 +653,14 @@ jobs:
       # for 3.10 users. The recipe sets POLYPUS_NO_AUTOCALIBRATE: importing
       # polypus would otherwise calibrate the machine (#176).
       - name: Check typing stubs against the extension (stubtest)
-        if: matrix.python-version == '3.13'
+        if: matrix.python-version == '3.13' && !matrix.log-bridge
         run: just stubtest
       # The conformance battery against the Aer backend
       # (polypus-infrastructure/tests/conformance.rs) needs Qiskit Aer and the
       # wheel's polypus_python, so it is #[ignore]d in the Rust job and runs
       # here, on one OpenMP thread (the recipe sets it).
       - name: Conformance battery against the Aer backend
-        if: matrix.python-version == '3.13'
+        if: matrix.python-version == '3.13' && !matrix.log-bridge
         env:
           POLYPUS_REQUIRE_AER: "1"
         run: just conformance-aer

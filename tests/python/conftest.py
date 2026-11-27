@@ -27,8 +27,9 @@ from skip_guard import (  # noqa: E402, F401
 # installed (issue #458): `polypus.log_to_python()` with the `polypus` logger at
 # DEBUG and a handler that formats every record and drops it, so every Rust log
 # record of every test goes through Python. It checks that no path deadlocks or
-# fails with the bridge on; it is run by hand, not in CI. Child interpreters
-# that tests start do not load this file, so they run without the bridge.
+# fails with the bridge on; CI runs it on one leg (`log-bridge` in ci.yml).
+# Child interpreters that tests start do not load this file, so they run
+# without the bridge.
 LOG_TO_PYTHON = os.environ.get("POLYPUS_TEST_LOG_TO_PYTHON") == "1"
 
 

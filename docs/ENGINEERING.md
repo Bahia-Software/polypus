@@ -710,7 +710,10 @@ slow sink from stalling every other thread that needs the lock. One known gap
 remains, in the `qmio` feature only: `QmioBackend::close` (a `block_on`) and the
 drop of its Tokio runtime can run with the GIL held while `zeromq`'s tasks log
 from the runtime's worker threads, so with the Python bridge installed that
-close can hang; `docs/guide/running.md` documents it.
+close can hang; `docs/guide/running.md` documents it. CI runs the Python
+suite once more with the bridge installed at `DEBUG` (the `logging bridge` leg
+of `python-tests`), so a record emitted under such a lock, on a path the suite
+covers, hangs that leg until its timeout fails it.
 
 **Performance.** Don't optimize prematurely; justify any
 performance/readability trade-off. Any claimed performance improvement is
