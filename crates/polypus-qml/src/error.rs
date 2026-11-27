@@ -118,12 +118,26 @@ pub enum ValidationError {
     /// is rejected at compile time rather than discovered as an optimizer that
     /// "converges" trivially.
     NoTrainableParams,
-    /// A layer reserves more trainable parameters than fit in a `usize`, on
-    /// its own or after those of the layers before it (only a huge `reps` gets
-    /// there). Raised by the layer's `plan`, which then reserves nothing.
-    TooManyParams {
-        /// The layer (0-based, in the model) whose parameters do not fit.
+    /// A layer would emit more gates than the model may hold: its own count,
+    /// or the model's after it, does not fit in a `usize`, or passes
+    /// [`MAX_MODEL_GATES`](crate::MAX_MODEL_GATES). Raised by the layer's
+    /// `plan`, before any gate of it exists, which then counts neither gates
+    /// nor parameters.
+    ModelTooLarge {
+        /// The layer (0-based, in the model) that takes the model too far.
         layer: usize,
+        /// Which limit it passes.
+        reason: SizeLimit,
+    },
+    /// A model was compiled over more than
+    /// [`MAX_MODEL_QUBITS`](crate::MAX_MODEL_QUBITS) qubits. Raised before any
+    /// layer is planned, so nothing proportional to the qubit count is
+    /// allocated.
+    TooManyQubits {
+        /// The qubit count asked for.
+        num_qubits: usize,
+        /// The limit, [`MAX_MODEL_QUBITS`](crate::MAX_MODEL_QUBITS).
+        max_qubits: usize,
     },
     /// A layer needs more active qubits than are available at its position in
     /// the model. Raised by an encoder whose feature count exceeds the number
@@ -320,6 +334,22 @@ pub enum ValidationError {
     },
 }
 
+/// Why [`ValidationError::ModelTooLarge`] refused a layer.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeLimit {
+    /// The gate count (the layer's own, or the model's after it) does not fit
+    /// in a `usize`.
+    Overflow,
+    /// The model's gate count after this layer, `gates`, exceeds `max_gates`.
+    Budget {
+        /// The model's gate count with this layer's gates added.
+        gates: usize,
+        /// The limit, [`MAX_MODEL_GATES`](crate::MAX_MODEL_GATES).
+        max_gates: usize,
+    },
+}
+
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -371,9 +401,26 @@ impl fmt::Display for ValidationError {
                 f,
                 "model has no trainable parameters: add at least one ansatz layer"
             ),
-            ValidationError::TooManyParams { layer } => write!(
+            ValidationError::ModelTooLarge {
+                layer,
+                reason: SizeLimit::Overflow,
+            } => write!(
                 f,
-                "layer {layer} needs more trainable parameters than fit in a usize (reduce reps)"
+                "layer {layer} needs more gates than fit in a usize (reduce reps, qubits or features)"
+            ),
+            ValidationError::ModelTooLarge {
+                layer,
+                reason: SizeLimit::Budget { gates, max_gates },
+            } => write!(
+                f,
+                "layer {layer} takes the model to {gates} gates, past the limit of {max_gates} (reduce reps, qubits or features)"
+            ),
+            ValidationError::TooManyQubits {
+                num_qubits,
+                max_qubits,
+            } => write!(
+                f,
+                "model has {num_qubits} qubits, past the limit of {max_qubits}"
             ),
             ValidationError::NotEnoughQubits { needed, active } => write!(
                 f,
@@ -942,9 +989,45 @@ mod tests {
     }
 
     #[test]
-    fn too_many_params_displays_its_layer() {
-        let s = ValidationError::TooManyParams { layer: 3 }.to_string();
-        assert!(s.contains("layer 3") && s.contains("usize"), "{s}");
+    fn size_limits_display_their_values_and_differ() {
+        let overflow = ValidationError::ModelTooLarge {
+            layer: 3,
+            reason: SizeLimit::Overflow,
+        }
+        .to_string();
+        assert!(
+            overflow.contains("layer 3") && overflow.contains("usize"),
+            "{overflow}"
+        );
+        let budget = ValidationError::ModelTooLarge {
+            layer: 2,
+            reason: SizeLimit::Budget {
+                gates: 4_000_007,
+                max_gates: 4_000_000,
+            },
+        }
+        .to_string();
+        assert!(
+            budget.contains("layer 2")
+                && budget.contains("4000007")
+                && budget.contains("4000000")
+                && !budget.contains("usize"),
+            "{budget}"
+        );
+        // The hint fits an encoder too, which has no `reps`.
+        for message in [&overflow, &budget] {
+            assert!(message.contains("features"), "{message}");
+        }
+        let qubits = ValidationError::TooManyQubits {
+            num_qubits: 1_000_001,
+            max_qubits: 1_000_000,
+        }
+        .to_string();
+        assert!(
+            qubits.contains("1000001") && qubits.contains("1000000") && qubits.contains("qubits"),
+            "{qubits}"
+        );
+        assert!(!qubits.contains("gates"), "{qubits}");
     }
 
     #[test]

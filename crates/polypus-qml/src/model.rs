@@ -34,7 +34,7 @@ use std::ops::Range;
 
 use polypus_circuit::{ConcreteCircuit, GateInstruction, ParameterizedCircuit};
 
-use crate::error::{QmlError, ValidationError};
+use crate::error::{QmlError, SizeLimit, ValidationError};
 use crate::jacobian::{ExpectationJacobian, JacobianWrt};
 use crate::layers::{
     AmplitudeEncoder, AngleEncoder, BasisEncoder, ConvBlock, ConvLayer, HardwareEfficientAnsatz,
@@ -46,8 +46,25 @@ use crate::observables::{
 };
 use crate::readout::{Decision, Readout, ResolvedReadout};
 
+/// The most gates a model's layers may emit, counted in each layer's `plan`
+/// before any gate exists (see [`QuantumModel::compile`]). The readout's basis
+/// change and the measurements [`CompiledModel::template_for`] appends are not
+/// counted.
+///
+/// The same number as `polypus-circuit`'s private cap on the instructions an
+/// imported OpenQASM program may produce, which also sizes its
+/// `MAX_QFT_QUBITS`. The layers alone stay within what the importer accepts;
+/// the readout's basis change and measurements come on top, so an exported
+/// model is not guaranteed to import again.
+pub const MAX_MODEL_GATES: usize = 4_000_000;
+
+/// The most qubits a model may have, checked before anything proportional to
+/// the qubit count is allocated. The same number as `polypus-circuit`'s private
+/// cap on the qubits an imported OpenQASM program may declare.
+pub const MAX_MODEL_QUBITS: usize = 1_000_000;
+
 /// The accumulator threaded through a model's layers, in order, during
-/// compilation. Carries exactly the three things a layer's `plan` needs.
+/// compilation. Carries exactly the things a layer's `plan` needs.
 pub(crate) struct LayerContext {
     /// Live qubits, in logical order. Layers address logical positions of this
     /// list, not physical indices (design doc §6); pooling (a later phase)
@@ -64,24 +81,54 @@ pub(crate) struct LayerContext {
     /// compose on top of earlier gates). `compile` bumps it after every
     /// [`plan`](LayerOps::plan).
     pub(crate) layers_planned: usize,
+    /// The gates the layers planned so far emit, never above
+    /// [`MAX_MODEL_GATES`]. `plan` adds the layer's own through
+    /// [`reserve`](Self::reserve).
+    pub(crate) gate_count: usize,
 }
 
 impl LayerContext {
-    /// Reserve the next `count` global `θ` indices for the layer being planned:
-    /// advance [`param_cursor`](Self::param_cursor) past them and return their
-    /// range. If they do not fit in a `usize`, return
-    /// [`ValidationError::TooManyParams`] for that layer and leave the cursor
-    /// as it was.
-    pub(crate) fn reserve(&mut self, count: usize) -> Result<Range<usize>, ValidationError> {
-        let end = self
-            .param_cursor
-            .checked_add(count)
-            .ok_or(ValidationError::TooManyParams {
-                layer: self.layers_planned,
-            })?;
-        let params = self.param_cursor..end;
+    /// Account for the layer being planned: the `gates` its `emit_traced`
+    /// appends, and the next `params` global `θ` indices, which it returns.
+    /// `None` is a count that does not fit in a `usize`, which the layer
+    /// computes with `checked_*` arithmetic.
+    ///
+    /// On success, advance [`gate_count`](Self::gate_count) and
+    /// [`param_cursor`](Self::param_cursor) past the layer. Otherwise leave
+    /// both as they were and return [`ValidationError::ModelTooLarge`] for the
+    /// layer: [`SizeLimit::Overflow`] when its gates, or the model's with
+    /// them, do not fit in a `usize`, and [`SizeLimit::Budget`] when the
+    /// model's pass [`MAX_MODEL_GATES`].
+    pub(crate) fn reserve(
+        &mut self,
+        gates: Option<usize>,
+        params: Option<usize>,
+    ) -> Result<Range<usize>, ValidationError> {
+        let too_large = |reason| ValidationError::ModelTooLarge {
+            layer: self.layers_planned,
+            reason,
+        };
+        let gate_count = gates
+            .and_then(|gates| self.gate_count.checked_add(gates))
+            .ok_or(too_large(SizeLimit::Overflow))?;
+        if gate_count > MAX_MODEL_GATES {
+            return Err(too_large(SizeLimit::Budget {
+                gates: gate_count,
+                max_gates: MAX_MODEL_GATES,
+            }));
+        }
+        // Every layer computes its gates from its parameters, so a parameter
+        // count that overflows has already been refused above. And the cursor
+        // stays far below a `usize`: a layer reserves at most 4 θ more than
+        // it emits gates, and a slice of layers holds fewer than 2^61 of
+        // them. The check stays, so that no arithmetic here can wrap.
+        let end = params
+            .and_then(|params| self.param_cursor.checked_add(params))
+            .ok_or(too_large(SizeLimit::Overflow))?;
+        let range = self.param_cursor..end;
+        self.gate_count = gate_count;
         self.param_cursor = end;
-        Ok(params)
+        Ok(range)
     }
 }
 
@@ -303,11 +350,19 @@ impl QuantumModel {
     /// Checks the global invariants no single layer can see on its own, in
     /// order: at least one qubit ([`ValidationError::NoQubits`]), at least one
     /// layer ([`ValidationError::EmptyModel`]), a readout present
-    /// ([`ValidationError::MissingReadout`]), then each layer's `plan` (which
-    /// may raise e.g. [`ValidationError::NotEnoughQubits`]), that the model
-    /// reserved at least one trainable parameter
+    /// ([`ValidationError::MissingReadout`]), at most [`MAX_MODEL_QUBITS`]
+    /// qubits ([`ValidationError::TooManyQubits`]), then each layer's `plan`
+    /// (which may raise e.g. [`ValidationError::NotEnoughQubits`]), that the
+    /// model reserved at least one trainable parameter
     /// ([`ValidationError::NoTrainableParams`]), and finally that the readout
     /// resolves against the final active qubits (see `resolve_readout`).
+    ///
+    /// Each layer's `plan` counts the gates its emission appends, before any
+    /// of them exists, against [`MAX_MODEL_GATES`] for the whole model:
+    /// [`ValidationError::ModelTooLarge`] names the first layer that passes
+    /// it. Encoders are counted for `num_features` features (the basis encoder
+    /// as if every feature were `1.0`, its most gates); the readout's basis
+    /// change and the measurements are not counted.
     pub fn compile(self, num_features: usize) -> Result<CompiledModel, ValidationError> {
         if self.num_qubits < 1 {
             return Err(ValidationError::NoQubits);
@@ -364,11 +419,19 @@ pub(crate) fn plan_layers(
     layers: &[Layer],
     num_features: usize,
 ) -> Result<(Vec<LayerAllocation>, LayerContext), ValidationError> {
+    // Before the active set is built: it is one entry per qubit.
+    if num_qubits > MAX_MODEL_QUBITS {
+        return Err(ValidationError::TooManyQubits {
+            num_qubits,
+            max_qubits: MAX_MODEL_QUBITS,
+        });
+    }
     let mut ctx = LayerContext {
         active: (0..num_qubits).collect(),
         num_features,
         param_cursor: 0,
         layers_planned: 0,
+        gate_count: 0,
     };
     let mut allocations = Vec::with_capacity(layers.len());
     for layer in layers {
@@ -1065,45 +1128,208 @@ mod tests {
     }
 
     #[test]
-    fn reserve_hands_out_consecutive_ranges_until_they_overflow() {
+    fn reserve_counts_gates_and_params_until_a_limit() {
         let mut ctx = LayerContext {
             active: vec![0, 1],
             num_features: 0,
             param_cursor: 0,
             layers_planned: 2,
+            gate_count: 0,
         };
-        assert_eq!(ctx.reserve(3), Ok(0..3));
-        assert_eq!(ctx.reserve(0), Ok(3..3));
-        assert_eq!(ctx.reserve(usize::MAX - 3), Ok(3..usize::MAX));
-        assert_eq!(ctx.param_cursor, usize::MAX);
-        // Full: one more does not fit, and the error names the layer being
-        // planned and leaves the cursor where it was.
+        let too_large = |reason| Err(ValidationError::ModelTooLarge { layer: 2, reason });
+        assert_eq!(ctx.reserve(Some(5), Some(3)), Ok(0..3));
+        assert_eq!(ctx.reserve(Some(0), Some(0)), Ok(3..3));
+        assert_eq!(ctx.reserve(Some(3_999_995), Some(1)), Ok(3..4));
+        assert_eq!((ctx.gate_count, ctx.param_cursor), (4_000_000, 4));
+        // Full: one more gate passes the budget, and the error names the layer
+        // being planned and the count it would reach.
         assert_eq!(
-            ctx.reserve(1),
-            Err(ValidationError::TooManyParams { layer: 2 })
+            ctx.reserve(Some(1), Some(0)),
+            too_large(SizeLimit::Budget {
+                gates: 4_000_001,
+                max_gates: 4_000_000,
+            })
         );
-        assert_eq!(ctx.param_cursor, usize::MAX);
-        assert_eq!(ctx.reserve(0), Ok(usize::MAX..usize::MAX));
+        // A count that does not fit in a usize, on its own (`None`) or after
+        // the gates before it, is an overflow, never a budget a saturated sum
+        // would report.
+        assert_eq!(ctx.reserve(None, Some(0)), too_large(SizeLimit::Overflow));
+        assert_eq!(
+            ctx.reserve(Some(usize::MAX - 3_999_999), Some(0)),
+            too_large(SizeLimit::Overflow)
+        );
+        assert_eq!(ctx.reserve(Some(0), None), too_large(SizeLimit::Overflow));
+        // Nothing refused was counted.
+        assert_eq!((ctx.gate_count, ctx.param_cursor), (4_000_000, 4));
+        assert_eq!(ctx.reserve(Some(0), Some(0)), Ok(4..4));
+        // The θ cursor overflows the same way, and moves neither count.
+        ctx.param_cursor = usize::MAX;
+        ctx.gate_count = 0;
+        assert_eq!(
+            ctx.reserve(Some(2), Some(1)),
+            too_large(SizeLimit::Overflow)
+        );
+        assert_eq!((ctx.gate_count, ctx.param_cursor), (0, usize::MAX));
     }
 
     #[test]
-    fn compile_rejects_a_layer_whose_parameters_no_longer_fit() {
-        // 2 qubits × (2^63 − 1) blocks of one `Rx` = usize::MAX − 1 parameters,
-        // which still fit; the 4 of the convolution after them do not.
-        let ansatz = HardwareEfficientAnsatz {
-            rotations: vec![RotationAxis::Rx],
-            final_rotation_layer: false,
-            ..HardwareEfficientAnsatz::new(usize::MAX / 2)
-        };
-        let fits = QuantumModel::new(2)
-            .layer(Layer::HardwareEfficient(ansatz))
-            .readout(z0_readout());
+    fn compile_refuses_a_layer_past_the_gate_budget() {
+        // `[Ry, Rz]` on 2 qubits over 2^40 + 1 blocks, and one `Cx` per
+        // entangling block: 4·(2^40 + 1) + 2^40 gates.
+        let err = QuantumModel::new(2)
+            .hardware_efficient(1 << 40)
+            .readout(z0_readout())
+            .compile(0)
+            .unwrap_err();
         assert_eq!(
-            fits.clone().compile(0).unwrap().num_params(),
-            usize::MAX - 1
+            err,
+            ValidationError::ModelTooLarge {
+                layer: 0,
+                reason: SizeLimit::Budget {
+                    gates: 5_497_558_138_884,
+                    max_gates: MAX_MODEL_GATES,
+                },
+            }
         );
-        let err = fits.conv(ConvBlock::Basic).compile(0).unwrap_err();
-        assert_eq!(err, ValidationError::TooManyParams { layer: 1 });
+        // With no rotation at all the entanglers alone pass it: 2^40 `Cx`
+        // after the 5 gates of a `real_amplitudes(1)`.
+        let entanglers_only = HardwareEfficientAnsatz {
+            rotations: vec![],
+            ..HardwareEfficientAnsatz::new(1 << 40)
+        };
+        let err = QuantumModel::new(2)
+            .layer(Layer::HardwareEfficient(
+                HardwareEfficientAnsatz::real_amplitudes(1),
+            ))
+            .layer(Layer::HardwareEfficient(entanglers_only))
+            .readout(z0_readout())
+            .compile(0)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::ModelTooLarge {
+                layer: 1,
+                reason: SizeLimit::Budget {
+                    gates: 1_099_511_627_781,
+                    max_gates: MAX_MODEL_GATES,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn compile_tells_an_overflow_from_the_budget() {
+        // usize::MAX gates on one qubit (`reps + 1` rotations): within a usize
+        // on their own, past it after the `Ry` of a `real_amplitudes(0)`.
+        let huge =
+            Layer::HardwareEfficient(HardwareEfficientAnsatz::real_amplitudes(usize::MAX - 1));
+        let err = QuantumModel::new(1)
+            .layer(huge.clone())
+            .readout(z0_readout())
+            .compile(0)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::ModelTooLarge {
+                layer: 0,
+                reason: SizeLimit::Budget {
+                    gates: usize::MAX,
+                    max_gates: MAX_MODEL_GATES,
+                },
+            }
+        );
+        let err = QuantumModel::new(1)
+            .layer(Layer::HardwareEfficient(
+                HardwareEfficientAnsatz::real_amplitudes(0),
+            ))
+            .layer(huge)
+            .readout(z0_readout())
+            .compile(0)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::ModelTooLarge {
+                layer: 1,
+                reason: SizeLimit::Overflow,
+            }
+        );
+        // A count that does not fit even on its own.
+        let err = QuantumModel::new(2)
+            .strongly_entangling(usize::MAX)
+            .readout(z0_readout())
+            .compile(0)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::ModelTooLarge {
+                layer: 0,
+                reason: SizeLimit::Overflow,
+            }
+        );
+    }
+
+    #[test]
+    fn compile_takes_exactly_the_gate_budget() {
+        // One qubit, one `Ry` per block, no pair: `reps + 1` gates.
+        let model = |reps| {
+            QuantumModel::new(1)
+                .layer(Layer::HardwareEfficient(
+                    HardwareEfficientAnsatz::real_amplitudes(reps),
+                ))
+                .readout(z0_readout())
+        };
+        let compiled = model(MAX_MODEL_GATES - 1).compile(0).unwrap();
+        assert_eq!(compiled.num_params(), MAX_MODEL_GATES);
+        let (qc, _) = emit_layers(1, &compiled.spec.layers, &compiled.allocations, &[]).unwrap();
+        assert_eq!(qc.gates().len(), MAX_MODEL_GATES);
+        assert_eq!(
+            model(MAX_MODEL_GATES).compile(0).unwrap_err(),
+            ValidationError::ModelTooLarge {
+                layer: 0,
+                reason: SizeLimit::Budget {
+                    gates: MAX_MODEL_GATES + 1,
+                    max_gates: MAX_MODEL_GATES,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn compile_refuses_more_than_max_model_qubits() {
+        let model = |num_qubits| {
+            QuantumModel::new(num_qubits)
+                .layer(Layer::HardwareEfficient(
+                    HardwareEfficientAnsatz::real_amplitudes(0),
+                ))
+                .readout(z0_readout())
+        };
+        for num_qubits in [MAX_MODEL_QUBITS + 1, usize::MAX] {
+            assert_eq!(
+                model(num_qubits).compile(0).unwrap_err(),
+                ValidationError::TooManyQubits {
+                    num_qubits,
+                    max_qubits: 1_000_000,
+                }
+            );
+        }
+        // The limit itself compiles: one `Ry` per qubit.
+        let compiled = model(MAX_MODEL_QUBITS).compile(0).unwrap();
+        assert_eq!(compiled.num_params(), MAX_MODEL_QUBITS);
+    }
+
+    #[test]
+    fn compile_pools_max_model_qubits() {
+        let compiled = QuantumModel::new(MAX_MODEL_QUBITS)
+            .layer(Layer::HardwareEfficient(
+                HardwareEfficientAnsatz::real_amplitudes(0),
+            ))
+            .pool(PoolBlock::Basic)
+            .pool(PoolBlock::Basic)
+            .readout(z0_readout())
+            .compile(0)
+            .unwrap();
+        assert_eq!(compiled.num_params(), MAX_MODEL_QUBITS + 6);
+        assert_eq!(compiled.allocations[2].active.len(), MAX_MODEL_QUBITS / 2);
     }
 
     #[test]
@@ -1875,7 +2101,7 @@ mod serde_tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("layer 1 needs more trainable parameters"),
+            err.contains("layer 1 needs more gates than fit in a usize"),
             "{err}"
         );
     }
@@ -1918,19 +2144,28 @@ mod serde_tests {
     #[test]
     fn loading_rejects_a_reps_too_large_to_count() {
         // full_model's hardware-efficient layer (index 4) runs on the 2 qubits
-        // left after pooling: 2 axes × 2 qubits × (2^63 + 1) blocks overflow.
-        let err = load_edited(|v| {
-            let layer = v["spec"]["layers"]
-                .as_array_mut()
-                .unwrap()
-                .iter_mut()
-                .find_map(|layer| layer.get_mut("HardwareEfficient"))
-                .expect("full_model has a hardware-efficient layer");
-            layer["reps"] = serde_json::json!(usize::MAX / 2 + 1);
-        })
-        .unwrap_err();
+        // left after pooling: 2 axes × 2 qubits × (2^63 + 1) blocks overflow…
+        let with_reps = |reps: usize| {
+            load_edited(|v| {
+                let layer = v["spec"]["layers"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find_map(|layer| layer.get_mut("HardwareEfficient"))
+                    .expect("full_model has a hardware-efficient layer");
+                layer["reps"] = serde_json::json!(reps);
+            })
+            .unwrap_err()
+        };
+        let err = with_reps(usize::MAX / 2 + 1);
         assert!(
-            err.contains("layer 4 needs more trainable parameters"),
+            err.contains("layer 4 needs more gates than fit in a usize"),
+            "{err}"
+        );
+        // …while 2^40 blocks fit in a usize but not in the gate budget.
+        let err = with_reps(1 << 40);
+        assert!(
+            err.contains("layer 4 takes the model to") && err.contains("past the limit of 4000000"),
             "{err}"
         );
     }
